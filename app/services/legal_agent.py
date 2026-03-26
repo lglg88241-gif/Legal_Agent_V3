@@ -8,7 +8,7 @@ from app.database.neo4j_mgr import neo4j_mgr
 from app.database.chroma_mgr import chroma_mgr
 from app.services.llm_service import llm_service
 from app.memory.redis_mgr import memory_mgr
-
+from langgraph.checkpoint.memory import MemorySaver
 logger = logging.getLogger(__name__)
 
 _reranker_instance = None
@@ -49,8 +49,10 @@ class LegalGraphAgent:
         self.workflow.add_edge("advisor", END)
         
         # 🌟 编译图并注入 Redis 记忆云脑
-        self.app = self.workflow.compile(checkpointer=memory_mgr)
-
+        # 🌟 核心修复：暂时屏蔽旧版 Redis 记忆，换上官方内存引擎确保连通性
+        # self.app = self.workflow.compile(checkpointer=memory_mgr)
+        self.memory_saver = MemorySaver()
+        self.app = self.workflow.compile(checkpointer=self.memory_saver)
     async def semantic_router_node(self, state: AgentState) -> AgentState:
         # 简单路由逻辑
         state["intent"] = "vector_researcher"

@@ -1,0 +1,12 @@
+# 环境与秘钥
+.env
+.venv/
+venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 数据库存储
+chroma_data/

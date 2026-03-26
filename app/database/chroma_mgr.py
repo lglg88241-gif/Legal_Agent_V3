@@ -1,7 +1,8 @@
 # app/database/chroma_mgr.py
 import logging
 import asyncio
-from langchain_community.vectorstores import Chroma
+# 🌟 换成全新的 langchain_chroma，消除烦人的警告
+from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
 from app.core.config import settings
 

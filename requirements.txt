@@ -1,0 +1,38 @@
+# ==========================================
+# Legal Agent V3 终极依赖清单 (专为 uv 优化)
+# ==========================================
+
+# ===== 1. 核心 Web 框架 (同步系统二的高版本) =====
+fastapi>=0.135.1
+uvicorn[standard]>=0.41.0
+pydantic>=2.12.5
+pydantic-settings>=2.13.1
+python-dotenv>=1.2.2
+
+# ===== 2. 核心大模型与多智能体大脑 =====
+openai>=2.24.0
+langgraph>=1.0.10
+langchain-core>=1.2.17
+langchain-community
+langchain-huggingface
+langchain-text-splitters
+
+# ===== 3. 三大底层数据库与异步驱动 =====
+SQLAlchemy>=2.0.48
+aiomysql>=0.3.2
+PyMySQL>=1.1.2
+redis>=7.2.1
+neo4j>=6.1.0
+chromadb>=1.5.2
+
+# ===== 4. 深度学习与本地精排 (保留系统一/二的基石) =====
+torch>=2.0.0
+sentence-transformers
+transformers>=5.2.0
+numpy>=1.24.0
+
+# ===== 5. 核心工具与可视化大屏支持 =====
+json-repair            # 极其关键：防弹 JSON 解析
+networkx>=3.4.2        # 图谱计算基础
+pyvis>=0.3.0           # 为后续前端图谱拓扑图提供数据结构支持
+pandas>=2.3.3          # 为后续图表大屏做数据聚合

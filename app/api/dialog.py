@@ -1,57 +1,45 @@
 # app/api/dialog.py
-import time, logging, json
-import redis.asyncio as redis
+import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.services.legal_agent import legal_agent
-from app.core.config import settings
+from celery.result import AsyncResult
+# 引入刚写好的 Celery 任务
+from app.celery_app import ask_agent_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 class DialogRequest(BaseModel):
     user_input: str
     session_id: str
 
+# 1. 提交问题，秒回 Task ID (取餐码)
 @router.post("/dialog")
 async def process_dialog(request: DialogRequest):
-    start_time = time.time()
     try:
-        # 1. 呼叫 LangGraph 大脑
-        answer = await legal_agent.ask(request.session_id, request.user_input)
-        latency_ms = int((time.time() - start_time) * 1000)
+        # 🌟 核心转变：不再等待大模型，直接把任务扔进 Redis 队列
+        task = ask_agent_task.apply_async(args=[request.session_id, request.user_input])
+        logger.info(f"✅ 任务已投递至队列 | Session: {request.session_id} | TaskID: {task.id}")
         
-        # 2. 🌟 构造前端 ChatMessage.vue 期望的 UI 渲染数据
-        agent_actions = [
-            {"tool": "semantic_router", "result_summary": "意图识别为法律咨询"},
-            {"tool": "vector_researcher", "result_summary": "触发 ChromaDB 双路召回与 Neo4j 交叉验证"},
-            {"tool": "legal_advisor", "result_summary": "结合上下文生成专业回复"}
-        ]
-        
-        # 3. 记录历史供前端刷新时读取 (简化版双写机制)
-        history_item = {
-            "user_input": request.user_input, 
-            "system_response": answer, 
-            "timestamp": time.time(),
-            "agent_actions": agent_actions # 一并存入，保证刷新不丢动效
-        }
-        await redis_client.rpush(f"frontend_history:{request.session_id}", json.dumps(history_item))
-        
-        logger.info(f"📊 [Metrics] session:{request.session_id} | latency:{latency_ms}ms")
-        
+        # 返回取餐码
         return {
-            "response": answer,
-            "agent_actions": agent_actions, 
-            "sources": [], # 如果有提取到具体法条，可在此处组装
-            "latency_ms": latency_ms
+            "task_id": task.id,
+            "status": "processing",
+            "message": "任务已受理，AI正在后台为您分析"
         }
     except Exception as e:
-        logger.error(f"对话异常: {e}")
-        raise HTTPException(status_code=500, detail="系统繁忙")
+        logger.error(f"任务投递失败: {e}")
+        raise HTTPException(status_code=500, detail="队列系统繁忙")
 
-@router.delete("/dialog/{session_id}")
-async def reset_dialog(session_id: str):
-    await redis_client.delete(f"frontend_history:{session_id}")
-    await redis_client.delete(f"checkpoint:{session_id}")
-    return {"status": "success"}
+# 2. 前端拿取餐码来轮询结果的接口
+@router.get("/dialog/status/{task_id}")
+async def get_task_status(task_id: str):
+    task_result = AsyncResult(task_id)
+    
+    if task_result.state == 'PENDING' or task_result.state == 'STARTED':
+        return {"status": "processing"}
+    elif task_result.state == 'SUCCESS':
+        # 任务完成，返回 Celery 里拼装好的完整数据
+        return {"status": "completed", "data": task_result.result}
+    else:
+        return {"status": "failed", "error": str(task_result.info)}
