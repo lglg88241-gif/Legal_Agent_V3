@@ -10,7 +10,12 @@ load_dotenv()
 class Settings:
     LLM_MODE = os.getenv("LLM_MODE", "mock")
     API_KEY = os.getenv("API_KEY", "EMPTY")
-    BASE_URL = os.getenv("BASE_URL", "http://localhost:8000/v1")
+    # 默认值改成 8001，防止 .env 没读到时出错
+    BASE_URL = os.getenv("BASE_URL", "http://localhost:8001/v1") 
+    
+    # 🌟 新增这一行，把模型名字接进来
+    LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen/Qwen1.5-1.8B-Chat-AWQ")
+    
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "12345678")
