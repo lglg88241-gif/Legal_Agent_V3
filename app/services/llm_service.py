@@ -26,7 +26,7 @@ class LLMService:
             
         try:
             response = await self.client.chat.completions.create(
-                model="qwen-plus", # 可根据实际部署的模型名称调整
+                model=settings.LLM_MODEL_NAME, # 可根据实际部署的模型名称调整
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
