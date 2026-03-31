@@ -19,7 +19,7 @@ class Settings:
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
     NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "12345678")
-    MYSQL_URL = os.getenv("MYSQL_URL", "mysql+aiomysql://root:password@localhost:3306/legal_db")
+    MYSQL_URL = os.getenv("MYSQL_URL", "mysql+aiomysql://root:200467@127.0.0.1:3306/legal_db")
     REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
     CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
     EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH", "BAAI/bge-small-zh-v1.5")
