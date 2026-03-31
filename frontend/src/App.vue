@@ -119,7 +119,7 @@ onMounted(() => {
 async function checkHealth() {
   try {
     const { data } = await healthCheck()
-    systemStatus.healthy = data.status === 'healthy'
+    systemStatus.healthy = data.status === 'online'
     systemStatus.model = data.model || ''
     systemStatus.tools = data.tools || []
   } catch {
@@ -127,7 +127,7 @@ async function checkHealth() {
   }
   try {
     const { data } = await getKnowledgeStatus()
-    systemStatus.ragReady = data.status === 'ready'
+    systemStatus.ragReady = data.status === 'online' && data.loaded === true
     systemStatus.docCount = data.doc_count || 0
   } catch {
     systemStatus.ragReady = false

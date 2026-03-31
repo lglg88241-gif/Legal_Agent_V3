@@ -1,42 +1,55 @@
 # app/api/feedback.py
 import logging
-import time
-from fastapi import APIRouter
-from pydantic import BaseModel
-from app.database.mysql_db import engine
-from sqlalchemy import text
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database.models import Feedback
+from app.database.mysql_db import engine, get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 🌟 严格对标前端 AnalysisPanel.vue emits 的反馈数据
+
 class FeedbackRequest(BaseModel):
-    session_id: str
-    rating: int
+    session_id: str = Field(..., min_length=1, max_length=255)
+    rating: int = Field(..., ge=1, le=5)
     comment: str = ""
-    # 兼容前端可能传的其他字段
     turn_index: int = 0
     feedback_type: str = "general"
 
-@router.post("/feedback")
-async def submit_feedback(req: FeedbackRequest):
+
+async def ensure_feedback_table() -> None:
     async with engine.begin() as conn:
-        # 建表：专为论文数据可视化准备
-        await conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS system_feedback (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                session_id VARCHAR(255), 
-                rating INT, 
-                comment TEXT,
-                feedback_type VARCHAR(50), 
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        '''))
-        # 插入真实的反馈数据
-        await conn.execute(text('''
-            INSERT INTO system_feedback (session_id, rating, comment, feedback_type)
-            VALUES (:sid, :rating, :comment, :type)
-        '''), {"sid": req.session_id, "rating": req.rating, "comment": req.comment, "type": req.feedback_type})
-    
-    logger.info(f"📈 [MySQL埋点] 收到用户真实评分: {req.rating} 星 | 评论: {req.comment}")
-    return {"status": "success"}
+        await conn.run_sync(Feedback.__table__.create, checkfirst=True)
+
+
+@router.post("/feedback")
+async def submit_feedback(
+    req: FeedbackRequest, db: AsyncSession = Depends(get_db)
+):
+    try:
+        await ensure_feedback_table()
+
+        feedback = Feedback(
+            session_id=req.session_id,
+            rating=req.rating,
+            comment=req.comment,
+            turn_index=req.turn_index,
+            feedback_type=req.feedback_type,
+        )
+        db.add(feedback)
+        await db.commit()
+
+        logger.info(
+            "Stored feedback in MySQL | session_id=%s rating=%s type=%s",
+            req.session_id,
+            req.rating,
+            req.feedback_type,
+        )
+        return {"status": "success"}
+    except Exception:
+        await db.rollback()
+        logger.exception("Failed to store feedback in MySQL")
+        raise HTTPException(status_code=500, detail="Failed to store feedback")
