@@ -28,16 +28,18 @@ def ask_agent_task(self, session_id: str, question: str):
     try:
         answer = asyncio.run(legal_agent.ask(session_id, question))
         latency_ms = int((time.time() - start_time) * 1000)
+        response_text = answer["response"] if isinstance(answer, dict) else str(answer)
+        response_sources = answer.get("sources", []) if isinstance(answer, dict) else []
 
         return {
             "status": "success",
-            "response": answer,
+            "response": response_text,
             "agent_actions": [
                 {"tool": "tool_router", "result_summary": "多路召回路由判定完成"},
                 {"tool": "retrieval_tools", "result_summary": "Chroma 与 Neo4j 检索完成"},
                 {"tool": "legal_advisor", "result_summary": "基于检索结果生成最终法律分析"},
             ],
-            "sources": [],
+            "sources": response_sources,
             "latency_ms": latency_ms,
         }
     except Exception as exc:

@@ -14,7 +14,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 ROUTER_PROMPT = """
-你是一个高精度的意图识别路由引擎。你的唯一任务是判断用户问题需要调用哪些检索工具，并严格返回 JSON。
+你是一个高精度的意图识别路由引擎。你的唯一任务是判断用户问题需要调用哪些检索工具，并且只返回 JSON。
 
 可用工具：
 1. search_law_articles(query: str)
@@ -27,10 +27,10 @@ ROUTER_PROMPT = """
 3. 只要用户提到具体当事人、公司名称、案由、罪名、判决结果线索，必须调用 query_neo4j_graph。
 4. 当用户问题同时包含“法律定性/咨询”和“找案例”两类意图时，你必须同时返回 search_law_articles 和 search_case_text；如果问题里还出现当事人、罪名、案由等实体线索，还必须一并返回 query_neo4j_graph。
 
-【核心规则】：
+核心规则：
 当用户的提问同时包含“法律定性/咨询”（如：算不算、怎么判、量刑标准）和“找案例”（如：有没有案例、实际案例）时，你必须同时在 JSON 数组中输出法条检索工具 search_law_articles 和案例检索工具 search_case_text 或 query_neo4j_graph。
 
-【绝对禁止】：
+绝对禁止：
 1. 遇到复合问题时，绝不能只调用单一工具。
 2. 绝不能输出 JSON 以外的解释、前后缀或 Markdown。
 
@@ -45,7 +45,10 @@ ROUTER_PROMPT = """
 """.strip()
 
 EXPERT_SYSTEM_PROMPT = """
-你是一个严谨的中国执业律师。你必须严格依据提供的检索内容回答，绝不捏造法条或金额。引用案例时必须写出具体判决结果。若检索内容无关，直接回答未找到依据。
+你是一个严谨的中国执业律师。你必须严格依据提供的检索内容回答，绝不捏造法条、案例、金额或文件名。
+引用案例时必须写出具体判决结果。若检索内容无关，直接回答未找到依据。
+你必须只返回 JSON，对象格式固定为 {"answer":"...","sources":["..."]}。
+sources 只能填写检索结果中真实出现过的来源文件名，不能新增、改写或猜测。
 """.strip()
 
 TOOL_REGISTRY = {tool.name: tool for tool in AGENT_TOOLS}
@@ -56,14 +59,11 @@ GRAPH_TOOL = "query_neo4j_graph"
 
 class LegalGraphAgent:
     def __init__(self):
-        # Local model: keep it for fast routing and low-cost tool planning.
         self.local_client = AsyncOpenAI(
             api_key=settings.API_KEY,
             base_url=settings.BASE_URL,
         )
         self.local_model_name = settings.LLM_MODEL_NAME
-
-        # Expert model: only used for final legal analysis generation.
         self.expert_llm = ChatZhipuAI(
             model="glm-4",
             api_key=settings.ZHIPUAI_API_KEY,
@@ -83,7 +83,68 @@ class LegalGraphAgent:
         )
         return response.choices[0].message.content or ""
 
-    async def _generate_final_answer(self, question: str, tool_results: list[dict[str, Any]]) -> str:
+    def _extract_candidate_sources(self, tool_results: list[dict[str, Any]]) -> list[str]:
+        sources: list[str] = []
+        seen: set[str] = set()
+
+        for item in tool_results:
+            try:
+                parsed = json.loads(item["result"])
+            except Exception:
+                continue
+
+            if not isinstance(parsed, list):
+                continue
+
+            for entry in parsed:
+                if not isinstance(entry, dict):
+                    continue
+                source = entry.get("source")
+                if not source and isinstance(entry.get("metadata"), dict):
+                    source = entry["metadata"].get("source")
+                if not isinstance(source, str):
+                    continue
+                cleaned = source.strip()
+                if not cleaned or cleaned in seen:
+                    continue
+                seen.add(cleaned)
+                sources.append(cleaned)
+
+        return sources
+
+    def _normalize_sources(self, value: Any, candidate_sources: list[str]) -> list[str]:
+        if isinstance(value, str):
+            raw_sources = [value]
+        elif isinstance(value, list):
+            raw_sources = [item for item in value if isinstance(item, str)]
+        else:
+            raw_sources = []
+
+        allowed = {source: source for source in candidate_sources}
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for source in raw_sources:
+            cleaned = source.strip()
+            if not cleaned:
+                continue
+            matched = allowed.get(cleaned)
+            if not matched or matched in seen:
+                continue
+            seen.add(matched)
+            normalized.append(matched)
+
+        if normalized:
+            return normalized
+
+        return candidate_sources[:5]
+
+    async def _generate_final_answer(
+        self,
+        question: str,
+        tool_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        candidate_sources = self._extract_candidate_sources(tool_results)
         context_blocks = []
         for item in tool_results:
             context_blocks.append(
@@ -92,16 +153,37 @@ class LegalGraphAgent:
 
         user_prompt = (
             f"用户问题：{question}\n\n"
+            f"可用来源文件：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
             f"以下是全部检索上下文：\n{chr(10).join(context_blocks)}\n\n"
-            "请严格依据这些检索结果给出法律分析。"
+            '请基于这些内容回答，并严格返回 JSON：{"answer":"...","sources":["..."]}。'
+            "如果检索结果不足以支持回答，就在 answer 中明确写“未找到依据”，sources 返回空数组。"
         )
+
         response = await self.expert_llm.ainvoke(
             [
                 SystemMessage(content=EXPERT_SYSTEM_PROMPT),
                 HumanMessage(content=user_prompt),
             ]
         )
-        return response.content if isinstance(response.content, str) else str(response.content)
+        raw_content = response.content if isinstance(response.content, str) else str(response.content)
+
+        try:
+            parsed = json.loads(repair_json(raw_content))
+            answer = parsed.get("answer") or parsed.get("response") or ""
+            sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
+            if isinstance(answer, str) and answer.strip():
+                return {
+                    "response": answer.strip(),
+                    "sources": sources,
+                }
+        except Exception as exc:
+            logger.warning("Failed to parse expert response as JSON: %s", exc)
+
+        fallback_response = raw_content.strip() if raw_content.strip() else "未找到依据。"
+        return {
+            "response": fallback_response,
+            "sources": candidate_sources[:5],
+        }
 
     def _detect_intents(self, question: str) -> dict[str, bool]:
         lowered = question.lower()
@@ -136,9 +218,9 @@ class LegalGraphAgent:
             "类似案例",
         ]
         graph_keywords = [
-            "诉",
+            "案由",
             "纠纷",
-            "罪",
+            "罪名",
             "原告",
             "被告",
             "公司",
@@ -261,7 +343,7 @@ class LegalGraphAgent:
         ]
         return await asyncio.gather(*tasks)
 
-    async def ask(self, session_id: str, question: str) -> str:
+    async def ask(self, session_id: str, question: str) -> dict[str, Any]:
         del session_id
 
         tool_calls = await self._route_tools(question)

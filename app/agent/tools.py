@@ -28,10 +28,12 @@ LIMIT 5
 def _serialize_documents(results: list[tuple[Any, float]]) -> str:
     payload = []
     for document, score in results:
+        metadata = document.metadata or {}
         payload.append(
             {
                 "content": document.page_content,
-                "metadata": document.metadata,
+                "source": metadata.get("source", ""),
+                "metadata": metadata,
                 "score": score,
             }
         )
