@@ -4,23 +4,14 @@ import logging
 from typing import Any
 
 from json_repair import repair_json
+from langchain_community.chat_models import ChatZhipuAI
+from langchain_core.messages import HumanMessage, SystemMessage
 from openai import AsyncOpenAI
 
 from app.agent.tools import AGENT_TOOLS
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """
-你是一个专业的法律 AI 助手。
-
-工作规则：
-1. 遇到法条问题，必须调用 search_law_articles。
-2. 遇到查询历史案例、案情比对、裁判思路分析时，必须综合使用 search_case_text 和 query_neo4j_graph。
-3. query_neo4j_graph 只接受实体名、当事人名称、罪名或案由关键词，禁止自行编写 Cypher。
-4. 最终回答必须严格基于工具返回结果作答；如果工具结果不足，明确说明证据不足或检索结果有限。
-5. 回答保持严谨、简洁，优先引用检索到的法条要点、案例事实和裁判结论。
-""".strip()
 
 ROUTER_PROMPT = """
 你是法律检索路由器。请根据用户问题决定要调用哪些工具，并严格返回 JSON。
@@ -47,33 +38,93 @@ ROUTER_PROMPT = """
 }
 """.strip()
 
+EXPERT_SYSTEM_PROMPT = """
+你是一个严谨的中国执业律师。你必须严格依据提供的检索内容回答，绝不捏造法条或金额。引用案例时必须写出具体判决结果。若检索内容无关，直接回答未找到依据。
+""".strip()
+
 TOOL_REGISTRY = {tool.name: tool for tool in AGENT_TOOLS}
 
 
 class LegalGraphAgent:
     def __init__(self):
-        self.client = AsyncOpenAI(
+        # Local model: keep it for fast routing and low-cost tool planning.
+        self.local_client = AsyncOpenAI(
             api_key=settings.API_KEY,
             base_url=settings.BASE_URL,
         )
-        self.model_name = settings.LLM_MODEL_NAME
+        self.local_model_name = settings.LLM_MODEL_NAME
 
-    async def _chat(self, messages: list[dict[str, str]], max_tokens: int = 1024) -> str:
-        response = await self.client.chat.completions.create(
-            model=self.model_name,
+        # Expert model: only used for final legal analysis generation.
+        self.expert_llm = ChatZhipuAI(
+            model="glm-4",
+            api_key=settings.ZHIPUAI_API_KEY,
+            temperature=0.1,
+        )
+
+    async def _chat_with_local_model(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int = 1024,
+    ) -> str:
+        response = await self.local_client.chat.completions.create(
+            model=self.local_model_name,
             messages=messages,
             temperature=0.1,
             max_tokens=max_tokens,
         )
         return response.choices[0].message.content or ""
 
+    async def _generate_final_answer(self, question: str, tool_results: list[dict[str, Any]]) -> str:
+        user_prompt = (
+            f"用户问题：{question}\n\n"
+            f"以下是检索工具返回结果（JSON）：\n"
+            f"{json.dumps(tool_results, ensure_ascii=False)}\n\n"
+            "请严格依据这些检索结果给出法律分析。"
+        )
+        response = await self.expert_llm.ainvoke(
+            [
+                SystemMessage(content=EXPERT_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt),
+            ]
+        )
+        return response.content if isinstance(response.content, str) else str(response.content)
+
     def _fallback_routes(self, question: str) -> list[dict[str, Any]]:
         routes: list[dict[str, Any]] = []
         lowered = question.lower()
 
-        law_keywords = ["法条", "法律", "法规", "量刑", "依据", "民法典", "刑法", "劳动合同法", "消费者权益"]
-        case_keywords = ["案例", "类案", "判决", "案情", "作案手法", "历史案例", "指导案例", "裁判"]
-        graph_keywords = ["诉", "纠纷", "罪", "原告", "被告", "公司", "劳动争议", "逃税", "合同纠纷"]
+        law_keywords = [
+            "法条",
+            "法律",
+            "法规",
+            "量刑",
+            "依据",
+            "民法典",
+            "刑法",
+            "劳动合同法",
+            "消费者权益",
+        ]
+        case_keywords = [
+            "案例",
+            "类案",
+            "判决",
+            "案情",
+            "作案手法",
+            "历史案例",
+            "指导案例",
+            "裁判",
+        ]
+        graph_keywords = [
+            "诉",
+            "纠纷",
+            "罪",
+            "原告",
+            "被告",
+            "公司",
+            "劳动争议",
+            "逃税",
+            "合同纠纷",
+        ]
 
         if any(keyword in question for keyword in law_keywords):
             routes.append({"name": "search_law_articles", "arguments": {"query": question}})
@@ -90,7 +141,7 @@ class LegalGraphAgent:
 
     async def _route_tools(self, question: str) -> list[dict[str, Any]]:
         try:
-            content = await self._chat(
+            content = await self._chat_with_local_model(
                 [
                     {"role": "system", "content": ROUTER_PROMPT},
                     {"role": "user", "content": question},
@@ -133,18 +184,7 @@ class LegalGraphAgent:
         for call in tool_calls:
             tool_results.append(await self._execute_tool_call(call["name"], call["arguments"]))
 
-        answer_prompt = (
-            f"用户问题：{question}\n\n"
-            f"以下是检索工具返回结果（JSON）：\n"
-            f"{json.dumps(tool_results, ensure_ascii=False)}\n\n"
-            "请基于这些结果给出严谨的中文法律分析。如果结果不足，请明确指出。"
-        )
-        return await self._chat(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": answer_prompt},
-            ]
-        )
+        return await self._generate_final_answer(question, tool_results)
 
 
 legal_agent = LegalGraphAgent()
