@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 CORPUS_DIR = PROJECT_ROOT / "data" / "corpus"
-CHROMA_CASES_COLLECTION = "legal_cases_collection"
+CHROMA_CASES_COLLECTION = settings.CHROMA_CASES_COLLECTION
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 100
 

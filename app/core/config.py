@@ -23,7 +23,9 @@ class Settings:
     REDIS_URL = os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0")
     CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_data")
     CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "legal_knowledge_base")
+    CHROMA_CASES_COLLECTION = os.getenv("CHROMA_CASES_COLLECTION", "legal_cases_collection")
     EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH", "BAAI/bge-small-zh-v1.5")
     RERANKER_MODEL_PATH = os.getenv("RERANKER_MODEL_PATH", "BAAI/bge-reranker-v2-m3")
+    ZHIPUAI_API_KEY = os.getenv("ZHIPUAI_API_KEY", "84c9a3a5eea144b38f593498d99772f5.GWTRJwSjsmSifPFJ")
 
 settings = Settings()

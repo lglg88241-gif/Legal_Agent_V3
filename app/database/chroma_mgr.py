@@ -39,7 +39,7 @@ class ChromaManager:
             )
 
             self.case_vectorstore = Chroma(
-                collection_name="legal_cases_collection",
+                collection_name=settings.CHROMA_CASES_COLLECTION,
                 embedding_function=self.embeddings,
                 persist_directory=persist_directory,
             )
