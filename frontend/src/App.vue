@@ -50,13 +50,15 @@
           <div class="init-card">
             <el-icon class="init-icon rotating"><Loading /></el-icon>
             <div class="init-title">系统初始化中...</div>
-            <div class="init-subtitle">正在预热向量库、Neo4j、本地模型与 Celery，请稍候。</div>
+            <div class="init-subtitle">
+              正在预热向量库、Neo4j、本地模型与 Celery，请稍候。
+            </div>
           </div>
         </div>
 
         <el-scrollbar ref="scrollRef" class="chat-scroll">
           <div class="message-list" ref="messageListRef">
-            <ChatMessage v-for="(m, i) in messages" :key="i" :msg="m" />
+            <ChatMessage v-for="(message, index) in messages" :key="index" :msg="message" />
             <div v-if="sending" class="chat-message bot-msg loading-msg">
               <div class="avatar">
                 <el-avatar :size="36" style="background: #67c23a">
@@ -93,11 +95,18 @@
         </div>
       </el-main>
 
-      <el-aside width="260px" class="side-panel right-panel">
+      <el-aside
+        :width="graphSidebarCollapsed ? '72px' : '360px'"
+        class="side-panel right-panel"
+        :class="{ collapsed: graphSidebarCollapsed }"
+      >
         <AnalysisPanel
           :status="systemStatus"
           :analysis="currentAnalysis"
+          :graph="currentGraph"
+          :collapsed="graphSidebarCollapsed"
           @feedback="handleFeedback"
+          @toggle-sidebar="graphSidebarCollapsed = !graphSidebarCollapsed"
         />
       </el-aside>
     </el-container>
@@ -111,6 +120,7 @@ import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import SessionList from './components/SessionList.vue'
 import {
+  getGraphSubgraph,
   getSummary,
   getSystemStatus,
   resetDialog,
@@ -128,6 +138,8 @@ const scrollRef = ref(null)
 const messageListRef = ref(null)
 const turnIndex = ref(0)
 const statusTimer = ref(null)
+const graphSidebarCollapsed = ref(false)
+const latestGraphRequestId = ref(0)
 
 const systemStatus = reactive({
   status: 'loading',
@@ -146,6 +158,15 @@ const systemStatus = reactive({
 })
 
 const currentAnalysis = reactive({ actions: [], sources: [] })
+const currentGraph = reactive({
+  query: '',
+  nodes: [],
+  edges: [],
+  tokens: [],
+  generatedAt: '',
+  loading: false,
+  error: '',
+})
 
 onMounted(() => {
   loadSessions()
@@ -201,7 +222,7 @@ async function refreshSystemStatus() {
 }
 
 function genId() {
-  return 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
+  return `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
 }
 
 function loadSessions() {
@@ -221,11 +242,11 @@ function saveSessions() {
 }
 
 function createSession() {
-  const nowTs = Date.now()
+  const timestamp = Date.now()
   const session = {
     id: genId(),
-    name: `会话 ${new Date(nowTs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
-    lastActive: nowTs,
+    name: `会话 ${new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+    lastActive: timestamp,
   }
   sessions.value.unshift(session)
   saveSessions()
@@ -238,11 +259,12 @@ function switchSession(id) {
   messages.value = []
   turnIndex.value = 0
   resetAnalysis()
+  resetGraph()
 
   const stored = localStorage.getItem(`chat_${id}`)
   if (stored) {
     messages.value = JSON.parse(stored)
-    turnIndex.value = messages.value.filter((m) => m.role === 'user').length
+    turnIndex.value = messages.value.filter((message) => message.role === 'user').length
   }
 
   if (!messages.value.length) pushWelcome()
@@ -250,15 +272,17 @@ function switchSession(id) {
 }
 
 function deleteSession(id) {
-  ElMessageBox.confirm('确定删除此会话？', '提示', { type: 'warning' })
+  ElMessageBox.confirm('确定删除此会话吗？', '提示', { type: 'warning' })
     .then(() => {
-      sessions.value = sessions.value.filter((s) => s.id !== id)
+      sessions.value = sessions.value.filter((session) => session.id !== id)
       localStorage.removeItem(`chat_${id}`)
       saveSessions()
+
       if (id === currentSessionId.value) {
         if (sessions.value.length) switchSession(sessions.value[0].id)
         else createSession()
       }
+
       ElMessage.success('已删除')
     })
     .catch(() => {})
@@ -268,13 +292,56 @@ function pushWelcome() {
   messages.value.push({
     role: 'bot',
     content:
-      '您好！我是智能法律咨询助手，可以为您提供法律条文、类案检索和综合分析建议。系统初始化完成后，您即可开始提问。',
+      '您好，我是智能法律咨询助手，可以为您提供法条检索、案例查询和综合法律分析建议。系统完成初始化后即可开始提问。',
     time: now(),
   })
 }
 
 function now() {
   return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+function resetAnalysis() {
+  currentAnalysis.actions = []
+  currentAnalysis.sources = []
+}
+
+function resetGraph() {
+  currentGraph.query = ''
+  currentGraph.nodes = []
+  currentGraph.edges = []
+  currentGraph.tokens = []
+  currentGraph.generatedAt = ''
+  currentGraph.loading = false
+  currentGraph.error = ''
+}
+
+async function fetchGraph(query) {
+  const requestId = ++latestGraphRequestId.value
+  currentGraph.query = query
+  currentGraph.nodes = []
+  currentGraph.edges = []
+  currentGraph.tokens = []
+  currentGraph.generatedAt = ''
+  currentGraph.loading = true
+  currentGraph.error = ''
+
+  try {
+    const { data } = await getGraphSubgraph(query)
+    if (requestId !== latestGraphRequestId.value) return
+    currentGraph.query = data.query || query
+    currentGraph.nodes = data.nodes || []
+    currentGraph.edges = data.edges || []
+    currentGraph.tokens = data.tokens || []
+    currentGraph.generatedAt = data.generated_at || ''
+  } catch (error) {
+    if (requestId !== latestGraphRequestId.value) return
+    currentGraph.error = error?.response?.data?.detail || '图谱接口调用失败'
+  } finally {
+    if (requestId === latestGraphRequestId.value) {
+      currentGraph.loading = false
+    }
+  }
 }
 
 async function send() {
@@ -289,18 +356,20 @@ async function send() {
   messages.value.push({ role: 'user', content: text, time: now() })
   inputText.value = ''
   sending.value = true
+  graphSidebarCollapsed.value = false
   scrollBottom()
+  void fetchGraph(text)
 
   try {
     const { data } = await sendMessage(text, currentSessionId.value)
-    const botMsg = {
+    const botMessage = {
       role: 'bot',
       content: data.response,
       time: now(),
       sources: data.sources || [],
       agentActions: data.agent_actions || [],
     }
-    messages.value.push(botMsg)
+    messages.value.push(botMessage)
     turnIndex.value += 1
     currentAnalysis.actions = data.agent_actions || []
     currentAnalysis.sources = data.sources || []
@@ -312,10 +381,10 @@ async function send() {
     }
 
     localStorage.setItem(`chat_${currentSessionId.value}`, JSON.stringify(messages.value))
-  } catch (err) {
+  } catch (error) {
     messages.value.push({
       role: 'bot',
-      content: `抱歉，请求失败，请检查后端服务是否启动。\n错误信息：${err.message || '未知错误'}`,
+      content: `抱歉，请求失败，请检查后端服务是否启动。\n错误信息：${error.message || '未知错误'}`,
       time: now(),
     })
   } finally {
@@ -329,11 +398,6 @@ function handleKeydown(event) {
     event.preventDefault()
     send()
   }
-}
-
-function resetAnalysis() {
-  currentAnalysis.actions = []
-  currentAnalysis.sources = []
 }
 
 async function handleSummary() {
@@ -364,12 +428,13 @@ function handleExport() {
 }
 
 function handleClear() {
-  ElMessageBox.confirm('确定清空当前对话？', '提示', { type: 'warning' })
+  ElMessageBox.confirm('确定清空当前对话吗？', '提示', { type: 'warning' })
     .then(async () => {
       messages.value = []
       localStorage.removeItem(`chat_${currentSessionId.value}`)
       turnIndex.value = 0
       resetAnalysis()
+      resetGraph()
       try {
         await resetDialog(currentSessionId.value)
       } catch {
@@ -445,7 +510,7 @@ body,
 }
 
 .system-banner-content {
-  width: min(1200px, calc(100vw - 24px));
+  width: min(1320px, calc(100vw - 24px));
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -518,6 +583,12 @@ body,
 
 .right-panel {
   border-left: 1px solid #e4e7ed;
+  transition: width 0.25s ease;
+}
+
+.right-panel.collapsed {
+  padding-left: 10px;
+  padding-right: 10px;
 }
 
 .chat-area {
