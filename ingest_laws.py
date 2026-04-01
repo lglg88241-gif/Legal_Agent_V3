@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
+import shutil
+import stat
 from pathlib import Path
 
 import docx2txt
@@ -11,32 +14,59 @@ from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 
 from app.core.config import settings
+from app.database.chroma_utils import PROJECT_ROOT, resolve_embedding_model_path, resolve_persist_dir
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-CORPUS_DIR = Path("data/corpus")
-COLLECTION_NAME = "labor_law_collection"
+CORPUS_DIR = PROJECT_ROOT / "data" / "corpus"
 ARTICLE_PATTERN = re.compile(
     r"(?m)^(第[零〇一二三四五六七八九十百千万两\d]+条(?:之[零〇一二三四五六七八九十百千万两\d]+)?)"
 )
 
 
-def resolve_embedding_model_path(model_name: str) -> tuple[str, bool]:
-    configured_path = Path(model_name)
-    if configured_path.exists():
-        return str(configured_path), True
+def ensure_safe_workspace_dir(path: Path) -> None:
+    if path.parent == path or path == PROJECT_ROOT:
+        raise ValueError(f"拒绝重建危险路径: {path}")
+    try:
+        path.relative_to(PROJECT_ROOT)
+    except ValueError as exc:
+        raise ValueError(f"Chroma 持久化目录必须位于项目根目录内: {path}") from exc
 
-    hub_root = Path.home() / ".cache" / "huggingface" / "hub"
-    repo_dir = hub_root / f"models--{model_name.replace('/', '--')}"
-    ref_file = repo_dir / "refs" / "main"
-    if ref_file.exists():
-        snapshot_id = ref_file.read_text(encoding="utf-8").strip()
-        snapshot_dir = repo_dir / "snapshots" / snapshot_id
-        if snapshot_dir.exists():
-            return str(snapshot_dir), True
 
-    return model_name, False
+def handle_remove_readonly(func, path, _exc_info) -> None:
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def rebuild_persist_dir(persist_dir: Path) -> None:
+    ensure_safe_workspace_dir(persist_dir)
+    if persist_dir.exists():
+        shutil.rmtree(persist_dir, onerror=handle_remove_readonly)
+    persist_dir.mkdir(parents=True, exist_ok=True)
+
+
+def can_write_to_dir(path: Path) -> bool:
+    probe_file = path / ".write_probe"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe_file.write_text("ok", encoding="utf-8")
+        probe_file.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
+def prepare_persist_dir(persist_dir: Path) -> None:
+    ensure_safe_workspace_dir(persist_dir)
+
+    if persist_dir.exists() and not can_write_to_dir(persist_dir):
+        logger.warning("检测到不可写或损坏的 Chroma 目录，准备重建: %s", persist_dir)
+        rebuild_persist_dir(persist_dir)
+
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    if not can_write_to_dir(persist_dir):
+        raise PermissionError(f"Chroma 持久化目录不可写: {persist_dir}")
 
 
 def normalize_text(text: str) -> str:
@@ -113,9 +143,42 @@ def build_document_ids(documents: list[Document]) -> list[str]:
     return ids
 
 
+def is_readonly_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "readonly" in message or "read-only" in message
+
+
+def ingest_documents(
+    persist_dir: Path,
+    documents: list[Document],
+    ids: list[str],
+    embeddings: HuggingFaceEmbeddings,
+) -> None:
+    try:
+        vectorstore = Chroma(
+            collection_name=settings.CHROMA_COLLECTION_NAME,
+            embedding_function=embeddings,
+            persist_directory=str(persist_dir),
+        )
+        vectorstore.reset_collection()
+        vectorstore.add_documents(documents=documents, ids=ids)
+    except Exception as exc:
+        if not is_readonly_error(exc):
+            raise
+        logger.warning("检测到只读的 Chroma 数据目录，正在重建后重试: %s", persist_dir)
+        rebuild_persist_dir(persist_dir)
+        vectorstore = Chroma(
+            collection_name=settings.CHROMA_COLLECTION_NAME,
+            embedding_function=embeddings,
+            persist_directory=str(persist_dir),
+        )
+        vectorstore.reset_collection()
+        vectorstore.add_documents(documents=documents, ids=ids)
+
+
 def main() -> None:
-    persist_dir = Path(settings.CHROMA_PERSIST_DIR)
-    persist_dir.mkdir(parents=True, exist_ok=True)
+    persist_dir = resolve_persist_dir(settings.CHROMA_PERSIST_DIR)
+    prepare_persist_dir(persist_dir)
 
     embedding_model_path, local_files_only = resolve_embedding_model_path(settings.EMBEDDING_MODEL_PATH)
     logger.info("加载词向量模型: %s", embedding_model_path)
@@ -128,21 +191,14 @@ def main() -> None:
 
     documents, file_count = build_documents(CORPUS_DIR)
     ids = build_document_ids(documents)
-
-    vectorstore = Chroma(
-        collection_name=COLLECTION_NAME,
-        embedding_function=embeddings,
-        persist_directory=str(persist_dir),
-    )
-    vectorstore.reset_collection()
-    vectorstore.add_documents(documents=documents, ids=ids)
+    ingest_documents(persist_dir, documents, ids, embeddings)
 
     logger.info(
         "成功处理了 %s 个文件，生成了 %s 个法条向量，并写入 %s/%s",
         file_count,
         len(documents),
         persist_dir,
-        COLLECTION_NAME,
+        settings.CHROMA_COLLECTION_NAME,
     )
 
 

@@ -1,6 +1,6 @@
-# main.py
 import logging
 
+import chromadb
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +9,8 @@ from app.api.dialog import router as dialog_router
 from app.api.feedback import router as feedback_router
 from app.api.history import router as history_router
 from app.api.summary import router as summary_router
+from app.core.config import settings
+from app.database.chroma_utils import resolve_persist_dir
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -35,7 +37,11 @@ async def health_check():
 
 @app.get("/knowledge/status")
 async def kb_status():
-    return {"status": "online", "loaded": True, "doc_count": 0}
+    persist_dir = resolve_persist_dir(settings.CHROMA_PERSIST_DIR)
+    persist_dir.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(persist_dir))
+    collection = client.get_or_create_collection(name=settings.CHROMA_COLLECTION_NAME)
+    return {"status": "online", "loaded": True, "doc_count": collection.count()}
 
 
 if __name__ == "__main__":
