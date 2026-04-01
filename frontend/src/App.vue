@@ -1,13 +1,28 @@
 <template>
+  <div class="system-banner" :class="systemStatus.ready ? 'ready' : 'loading'">
+    <div class="system-banner-content">
+      <div class="system-banner-main">
+        <el-icon v-if="systemStatus.ready" class="banner-icon"><CircleCheckFilled /></el-icon>
+        <el-icon v-else class="banner-icon rotating"><Loading /></el-icon>
+        <span>{{ systemStatus.ready ? '系统就绪' : '系统初始化中...' }}</span>
+      </div>
+      <div class="system-banner-meta">
+        <span>Chroma {{ componentLabel(systemStatus.components.chroma) }}</span>
+        <span>Neo4j {{ componentLabel(systemStatus.components.neo4j) }}</span>
+        <span>LLM {{ componentLabel(systemStatus.components.llm) }}</span>
+        <span>Celery {{ componentLabel(systemStatus.components.celery) }}</span>
+      </div>
+    </div>
+  </div>
+
   <el-container class="app-container">
-    <!-- 顶部栏 -->
     <el-header class="app-header">
       <div class="header-left">
         <el-icon :size="22"><Promotion /></el-icon>
-        <span class="app-title">智能领域聊天机器人</span>
+        <span class="app-title">智能法律咨询系统</span>
       </div>
       <div class="header-right">
-        <el-button text @click="handleSummary" :loading="summaryLoading">
+        <el-button text @click="handleSummary" :loading="summaryLoading" :disabled="!systemStatus.ready">
           <el-icon><Document /></el-icon>对话总结
         </el-button>
         <el-button text @click="handleExport">
@@ -20,7 +35,6 @@
     </el-header>
 
     <el-container class="main-area">
-      <!-- 左侧：会话列表 -->
       <el-aside width="220px" class="side-panel left-panel">
         <SessionList
           :sessions="sessions"
@@ -31,12 +45,18 @@
         />
       </el-aside>
 
-      <!-- 中间：聊天区 -->
       <el-main class="chat-area">
+        <div v-if="!systemStatus.ready" class="init-overlay">
+          <div class="init-card">
+            <el-icon class="init-icon rotating"><Loading /></el-icon>
+            <div class="init-title">系统初始化中...</div>
+            <div class="init-subtitle">正在预热向量库、Neo4j、本地模型与 Celery，请稍候。</div>
+          </div>
+        </div>
+
         <el-scrollbar ref="scrollRef" class="chat-scroll">
           <div class="message-list" ref="messageListRef">
             <ChatMessage v-for="(m, i) in messages" :key="i" :msg="m" />
-            <!-- 加载中动画 -->
             <div v-if="sending" class="chat-message bot-msg loading-msg">
               <div class="avatar">
                 <el-avatar :size="36" style="background: #67c23a">
@@ -52,23 +72,27 @@
           </div>
         </el-scrollbar>
 
-        <!-- 输入框 -->
-        <div class="input-area">
+        <div class="input-area" :class="{ locked: !systemStatus.ready }">
           <el-input
             v-model="inputText"
             type="textarea"
             :rows="2"
-            placeholder="请输入您的问题，Enter 发送，Shift+Enter 换行"
+            :disabled="!systemStatus.ready || sending"
+            :placeholder="systemStatus.ready ? '请输入您的问题，Enter 发送，Shift+Enter 换行' : '系统初始化中，输入框暂时锁定...'"
             resize="none"
             @keydown="handleKeydown"
           />
-          <el-button type="primary" @click="send" :loading="sending" :disabled="!inputText.trim()">
+          <el-button
+            type="primary"
+            @click="send"
+            :loading="sending"
+            :disabled="!systemStatus.ready || !inputText.trim()"
+          >
             发送
           </el-button>
         </div>
       </el-main>
 
-      <!-- 右侧：分析面板 -->
       <el-aside width="260px" class="side-panel right-panel">
         <AnalysisPanel
           :status="systemStatus"
@@ -81,21 +105,19 @@
 </template>
 
 <script setup>
-import { ref, reactive, nextTick, onMounted } from 'vue'
+import { nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import SessionList from './components/SessionList.vue'
-import AnalysisPanel from './components/AnalysisPanel.vue'
 import {
-  healthCheck,
-  sendMessage,
-  resetDialog,
   getSummary,
+  getSystemStatus,
+  resetDialog,
+  sendMessage,
   submitFeedback,
-  getKnowledgeStatus,
 } from './api/index.js'
 
-// ========== 状态 ==========
 const messages = ref([])
 const inputText = ref('')
 const sending = ref(false)
@@ -105,36 +127,79 @@ const currentSessionId = ref('')
 const scrollRef = ref(null)
 const messageListRef = ref(null)
 const turnIndex = ref(0)
+const statusTimer = ref(null)
 
-const systemStatus = reactive({ healthy: false, ragReady: false, docCount: 0, model: '', tools: [] })
-const currentAnalysis = reactive({ actions: [], sources: [] })
-
-// ========== 初始化 ==========
-onMounted(() => {
-  loadSessions()
-  checkHealth()
-  setInterval(checkHealth, 30000)
+const systemStatus = reactive({
+  status: 'loading',
+  ready: false,
+  healthy: false,
+  ragReady: false,
+  docCount: 0,
+  model: '',
+  tools: [],
+  components: {
+    chroma: 'loading',
+    neo4j: 'loading',
+    llm: 'loading',
+    celery: 'loading',
+  },
 })
 
-async function checkHealth() {
-  try {
-    const { data } = await healthCheck()
-    systemStatus.healthy = data.status === 'online'
-    systemStatus.model = data.model || ''
-    systemStatus.tools = data.tools || []
-  } catch {
-    systemStatus.healthy = false
-  }
-  try {
-    const { data } = await getKnowledgeStatus()
-    systemStatus.ragReady = data.status === 'online' && data.loaded === true
-    systemStatus.docCount = data.doc_count || 0
-  } catch {
-    systemStatus.ragReady = false
+const currentAnalysis = reactive({ actions: [], sources: [] })
+
+onMounted(() => {
+  loadSessions()
+  startSystemStatusPolling()
+})
+
+onUnmounted(() => {
+  stopSystemStatusPolling()
+})
+
+function componentLabel(value) {
+  return value === 'connected' ? 'connected' : 'loading'
+}
+
+function startSystemStatusPolling() {
+  refreshSystemStatus()
+  if (statusTimer.value) clearInterval(statusTimer.value)
+  statusTimer.value = setInterval(refreshSystemStatus, 1000)
+}
+
+function stopSystemStatusPolling() {
+  if (statusTimer.value) {
+    clearInterval(statusTimer.value)
+    statusTimer.value = null
   }
 }
 
-// ========== 会话管理 ==========
+async function refreshSystemStatus() {
+  try {
+    const { data } = await getSystemStatus()
+    systemStatus.status = data.status || 'loading'
+    systemStatus.ready = Boolean(data.ready)
+    systemStatus.healthy = Boolean(data.ready)
+    systemStatus.components = {
+      chroma: data.components?.chroma || 'loading',
+      neo4j: data.components?.neo4j || 'loading',
+      llm: data.components?.llm || 'loading',
+      celery: data.components?.celery || 'loading',
+    }
+    systemStatus.ragReady = systemStatus.components.chroma === 'connected'
+    systemStatus.docCount = data.knowledge?.total_doc_count || 0
+    systemStatus.model = data.model || ''
+    systemStatus.tools = data.tools || []
+
+    if (systemStatus.ready) {
+      stopSystemStatusPolling()
+    }
+  } catch {
+    systemStatus.status = 'loading'
+    systemStatus.ready = false
+    systemStatus.healthy = false
+  }
+}
+
 function genId() {
   return 'session_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)
 }
@@ -156,15 +221,15 @@ function saveSessions() {
 }
 
 function createSession() {
-  const now = Date.now()
-  const s = {
+  const nowTs = Date.now()
+  const session = {
     id: genId(),
-    name: `会话 ${new Date(now).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
-    lastActive: now,
+    name: `会话 ${new Date(nowTs).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+    lastActive: nowTs,
   }
-  sessions.value.unshift(s)
+  sessions.value.unshift(session)
   saveSessions()
-  switchSession(s.id)
+  switchSession(session.id)
 }
 
 function switchSession(id) {
@@ -173,34 +238,37 @@ function switchSession(id) {
   messages.value = []
   turnIndex.value = 0
   resetAnalysis()
-  // 加载本地历史
+
   const stored = localStorage.getItem(`chat_${id}`)
   if (stored) {
     messages.value = JSON.parse(stored)
     turnIndex.value = messages.value.filter((m) => m.role === 'user').length
   }
+
   if (!messages.value.length) pushWelcome()
   scrollBottom()
 }
 
 function deleteSession(id) {
-  ElMessageBox.confirm('确定删除此会话？', '提示', { type: 'warning' }).then(() => {
-    sessions.value = sessions.value.filter((s) => s.id !== id)
-    localStorage.removeItem(`chat_${id}`)
-    saveSessions()
-    if (id === currentSessionId.value) {
-      if (sessions.value.length) switchSession(sessions.value[0].id)
-      else createSession()
-    }
-    ElMessage.success('已删除')
-  }).catch(() => {})
+  ElMessageBox.confirm('确定删除此会话？', '提示', { type: 'warning' })
+    .then(() => {
+      sessions.value = sessions.value.filter((s) => s.id !== id)
+      localStorage.removeItem(`chat_${id}`)
+      saveSessions()
+      if (id === currentSessionId.value) {
+        if (sessions.value.length) switchSession(sessions.value[0].id)
+        else createSession()
+      }
+      ElMessage.success('已删除')
+    })
+    .catch(() => {})
 }
 
-// ========== 聊天 ==========
 function pushWelcome() {
   messages.value.push({
     role: 'bot',
-    content: '您好！我是智能领域聊天机器人，可以回答您的各种问题。\n\n我在法律方面配备了专业的知识库工具，能提供准确的法律咨询。当然，您也可以问我任何其他问题——日常聊天、常识百科、技术编程等，我都可以帮您！',
+    content:
+      '您好！我是智能法律咨询助手，可以为您提供法律条文、类案检索和综合分析建议。系统初始化完成后，您即可开始提问。',
     time: now(),
   })
 }
@@ -210,6 +278,11 @@ function now() {
 }
 
 async function send() {
+  if (!systemStatus.ready) {
+    ElMessage.warning('系统仍在初始化，请稍候。')
+    return
+  }
+
   const text = inputText.value.trim()
   if (!text || sending.value) return
 
@@ -228,22 +301,21 @@ async function send() {
       agentActions: data.agent_actions || [],
     }
     messages.value.push(botMsg)
-    turnIndex.value++
-
-    // 更新右侧分析面板
+    turnIndex.value += 1
     currentAnalysis.actions = data.agent_actions || []
     currentAnalysis.sources = data.sources || []
 
-    // 更新会话信息
-    const s = sessions.value.find((s) => s.id === currentSessionId.value)
-    if (s) { s.lastActive = Date.now(); saveSessions() }
+    const session = sessions.value.find((item) => item.id === currentSessionId.value)
+    if (session) {
+      session.lastActive = Date.now()
+      saveSessions()
+    }
 
-    // 保存到本地
     localStorage.setItem(`chat_${currentSessionId.value}`, JSON.stringify(messages.value))
   } catch (err) {
     messages.value.push({
       role: 'bot',
-      content: '抱歉，请求失败，请检查后端服务是否启动。\n错误信息：' + (err.message || '未知错误'),
+      content: `抱歉，请求失败，请检查后端服务是否启动。\n错误信息：${err.message || '未知错误'}`,
       time: now(),
     })
   } finally {
@@ -252,25 +324,23 @@ async function send() {
   }
 }
 
-function handleKeydown(e) {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault()
+function handleKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
     send()
   }
 }
 
-// ========== 分析 ==========
 function resetAnalysis() {
   currentAnalysis.actions = []
   currentAnalysis.sources = []
 }
 
-// ========== 工具栏 ==========
 async function handleSummary() {
   summaryLoading.value = true
   try {
     const { data } = await getSummary(currentSessionId.value)
-    messages.value.push({ role: 'bot', content: `📋 对话总结：\n${data.summary}`, time: now() })
+    messages.value.push({ role: 'bot', content: `对话总结：\n${data.summary}`, time: now() })
     scrollBottom()
     ElMessage.success('总结已生成')
   } catch {
@@ -285,24 +355,30 @@ function handleExport() {
     [JSON.stringify({ session_id: currentSessionId.value, messages: messages.value }, null, 2)],
     { type: 'application/json' }
   )
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `对话记录_${new Date().toISOString().slice(0, 10)}.json`
-  a.click()
-  URL.revokeObjectURL(a.href)
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `对话记录_${new Date().toISOString().slice(0, 10)}.json`
+  link.click()
+  URL.revokeObjectURL(link.href)
   ElMessage.success('已导出')
 }
 
 function handleClear() {
-  ElMessageBox.confirm('确定清空当前对话？', '提示', { type: 'warning' }).then(async () => {
-    messages.value = []
-    localStorage.removeItem(`chat_${currentSessionId.value}`)
-    turnIndex.value = 0
-    resetAnalysis()
-    try { await resetDialog(currentSessionId.value) } catch { /* 忽略 */ }
-    pushWelcome()
-    ElMessage.success('已清空')
-  }).catch(() => {})
+  ElMessageBox.confirm('确定清空当前对话？', '提示', { type: 'warning' })
+    .then(async () => {
+      messages.value = []
+      localStorage.removeItem(`chat_${currentSessionId.value}`)
+      turnIndex.value = 0
+      resetAnalysis()
+      try {
+        await resetDialog(currentSessionId.value)
+      } catch {
+        // Ignore reset errors for local cleanup.
+      }
+      pushWelcome()
+      ElMessage.success('已清空')
+    })
+    .catch(() => {})
 }
 
 async function handleFeedback({ rating, comment }) {
@@ -320,7 +396,6 @@ async function handleFeedback({ rating, comment }) {
   }
 }
 
-// ========== 滚动 ==========
 function scrollBottom() {
   nextTick(() => {
     if (scrollRef.value) {
@@ -331,12 +406,13 @@ function scrollBottom() {
 </script>
 
 <style>
-/* 全局重置 */
-html, body, #app {
+html,
+body,
+#app {
   margin: 0;
   padding: 0;
   height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
 }
 </style>
 
@@ -344,9 +420,61 @@ html, body, #app {
 .app-container {
   height: 100vh;
   background: #f5f7fa;
+  padding-top: 44px;
 }
 
-/* 顶部栏 */
+.system-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  color: #fff;
+}
+
+.system-banner.loading {
+  background: linear-gradient(90deg, #d97706, #f59e0b);
+}
+
+.system-banner.ready {
+  background: linear-gradient(90deg, #15803d, #22c55e);
+}
+
+.system-banner-content {
+  width: min(1200px, calc(100vw - 24px));
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+}
+
+.system-banner-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+}
+
+.system-banner-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  opacity: 0.92;
+}
+
+.banner-icon {
+  font-size: 16px;
+}
+
+.rotating {
+  animation: spin 1s linear infinite;
+}
+
 .app-header {
   display: flex;
   justify-content: space-between;
@@ -356,56 +484,60 @@ html, body, #app {
   padding: 0 20px;
   height: 56px;
 }
+
 .header-left {
   display: flex;
   align-items: center;
   gap: 8px;
   color: #303133;
 }
+
 .app-title {
   font-size: 16px;
   font-weight: 600;
 }
+
 .header-right {
   display: flex;
   gap: 4px;
 }
 
-/* 主体区域 */
 .main-area {
-  height: calc(100vh - 56px);
+  height: calc(100vh - 100px);
 }
 
-/* 侧边栏 */
 .side-panel {
   background: #fff;
   padding: 16px;
   overflow: hidden;
 }
+
 .left-panel {
   border-right: 1px solid #e4e7ed;
 }
+
 .right-panel {
   border-left: 1px solid #e4e7ed;
 }
 
-/* 聊天区 */
 .chat-area {
+  position: relative;
   display: flex;
   flex-direction: column;
   padding: 0;
   overflow: hidden;
 }
+
 .chat-scroll {
   flex: 1;
   padding: 20px 24px;
 }
+
 .message-list {
   max-width: 800px;
   margin: 0 auto;
 }
 
-/* 输入区 */
 .input-area {
   display: flex;
   gap: 12px;
@@ -414,23 +546,69 @@ html, body, #app {
   border-top: 1px solid #e4e7ed;
   align-items: flex-end;
 }
+
+.input-area.locked {
+  opacity: 0.86;
+}
+
 .input-area .el-textarea {
   flex: 1;
 }
+
 .input-area .el-button {
   height: 54px;
   min-width: 80px;
 }
 
-/* 加载动画 */
+.init-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(245, 247, 250, 0.78);
+  backdrop-filter: blur(4px);
+}
+
+.init-card {
+  width: min(420px, calc(100vw - 64px));
+  padding: 28px 24px;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.14);
+  text-align: center;
+}
+
+.init-icon {
+  font-size: 28px;
+  color: #d97706;
+}
+
+.init-title {
+  margin-top: 12px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.init-subtitle {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
 .loading-msg {
   display: flex;
   gap: 12px;
   margin-bottom: 20px;
 }
+
 .loading-msg .bubble-wrap {
   flex: 1;
 }
+
 .loading-bubble {
   display: inline-flex;
   gap: 4px;
@@ -439,6 +617,7 @@ html, body, #app {
   border-radius: 12px;
   border-top-left-radius: 4px;
 }
+
 .dot {
   width: 8px;
   height: 8px;
@@ -446,11 +625,40 @@ html, body, #app {
   border-radius: 50%;
   animation: bounce 1.4s infinite ease-in-out both;
 }
-.dot:nth-child(1) { animation-delay: 0s; }
-.dot:nth-child(2) { animation-delay: 0.2s; }
-.dot:nth-child(3) { animation-delay: 0.4s; }
+
+.dot:nth-child(1) {
+  animation-delay: 0s;
+}
+
+.dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
 @keyframes bounce {
-  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
+  0%,
+  80%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+
+  40% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>
