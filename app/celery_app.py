@@ -189,13 +189,14 @@ def update_graph_task(conversation_id: int):
             refresh_case_graph(
                 conversation_id=conversation_id,
                 user_input=latest_user_input,
-                chat_history=case_summary,
+                case_summary=case_summary,
             )
         )
         logger.info(
-            "Graph update task completed | conversation_id=%s actions_applied=%s",
+            "Graph update task completed | conversation_id=%s actions_applied=%s deleted_count=%s",
             conversation_id,
             update_result.get("actions_applied", 0),
+            update_result.get("deleted_count", 0),
         )
         return {
             "status": "success",

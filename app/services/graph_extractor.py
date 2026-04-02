@@ -47,6 +47,57 @@ class GraphAction(BaseModel):
 class GraphActionList(BaseModel):
     actions: list[GraphAction]
 
+
+class ObsoleteNodeList(BaseModel):
+    obsolete_nodes: list[str] = Field(default_factory=list)
+
+
+INCREMENTAL_EXTRACTION_PROMPT = """
+你是一个案情图谱增量抽取器。
+这是用户最新的补充口供：{user_input}
+
+请只提取这段新口供里新增的实体和关系，输出 ADD 动作列表。
+要求：
+1. 只输出本轮新增事实，不要重复改写旧事实。
+2. 绝对不要输出 UPDATE 或 DELETE。
+3. 实体要做命名对齐，例如“我/本人/用户”统一为“当事人”。
+4. category 只能是：主体、客体、事件、后果。
+5. 只能输出合法 JSON，不要解释。
+
+输出格式：
+{
+  "actions": [
+    {
+      "action": "ADD",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "主张",
+      "target": "赔偿",
+      "target_category": "后果"
+    }
+  ]
+}
+""".strip()
+
+SEMANTIC_GC_PROMPT = """
+你是一个图谱对齐引擎。
+这是当前案卷的唯一确凿事实：{case_summary}
+这是图谱数据库中现有的节点集合：{current_nodes}
+
+请交叉对比，找出图谱中那些已经与最新事实冲突、被推翻、或者根本不存在于摘要中的幽灵节点。
+要求：
+1. 只返回确实应该被剔除的节点名称。
+2. 输出的节点名必须逐字复制自给定节点集合，禁止改写、扩写或杜撰。
+3. 如果节点虽然暂时没有在摘要中展开，但仍与现有事实一致，则不要删除。
+4. 只能输出合法 JSON，不要解释。
+
+输出格式：
+{"obsolete_nodes": ["旧公司名", "错误金额"]}
+
+如果完全一致，返回：
+{"obsolete_nodes": []}
+""".strip()
+
 GRAPH_EXTRACTION_PROMPT = """
 你是一个法律案件动态图谱抽取器。
 请从输入文本中提取已经明确出现的事实三元组，并做实体对齐。
@@ -188,6 +239,13 @@ ORDER BY source_name, relation, target_name
 LIMIT 500
 """
 
+FETCH_NODE_NAMES_QUERY = """
+MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
+RETURN n.name AS name
+ORDER BY name
+LIMIT 500
+"""
+
 DELETE_GRAPH_QUERY = """
 MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
 DETACH DELETE n
@@ -289,6 +347,26 @@ def _parse_graph_action_response(
         },
         existing_nodes,
     )
+
+
+def _parse_obsolete_nodes_response(
+    raw_content: str,
+    existing_nodes: set[str] | None = None,
+) -> list[str]:
+    repaired_content = repair_json(raw_content)
+    json.loads(repaired_content)
+    parsed = ObsoleteNodeList.model_validate_json(repaired_content)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for node_name in parsed.obsolete_nodes:
+        resolved_name = _resolve_existing_node_name(node_name, existing_nodes)
+        if not resolved_name or resolved_name in seen:
+            continue
+        seen.add(resolved_name)
+        normalized.append(resolved_name)
+
+    return normalized
 
 
 def _normalize_triples(raw_payload: Any) -> list[dict[str, str]]:
@@ -580,6 +658,50 @@ def _fetch_case_graph_facts_sync(conversation_id: int) -> list[dict[str, str]]:
     return facts
 
 
+def _fetch_case_graph_node_names_sync(conversation_id: int) -> list[str]:
+    driver = _build_driver()
+    try:
+        with driver.session() as session:
+            records = session.run(FETCH_NODE_NAMES_QUERY, {"conversation_id": conversation_id}).data()
+    finally:
+        driver.close()
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        name = _canonicalize_entity(str(record.get("name") or "").strip())
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _delete_obsolete_nodes_sync(conversation_id: int, obsolete_nodes: list[str]) -> int:
+    if not obsolete_nodes:
+        return 0
+
+    driver = _build_driver()
+    try:
+        with driver.session() as session:
+            session.run(
+                """
+                UNWIND $obsolete_nodes AS target_name
+                MATCH (n)
+                WHERE n.conversation_id = $conversation_id AND n.name = target_name
+                DETACH DELETE n
+                """,
+                {
+                    "conversation_id": conversation_id,
+                    "obsolete_nodes": obsolete_nodes,
+                },
+            ).consume()
+    finally:
+        driver.close()
+
+    return len(obsolete_nodes)
+
+
 async def extract_case_triples(text: str) -> list[dict[str, str]]:
     clean_text = (text or "").strip()
     if not clean_text:
@@ -605,6 +727,25 @@ async def get_case_graph_facts(conversation_id: int) -> list[dict[str, str]]:
     except Exception as exc:
         logger.warning("Failed to load case graph facts for conversation %s: %s", conversation_id, exc)
         return []
+
+
+async def get_case_graph_node_names(conversation_id: int) -> list[str]:
+    try:
+        return await asyncio.to_thread(_fetch_case_graph_node_names_sync, conversation_id)
+    except Exception as exc:
+        logger.warning("Failed to load case graph node names for conversation %s: %s", conversation_id, exc)
+        return []
+
+
+async def delete_obsolete_nodes(conversation_id: int, obsolete_nodes: list[str]) -> int:
+    if not obsolete_nodes:
+        return 0
+
+    try:
+        return await asyncio.to_thread(_delete_obsolete_nodes_sync, conversation_id, obsolete_nodes)
+    except Exception as exc:
+        logger.warning("Failed to delete obsolete graph nodes for conversation %s: %s", conversation_id, exc)
+        return 0
 
 
 async def format_current_graph_state(conversation_id: int) -> str:
@@ -702,6 +843,100 @@ async def plan_graph_actions(current_graph: str, user_input: str) -> list[dict[s
         return []
 
 
+async def extract_incremental_graph_actions(user_input: str) -> list[dict[str, str]]:
+    clean_input = (user_input or "").strip()
+    if not clean_input:
+        return []
+
+    max_retries = 3
+    feedback = ""
+
+    for attempt in range(1, max_retries + 1):
+        prompt = INCREMENTAL_EXTRACTION_PROMPT.format(user_input=clean_input)
+        if feedback:
+            prompt = (
+                f"{prompt}\n\n"
+                f"你刚才输出的 JSON 无法解析，报了以下错误：{feedback}。"
+                "请仔细检查格式和字段规范，并重新输出只包含 ADD 动作的合法 JSON。"
+            )
+
+        try:
+            response = await _get_graph_llm().ainvoke(
+                [
+                    SystemMessage(content="你必须只输出合法 JSON。"),
+                    HumanMessage(content=prompt),
+                ]
+            )
+            content = response.content if isinstance(response.content, str) else str(response.content)
+            actions = _parse_graph_action_response(content)
+            add_actions = [action for action in actions if action.get("action") == "ADD"]
+            if add_actions:
+                return add_actions
+            if actions:
+                logger.warning("Incremental extraction returned non-ADD actions; dropping them")
+            return []
+        except (ValidationError, json.JSONDecodeError) as exc:
+            feedback = str(exc)
+            logger.warning(
+                "Incremental graph extraction validation failed on attempt %s/%s: %s",
+                attempt,
+                max_retries,
+                exc,
+            )
+        except Exception as exc:
+            logger.warning("Incremental graph extraction failed on attempt %s/%s: %s", attempt, max_retries, exc)
+            return []
+
+    logger.warning("Incremental graph extraction exhausted retries for input: %s", clean_input)
+    return []
+
+
+async def plan_obsolete_nodes(case_summary: str, current_nodes: list[str]) -> list[str]:
+    summary_text = (case_summary or "").strip()
+    if not summary_text or not current_nodes:
+        return []
+
+    max_retries = 3
+    feedback = ""
+    existing_nodes = set(current_nodes)
+
+    for attempt in range(1, max_retries + 1):
+        prompt = SEMANTIC_GC_PROMPT.format(
+            case_summary=summary_text,
+            current_nodes=json.dumps(current_nodes, ensure_ascii=False),
+        )
+        if feedback:
+            prompt = (
+                f"{prompt}\n\n"
+                f"你刚才输出的 JSON 无法解析，报了以下错误：{feedback}。"
+                "请仔细检查格式，并重新输出合法的 obsolete_nodes JSON。"
+            )
+
+        try:
+            response = await _get_graph_llm().ainvoke(
+                [
+                    SystemMessage(content="你必须只输出合法 JSON。"),
+                    HumanMessage(content=prompt),
+                ]
+            )
+            content = response.content if isinstance(response.content, str) else str(response.content)
+            return _parse_obsolete_nodes_response(content, existing_nodes)
+        except (ValidationError, json.JSONDecodeError) as exc:
+            feedback = str(exc)
+            logger.warning(
+                "Semantic GC validation failed on attempt %s/%s: %s",
+                attempt,
+                max_retries,
+                exc,
+            )
+        except Exception as exc:
+            logger.warning("Semantic GC planning failed on attempt %s/%s: %s", attempt, max_retries, exc)
+            return []
+
+    logger.warning("Semantic GC exhausted retries for summary: %s", summary_text)
+    return []
+
+
 async def execute_graph_actions(conversation_id: int, actions: list[dict[str, str]]) -> dict[str, Any]:
     if not actions:
         return {
@@ -746,14 +981,12 @@ async def sync_case_graph_from_history(conversation_id: int, chat_history: str) 
     return await upsert_case_graph(conversation_id, triples)
 
 
-async def refresh_case_graph(conversation_id: int, user_input: str, chat_history: str = "") -> dict[str, Any]:
-    current_graph = await format_current_graph_state(conversation_id)
-    actions = await plan_graph_actions(current_graph, user_input)
+async def refresh_case_graph(conversation_id: int, user_input: str, case_summary: str = "") -> dict[str, Any]:
+    add_actions = await extract_incremental_graph_actions(user_input)
 
-    if not actions:
-        fallback_text = (user_input or "").strip() or (chat_history or "").strip()
-        triples = await extract_case_triples(fallback_text)
-        actions = [
+    if not add_actions:
+        triples = await extract_case_triples(user_input)
+        add_actions = [
             {
                 "action": "ADD",
                 "source": triple["source"],
@@ -766,7 +999,20 @@ async def refresh_case_graph(conversation_id: int, user_input: str, chat_history
             for triple in triples
         ]
 
-    return await execute_graph_actions(conversation_id, actions)
+    add_result = await execute_graph_actions(conversation_id, add_actions)
+    current_nodes = await get_case_graph_node_names(conversation_id)
+    obsolete_nodes = await plan_obsolete_nodes(case_summary, current_nodes)
+    deleted_count = await delete_obsolete_nodes(conversation_id, obsolete_nodes)
+
+    return {
+        "conversation_id": conversation_id,
+        "actions_applied": int(add_result.get("actions_applied", 0)) + deleted_count,
+        "actions": add_result.get("actions", []),
+        "added_actions": add_result.get("actions", []),
+        "added_count": int(add_result.get("actions_applied", 0)),
+        "obsolete_nodes": obsolete_nodes,
+        "deleted_count": deleted_count,
+    }
 
 
 async def get_case_graph(conversation_id: int) -> dict[str, Any]:
