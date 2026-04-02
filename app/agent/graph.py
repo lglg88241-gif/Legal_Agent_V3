@@ -17,6 +17,7 @@ class AgentState(TypedDict, total=False):
     question: str
     current_query: str
     routed_query: str
+    route_intent: str
     tool_calls: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
     response: str
@@ -29,6 +30,13 @@ class AgentState(TypedDict, total=False):
     reflection_analysis: str
     clarification_questions: list[str]
     graph_focus: str
+
+
+def route_after_tool_router(state: AgentState) -> str:
+    route_intent = str(state.get("route_intent", "TOOLS")).upper()
+    if route_intent == "CHITCHAT":
+        return "greeting"
+    return "vector_researcher"
 
 
 def decide_next_step(state: AgentState) -> str:
@@ -51,6 +59,7 @@ def decide_next_step(state: AgentState) -> str:
 def build_legal_agent_graph(agent: LegalGraphAgent):
     graph = StateGraph(AgentState)
     graph.add_node("tool_router", agent.tool_router_node)
+    graph.add_node("greeting", agent.greeting_node)
     graph.add_node("vector_researcher", agent.vector_researcher_node)
     graph.add_node("reflector", agent.reflector_node)
     graph.add_node("neo4j_specialist", agent.neo4j_specialist_node)
@@ -58,7 +67,15 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
     graph.add_node("legal_advisor", agent.legal_advisor_node)
 
     graph.set_entry_point("tool_router")
-    graph.add_edge("tool_router", "vector_researcher")
+    graph.add_conditional_edges(
+        "tool_router",
+        route_after_tool_router,
+        {
+            "greeting": "greeting",
+            "vector_researcher": "vector_researcher",
+        },
+    )
+    graph.add_edge("greeting", END)
     graph.add_edge("vector_researcher", "reflector")
     graph.add_conditional_edges(
         "reflector",

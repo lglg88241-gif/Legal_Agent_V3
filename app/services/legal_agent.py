@@ -16,21 +16,25 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 ROUTER_PROMPT = """
-你是一个高精度法律工具路由引擎。你的唯一任务是根据用户问题选择需要调用的检索工具，并且只返回 JSON。
+你是一个高精度的法律工具路由引擎。你的任务只有两类：
+1. 输出 CHITCHAT：当用户只是打招呼、寒暄、确认你是否在线，例如“你好”“在吗”“hi”“hello”“早上好”，且没有任何实质法律纠纷或法律咨询内容时。
+2. 输出 TOOLS：当用户在咨询法律条文、责任认定、赔偿、量刑、案例、案由、被告、原告、公司纠纷等问题时。
 
 可用工具：
 1. search_law_articles(query: str)
 2. search_case_text(query: str)
 3. query_neo4j_graph(entity_name: str)
 
-规则：
-1. 用户询问法条、法律依据、是否构成、赔偿标准、量刑标准等问题时，必须调用 search_law_articles。
-2. 用户询问案例、类案、指导案例、裁判思路时，必须调用 search_case_text。
-3. 用户提到具体当事人、公司、案由、罪名、判决结果线索时，必须调用 query_neo4j_graph。
-4. 复合问题允许同时调用多个工具，严禁漏掉必要工具。
+核心规则：
+1. 纯闲聊、纯问候、纯试探在线状态，必须果断输出 CHITCHAT，禁止调用任何检索工具。
+2. 法条、法律依据、构成要件、赔偿标准、量刑标准等问题，必须调用 search_law_articles。
+3. 历史案例、类案、指导案例、裁判思路等问题，必须调用 search_case_text。
+4. 当问题涉及具体当事人、公司名称、案由、罪名、判决结果线索时，应调用 query_neo4j_graph。
+5. 复合问题允许同时调用多个工具，严禁漏掉必要工具。
 
-输出格式：
+你必须只返回 JSON，不要解释。格式如下：
 {
+  "route_intent": "CHITCHAT" | "TOOLS",
   "tool_calls": [
     {"name": "search_law_articles", "arguments": {"query": "..."}},
     {"name": "search_case_text", "arguments": {"query": "..."}},
@@ -53,11 +57,11 @@ REFLECTOR_SYSTEM_PROMPT = """
 
 规则：
 1. SUFFICIENT：现有法条、案例或图谱结果已足以回答。
-2. NEED_DEEP_GRAPH：需要继续查询人物、案由、裁判关系等更深层图谱线索。
+2. NEED_DEEP_GRAPH：还需要进一步查询人物、案由、裁判关系等更深层图谱线索。
 3. NEED_USER_INFO：缺少关键案情事实，必须先向用户追问。
 4. confidence_score 取值 0 到 1。
-5. questions 仅在 NEED_USER_INFO 时给出 1-2 个关键追问。
-6. graph_focus 仅在 NEED_DEEP_GRAPH 时提供一个适合查询 Neo4j 的实体或案由短语。
+5. questions 仅在 NEED_USER_INFO 时给出 1 到 2 个关键追问。
+6. graph_focus 仅在 NEED_DEEP_GRAPH 时提供适合查询 Neo4j 的实体或案由短语。
 """.strip()
 
 LEGAL_ADVISOR_SYSTEM_PROMPT = """
@@ -71,10 +75,21 @@ LEGAL_ADVISOR_SYSTEM_PROMPT = """
 sources 只能填写检索结果中真实出现过的来源文件名，不能新增、改写或猜测。
 """.strip()
 
+CLARIFIER_SYSTEM_PROMPT = """
+你是一个真实的律师。请根据缺少的案情，直接向用户发问。
+严禁输出“目前进展”“我还缺少这些关键案情要素”“根据当前分析”等机器分析日志。
+只需输出最自然的一句话追问，语气专业、简洁、口语化。
+""".strip()
+
 TOOL_REGISTRY = {tool.name: tool for tool in AGENT_TOOLS}
 LAW_TOOL = "search_law_articles"
 CASE_TOOL = "search_case_text"
 GRAPH_TOOL = "query_neo4j_graph"
+CHITCHAT_INTENT = "CHITCHAT"
+TOOLS_INTENT = "TOOLS"
+GREETING_RESPONSE = (
+    "你好，我在。你可以直接告诉我你的法律问题，比如劳动纠纷、工伤认定、赔偿标准、合同争议或是否有类似案例。"
+)
 
 
 class LegalGraphAgent:
@@ -203,6 +218,68 @@ class LegalGraphAgent:
             )
         return "\n\n".join(blocks)
 
+    def _has_substantive_legal_intent(self, question: str) -> bool:
+        keywords = [
+            "法条",
+            "法律",
+            "法规",
+            "赔偿",
+            "赔付",
+            "量刑",
+            "判几年",
+            "工伤",
+            "劳动仲裁",
+            "合同",
+            "纠纷",
+            "起诉",
+            "犯罪",
+            "构成",
+            "认定",
+            "案例",
+            "判决",
+            "案由",
+            "被告",
+            "原告",
+            "公司",
+            "辞退",
+            "离职",
+            "工资",
+            "补偿",
+            "责任",
+        ]
+        return any(keyword in question for keyword in keywords)
+
+    def _looks_like_chitchat(self, question: str) -> bool:
+        cleaned = "".join(question.lower().strip().split())
+        if not cleaned:
+            return True
+        if self._has_substantive_legal_intent(question):
+            return False
+
+        greetings = {
+            "你好",
+            "您好",
+            "hello",
+            "hi",
+            "hey",
+            "在吗",
+            "在不在",
+            "有人吗",
+            "忙吗",
+            "早上好",
+            "中午好",
+            "下午好",
+            "晚上好",
+            "嗨",
+            "哈喽",
+            "hello?",
+            "hi?",
+        }
+        punctuation = {"?", "？", "!", "！", ".", "。", "~"}
+        if cleaned in greetings:
+            return True
+        return len(cleaned) <= 6 and all(char in punctuation for char in cleaned)
+
     def _detect_intents(self, question: str) -> dict[str, bool]:
         lowered = question.lower()
         law_keywords = [
@@ -230,7 +307,7 @@ class LegalGraphAgent:
             "裁判",
             "有没有案例",
             "实际案例",
-            "类似案例",
+            "相似案例",
         ]
         graph_keywords = [
             "案由",
@@ -249,18 +326,22 @@ class LegalGraphAgent:
         has_law_intent = any(keyword in question for keyword in law_keywords)
         has_case_intent = any(keyword in question for keyword in case_keywords)
         has_graph_intent = any(keyword in question for keyword in graph_keywords) or "case" in lowered
+        is_chitchat = self._looks_like_chitchat(question)
 
         return {
             "has_law_intent": has_law_intent,
             "has_case_intent": has_case_intent,
             "has_graph_intent": has_graph_intent,
             "is_composite": has_law_intent and has_case_intent,
+            "is_chitchat": is_chitchat,
         }
 
-    def _fallback_routes(self, question: str) -> list[dict[str, Any]]:
+    def _fallback_route_decision(self, question: str) -> dict[str, Any]:
         intents = self._detect_intents(question)
-        routes: list[dict[str, Any]] = []
+        if intents["is_chitchat"]:
+            return {"route_intent": CHITCHAT_INTENT, "tool_calls": []}
 
+        routes: list[dict[str, Any]] = []
         if intents["has_law_intent"]:
             routes.append({"name": LAW_TOOL, "arguments": {"query": question}})
         if intents["has_case_intent"]:
@@ -278,7 +359,10 @@ class LegalGraphAgent:
             routes.append({"name": LAW_TOOL, "arguments": {"query": question}})
             routes.append({"name": CASE_TOOL, "arguments": {"query": question}})
 
-        return self._dedupe_tool_calls(routes)
+        return {
+            "route_intent": TOOLS_INTENT,
+            "tool_calls": self._dedupe_tool_calls(routes),
+        }
 
     def _dedupe_tool_calls(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         deduped: list[dict[str, Any]] = []
@@ -314,7 +398,11 @@ class LegalGraphAgent:
 
         return self._dedupe_tool_calls(enforced)
 
-    async def _route_tools(self, question: str) -> list[dict[str, Any]]:
+    async def _route_decision(self, question: str) -> dict[str, Any]:
+        heuristic_decision = self._fallback_route_decision(question)
+        if heuristic_decision["route_intent"] == CHITCHAT_INTENT:
+            return heuristic_decision
+
         try:
             content = await self._chat_model(
                 self.router_llm,
@@ -323,7 +411,14 @@ class LegalGraphAgent:
                     {"role": "user", "content": question},
                 ],
             )
-            parsed = self._safe_json_load(content, {"tool_calls": []})
+            parsed = self._safe_json_load(
+                content,
+                {"route_intent": TOOLS_INTENT, "tool_calls": []},
+            )
+            route_intent = str(parsed.get("route_intent", TOOLS_INTENT)).upper()
+            if route_intent == CHITCHAT_INTENT:
+                return {"route_intent": CHITCHAT_INTENT, "tool_calls": []}
+
             tool_calls = parsed.get("tool_calls", [])
             valid_calls = []
             for call in tool_calls:
@@ -331,12 +426,16 @@ class LegalGraphAgent:
                 arguments = call.get("arguments", {})
                 if name in TOOL_REGISTRY and isinstance(arguments, dict):
                     valid_calls.append({"name": name, "arguments": arguments})
+
             if valid_calls:
-                return self._enforce_composite_routes(question, valid_calls)
+                return {
+                    "route_intent": TOOLS_INTENT,
+                    "tool_calls": self._enforce_composite_routes(question, valid_calls),
+                }
         except Exception as exc:
             logger.warning("Tool routing failed, fallback to heuristic routes: %s", exc)
 
-        return self._fallback_routes(question)
+        return heuristic_decision
 
     async def _execute_tool_call(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         tool = TOOL_REGISTRY[tool_name]
@@ -465,13 +564,47 @@ class LegalGraphAgent:
             "is_final": True,
         }
 
+    async def _generate_clarifier_question(self, state: AgentState) -> str:
+        missing_info = state.get("missing_info", [])
+        questions = state.get("clarification_questions", [])
+        fallback = questions[0] if questions else "请再补充一下案件发生时间、双方关系和争议焦点。"
+
+        try:
+            response = await self._chat_model(
+                self.expert_llm,
+                [
+                    {"role": "system", "content": CLARIFIER_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"用户原问题：{state['question']}\n"
+                            f"缺失信息：{json.dumps(missing_info, ensure_ascii=False)}\n"
+                            f"建议追问：{json.dumps(questions, ensure_ascii=False)}"
+                        ),
+                    },
+                ],
+            )
+            cleaned = " ".join((response or "").strip().split())
+            return cleaned or fallback
+        except Exception as exc:
+            logger.warning("Clarifier generation failed, fallback to template question: %s", exc)
+            return fallback
+
     async def tool_router_node(self, state: AgentState) -> AgentState:
         current_query = state.get("current_query") or state["question"]
-        tool_calls = await self._route_tools(current_query)
+        decision = await self._route_decision(current_query)
         return {
             "current_query": current_query,
             "routed_query": current_query,
-            "tool_calls": tool_calls,
+            "route_intent": decision["route_intent"],
+            "tool_calls": decision["tool_calls"],
+        }
+
+    async def greeting_node(self, state: AgentState) -> AgentState:
+        return {
+            "response": GREETING_RESPONSE,
+            "sources": [],
+            "is_final": True,
         }
 
     async def vector_researcher_node(self, state: AgentState) -> AgentState:
@@ -479,12 +612,14 @@ class LegalGraphAgent:
         tool_calls = state.get("tool_calls") or []
 
         if not tool_calls or state.get("routed_query") != current_query:
-            tool_calls = await self._route_tools(current_query)
+            decision = await self._route_decision(current_query)
+            tool_calls = decision["tool_calls"]
 
         tool_results = await self._execute_tool_calls(tool_calls)
         return {
             "current_query": current_query,
             "routed_query": current_query,
+            "route_intent": TOOLS_INTENT,
             "tool_calls": tool_calls,
             "tool_results": self._merge_tool_results([], tool_results),
         }
@@ -509,22 +644,9 @@ class LegalGraphAgent:
         }
 
     async def clarifier_node(self, state: AgentState) -> AgentState:
-        progress = state.get("reflection_analysis", "现有材料还不足以给出稳定结论。").strip()
-        missing_info = state.get("missing_info", [])
-        questions = state.get("clarification_questions", [])
-
-        lines = [f"目前进展：{progress}"]
-        if missing_info:
-            lines.append("我还缺少这些关键案情要素：" + "；".join(missing_info))
-        if questions:
-            lines.append("请优先补充以下信息：")
-            for index, question in enumerate(questions, start=1):
-                lines.append(f"{index}. {question}")
-        else:
-            lines.append("请补充案件时间、主体关系、争议焦点等关键信息。")
-
+        question = await self._generate_clarifier_question(state)
         return {
-            "response": "\n".join(lines),
+            "response": question,
             "sources": self._extract_candidate_sources(state.get("tool_results", [])),
             "is_final": False,
         }
@@ -538,6 +660,7 @@ class LegalGraphAgent:
             "session_id": session_id,
             "question": question,
             "current_query": question,
+            "route_intent": TOOLS_INTENT,
             "loop_count": 0,
             "confidence_score": 0.0,
             "missing_info": [],
