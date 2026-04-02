@@ -33,9 +33,10 @@ LIMIT 5
 """
 
 QUERY_EXPANSION_SYSTEM_PROMPT = (
-    "你是一个法律专业术语转换器。"
-    "请将用户的口语化提问提取并扩写为 3-5 个法律专业关键词或核心概念，"
-    "用空格隔开。不要输出任何解释性文字。"
+    "你是一个法律搜索优化器。"
+    "请将用户的口语化提问直接转换为 5 个以内的专业法律关键词，用空格分隔。"
+    "严禁输出任何解释、编号、前缀或多余文字。"
+    "只输出关键词，例如：'试用期 录用条件 告知义务 违法解除'。"
 )
 
 CHROMA_RECALL_K = 10
@@ -150,6 +151,7 @@ def _expand_query(query: str) -> str:
         )
         content = response.choices[0].message.content or ""
         expanded_query = _sanitize_expanded_query(content)
+        expanded_query = expanded_query.split("\n")[0].strip()
         if not expanded_query:
             return ""
         if expanded_query == query:
