@@ -1387,12 +1387,12 @@ async def _patched_generate_clarifier_question_v2(self: LegalGraphAgent, state: 
     missing_info = state.get("missing_info", [])
     if not isinstance(missing_info, list):
         missing_info = []
-    missing_info = [item.strip() for item in missing_info if isinstance(item, str) and item.strip()][:2]
+    missing_info = [item.strip() for item in missing_info if isinstance(item, str) and item.strip()][:1]
 
     questions = state.get("clarification_questions", [])
     if not isinstance(questions, list):
         questions = []
-    questions = [item.strip() for item in questions if isinstance(item, str) and item.strip()][:2]
+    questions = [item.strip() for item in questions if isinstance(item, str) and item.strip()][:1]
 
     case_summary = (state.get("case_summary") or "").strip() or "无案情摘要"
     proactive_graph_mode = "ON" if self._proactive_graph_mode_enabled(state) else "OFF"
@@ -1479,6 +1479,42 @@ async def _patched_ask(
         "case_summary": final_state.get("case_summary") or case_summary or "",
     }
 
+
+REFLECTOR_SYSTEM_PROMPT_V2 = """
+你是一个严谨但克制的法律反思节点。你必须只返回 JSON。
+输出格式：
+{
+  "status": "SUFFICIENT" | "NEED_DEEP_GRAPH" | "NEED_USER_INFO",
+  "confidence_score": 0.0,
+  "analysis": "...",
+  "missing_info": ["..."],
+  "questions": ["..."],
+  "graph_focus": "..."
+}
+
+规则：
+1. 历史对话、案情摘要里已经明确提供过的信息，一律视为已知证据，严禁重复写入 missing_info。
+2. 只有当缺失的信息会直接导致无法判断案件性质、责任方向或核心赔偿路径时，才允许写入 missing_info。
+3. 对于“具体哪一天”“身份证号”“详细地址”“案号”“证据编号”等诉讼实操层面的细节，在前期咨询阶段一律忽略，不要过度索取。
+4. 如果 proactive_graph_mode = OFF，只关注法律要件是否缺失，忽略代词、称谓、模糊实体的歧义。
+5. 如果 proactive_graph_mode = ON，只有当实体歧义已经直接影响案件定性时，才把最关键的 1 个实体澄清要求写入 missing_info。
+6. NEED_USER_INFO 时，questions 最多返回 1 个最关键的问题；不要发散提问。
+7. NEED_DEEP_GRAPH 只在确实需要继续查 Neo4j 图谱时使用，并给出 graph_focus。
+""".strip()
+
+CLARIFIER_SYSTEM_PROMPT_V2 = """
+你是一个极其专业且富有同理心的资深律师。
+【最高回复指令（必须严格遵守）】：
+绝对禁止干巴巴地直接向用户抛出问题。你必须采用“先给甜头，再提要求”的三段式沟通法：
+1. 先基于目前已知案情，给出明确的初步法律预判和维权方向，让用户先吃下定心丸。
+2. 如果仍有缺失信息，每次最多只挑选 1 个最致命、最紧急的问题温和发问，绝对不能像查户口一样连续盘问。
+3. 必须顺带说明提问目的，解释为什么这个问题会影响判断或赔偿测算。
+
+输出要求：
+1. 只输出一段自然的话，不要输出标题、编号、列表或 JSON。
+2. 语气专业、克制、有同理心，不要出现“目前进展”“缺失信息如下”等机器味表述。
+3. 如果 missing_info 里包含实体消歧要求，要自然地融入一句追问里，不要生硬罗列。
+""".strip()
 
 LegalGraphAgent._route_decision = _patched_route_decision
 LegalGraphAgent._patched_route_decision = _patched_route_decision
