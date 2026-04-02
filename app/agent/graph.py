@@ -15,6 +15,7 @@ class AgentState(TypedDict, total=False):
     user_id: int
     session_id: str
     question: str
+    chat_history: str
     current_query: str
     routed_query: str
     route_intent: str

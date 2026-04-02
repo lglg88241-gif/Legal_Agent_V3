@@ -45,6 +45,8 @@ ROUTER_PROMPT = """
 
 REFLECTOR_SYSTEM_PROMPT = """
 你是一个严谨的法学反思专家。请评估“当前检索结果”是否足以支撑对“用户问题”的确定性回答。
+历史对话中已经明确给出的案情事实，一律视为已知证据。
+严禁把历史对话里已经出现过的信息再次写进 missing_info。
 你必须只返回 JSON，格式如下：
 {
   "status": "SUFFICIENT" | "NEED_DEEP_GRAPH" | "NEED_USER_INFO",
@@ -78,6 +80,7 @@ sources 只能填写检索结果中真实出现过的来源文件名，不能新
 CLARIFIER_SYSTEM_PROMPT = """
 你是一个真实的律师。请根据缺少的案情，直接向用户发问。
 严禁输出“目前进展”“我还缺少这些关键案情要素”“根据当前分析”等机器分析日志。
+请结合历史对话，只针对最新仍然缺失的信息追问，不要重复问之前问过的问题。
 只需输出最自然的一句话追问，语气专业、简洁、口语化。
 """.strip()
 
@@ -460,6 +463,7 @@ class LegalGraphAgent:
     async def _generate_reflection(self, state: AgentState) -> dict[str, Any]:
         tool_results = state.get("tool_results", [])
         context_blocks = self._build_context_blocks(tool_results)
+        chat_history = (state.get("chat_history") or "").strip() or "无历史对话"
         fallback = {
             "status": "NEED_USER_INFO",
             "confidence_score": 0.25,
@@ -477,6 +481,9 @@ class LegalGraphAgent:
                     "role": "user",
                     "content": (
                         f"用户问题：{state['question']}\n\n"
+                        f"历史对话：\n{chat_history}\n\n"
+                        "请注意：用户在历史对话中已经提供过的案情要素，绝对视为已知证据，"
+                        "严禁将其再次列入 missing_info 列表。\n\n"
                         f"当前检索查询：{state.get('current_query', state['question'])}\n"
                         f"当前循环次数：{state.get('loop_count', 0)}\n\n"
                         f"当前检索结果：\n{context_blocks or '无有效检索结果'}"
@@ -567,6 +574,7 @@ class LegalGraphAgent:
     async def _generate_clarifier_question(self, state: AgentState) -> str:
         missing_info = state.get("missing_info", [])
         questions = state.get("clarification_questions", [])
+        chat_history = (state.get("chat_history") or "").strip() or "无历史对话"
         fallback = questions[0] if questions else "请再补充一下案件发生时间、双方关系和争议焦点。"
 
         try:
@@ -577,6 +585,8 @@ class LegalGraphAgent:
                     {
                         "role": "user",
                         "content": (
+                            f"历史对话：\n{chat_history}\n\n"
+                            "请结合上下文，只针对最新仍然缺失的信息自然追问，不要重复问之前已经问过的问题。\n\n"
                             f"用户原问题：{state['question']}\n"
                             f"缺失信息：{json.dumps(missing_info, ensure_ascii=False)}\n"
                             f"建议追问：{json.dumps(questions, ensure_ascii=False)}"
@@ -610,17 +620,25 @@ class LegalGraphAgent:
     async def vector_researcher_node(self, state: AgentState) -> AgentState:
         current_query = state.get("current_query") or state["question"]
         tool_calls = state.get("tool_calls") or []
+        chat_history = state.get("chat_history", "")
 
         if not tool_calls or state.get("routed_query") != current_query:
             decision = await self._route_decision(current_query)
             tool_calls = decision["tool_calls"]
 
-        tool_results = await self._execute_tool_calls(tool_calls)
+        enriched_tool_calls = []
+        for call in tool_calls:
+            arguments = dict(call["arguments"])
+            if call["name"] in {LAW_TOOL, CASE_TOOL}:
+                arguments["chat_history"] = chat_history
+            enriched_tool_calls.append({"name": call["name"], "arguments": arguments})
+
+        tool_results = await self._execute_tool_calls(enriched_tool_calls)
         return {
             "current_query": current_query,
             "routed_query": current_query,
             "route_intent": TOOLS_INTENT,
-            "tool_calls": tool_calls,
+            "tool_calls": enriched_tool_calls,
             "tool_results": self._merge_tool_results([], tool_results),
         }
 
@@ -654,11 +672,18 @@ class LegalGraphAgent:
     async def legal_advisor_node(self, state: AgentState) -> AgentState:
         return await self._generate_final_answer(state)
 
-    async def ask(self, user_id: int, session_id: str, question: str) -> dict[str, Any]:
+    async def ask(
+        self,
+        user_id: int,
+        session_id: str,
+        question: str,
+        chat_history: str = "",
+    ) -> dict[str, Any]:
         initial_state: AgentState = {
             "user_id": user_id,
             "session_id": session_id,
             "question": question,
+            "chat_history": chat_history,
             "current_query": question,
             "route_intent": TOOLS_INTENT,
             "loop_count": 0,

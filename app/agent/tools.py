@@ -36,10 +36,12 @@ LIMIT 5
 """
 
 QUERY_EXPANSION_SYSTEM_PROMPT = """
-你是一位精通中国法律的资深律师。请将用户的口语化描述转化为 3-5 个互补的法律专业查询词，以最大化检索召回率。
+你是一个法律检索扩写助手。请结合历史对话语境，把用户当前提问扩写为更完整的法律检索查询。
 要求：
-1. 必须以标准的 JSON 数组格式返回，严禁任何解释：{"queries": ["查询词1", "查询词2", "..."]}。
-2. 查询词应涵盖：核心案由、适用法条关键短语、核心法律关系。
+1. 只返回 JSON，格式必须是 {"queries": ["查询1", "查询2", "查询3"]}。
+2. 生成 3 到 5 个互补查询，覆盖核心案由、法条关键词和法律关系。
+3. 如果用户当前提问很短，比如“全责”“赔多少”“算工伤吗”，必须结合历史对话补全主语、事实和争议点。
+4. 不要输出解释。
 """.strip()
 
 CHROMA_RECALL_K = 10
@@ -132,16 +134,22 @@ def _normalize_query_list(original_query: str, queries: list[Any]) -> list[str]:
     return normalized or [original_query]
 
 
-def _expand_queries(query: str) -> list[str]:
+def _expand_queries(query: str, chat_history: str = "") -> list[str]:
     normalized_query = query.strip()
     if not normalized_query:
         return [query]
 
     try:
+        history_text = (chat_history or "").strip() or "无历史对话"
         response = _get_query_expansion_llm().invoke(
             [
                 SystemMessage(content=QUERY_EXPANSION_SYSTEM_PROMPT),
-                HumanMessage(content=f"用户提问：{normalized_query}"),
+                HumanMessage(
+                    content=(
+                        f"这是之前的聊天记录：\n{history_text}\n\n"
+                        f"请结合历史语境，将用户当前的简短提问“{normalized_query}”扩写为完整的检索关键词。"
+                    )
+                ),
             ]
         )
         content = response.content if isinstance(response.content, str) else str(response.content)
@@ -281,8 +289,9 @@ async def _merge_hybrid_candidates(
     query: str,
     vectorstore: Chroma,
     corpus: str,
+    chat_history: str = "",
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    expanded_queries = _expand_queries(query)
+    expanded_queries = _expand_queries(query, chat_history=chat_history)
     retrieval_tasks = [
         _collect_query_candidates(expanded_query, vectorstore, corpus)
         for expanded_query in expanded_queries
@@ -307,29 +316,32 @@ def _retrieve_candidates(
     query: str,
     vectorstore: Chroma,
     corpus: str,
+    chat_history: str = "",
 ) -> tuple[list[str], list[dict[str, Any]]]:
-    return asyncio.run(_merge_hybrid_candidates(query, vectorstore, corpus))
+    return asyncio.run(_merge_hybrid_candidates(query, vectorstore, corpus, chat_history=chat_history))
 
 
 @tool
-def search_law_articles(query: str) -> str:
+def search_law_articles(query: str, chat_history: str = "") -> str:
     """用于查询法律条文、法规规定、量刑标准等纯法律理论问题。"""
     expanded_queries, candidates = _retrieve_candidates(
         query,
         _get_law_vectorstore(),
         corpus="law",
+        chat_history=chat_history,
     )
     rerank_query = " ".join(expanded_queries).strip() or query.strip()
     return _serialize_reranked_documents(rerank_query, candidates, top_k=LAW_TOP_K)
 
 
 @tool
-def search_case_text(query: str) -> str:
+def search_case_text(query: str, chat_history: str = "") -> str:
     """用于根据案情描述、作案手法等模糊信息查找相似的历史指导案例。"""
     expanded_queries, candidates = _retrieve_candidates(
         query,
         _get_case_vectorstore(),
         corpus="case",
+        chat_history=chat_history,
     )
     rerank_query = " ".join(expanded_queries).strip() or query.strip()
     return _serialize_reranked_documents(rerank_query, candidates, top_k=CASE_TOP_K)

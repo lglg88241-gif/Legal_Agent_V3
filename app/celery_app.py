@@ -6,11 +6,15 @@ import time
 from typing import Any
 
 from celery import Celery
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
-from app.services.conversation_store import ensure_storage_schema, store_message
+from app.services.conversation_store import (
+    ensure_storage_schema,
+    list_recent_conversation_messages,
+    store_message,
+)
 from app.services.legal_agent import legal_agent
 
 logger = logging.getLogger(__name__)
@@ -30,11 +34,7 @@ celery_app.conf.update(
 )
 
 
-async def persist_assistant_message(
-    conversation_id: int,
-    content: str,
-    metadata: dict[str, Any],
-) -> None:
+def _create_celery_session_factory() -> tuple[Any, async_sessionmaker[AsyncSession]]:
     celery_engine = create_async_engine(
         settings.DATABASE_URL,
         echo=False,
@@ -45,6 +45,42 @@ async def persist_assistant_message(
         celery_engine,
         expire_on_commit=False,
     )
+    return celery_engine, session_factory
+
+
+async def load_chat_history(
+    conversation_id: int,
+    limit: int = 6,
+) -> str:
+    celery_engine, session_factory = _create_celery_session_factory()
+
+    try:
+        await ensure_storage_schema(bind_engine=celery_engine)
+        async with session_factory() as db:
+            messages = await list_recent_conversation_messages(
+                db,
+                conversation_id=conversation_id,
+                limit=limit,
+            )
+    finally:
+        await celery_engine.dispose()
+
+    lines = []
+    for message in messages:
+        role = "User" if message.role == "user" else "Assistant"
+        content = " ".join((message.content or "").strip().split())
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+async def persist_assistant_message(
+    conversation_id: int,
+    content: str,
+    metadata: dict[str, Any],
+) -> None:
+    celery_engine, session_factory = _create_celery_session_factory()
 
     try:
         await ensure_storage_schema(bind_engine=celery_engine)
@@ -72,7 +108,8 @@ def ask_agent_task(
     start_time = time.time()
 
     try:
-        answer = asyncio.run(legal_agent.ask(user_id, session_id, question))
+        chat_history = asyncio.run(load_chat_history(conversation_id=conversation_id, limit=6))
+        answer = asyncio.run(legal_agent.ask(user_id, session_id, question, chat_history=chat_history))
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
         response_sources = answer.get("sources", []) if isinstance(answer, dict) else []

@@ -124,6 +124,20 @@ async def list_conversation_messages(
     return list(result)
 
 
+async def list_recent_conversation_messages(
+    db: AsyncSession,
+    conversation_id: int,
+    limit: int = 6,
+) -> list[Message]:
+    result = await db.scalars(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.desc(), Message.id.desc())
+        .limit(limit)
+    )
+    return list(reversed(list(result)))
+
+
 async def touch_conversation(
     db: AsyncSession,
     conversation: Conversation | None = None,
