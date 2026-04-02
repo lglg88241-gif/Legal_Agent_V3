@@ -16,26 +16,20 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 ROUTER_PROMPT = """
-你是一个高精度的意图识别路由引擎。你的唯一任务是判断用户问题需要调用哪些检索工具，并且只返回 JSON。
+你是一个高精度法律工具路由引擎。你的唯一任务是根据用户问题选择需要调用的检索工具，并且只返回 JSON。
+
 可用工具：
 1. search_law_articles(query: str)
 2. search_case_text(query: str)
 3. query_neo4j_graph(entity_name: str)
 
-判定规则：
-1. 只要用户在问法律定性、法律依据、是否构成、算不算、怎么判、量刑标准、赔偿标准、适用什么法条，必须调用 search_law_articles。
-2. 只要用户在问有没有案例、类似案例、实际案例、指导案例、同类判决、裁判思路，必须调用 search_case_text。
-3. 只要用户提到具体当事人、公司名称、案由、罪名、判决结果线索，必须调用 query_neo4j_graph。
-4. 当用户问题同时包含“法律定性/咨询”和“找案例”两类意图时，你必须同时返回 search_law_articles 和 search_case_text；如果问题里还出现当事人、罪名、案由等实体线索，还必须一并返回 query_neo4j_graph。
+规则：
+1. 用户询问法条、法律依据、是否构成、赔偿标准、量刑标准等问题时，必须调用 search_law_articles。
+2. 用户询问案例、类案、指导案例、裁判思路时，必须调用 search_case_text。
+3. 用户提到具体当事人、公司、案由、罪名、判决结果线索时，必须调用 query_neo4j_graph。
+4. 复合问题允许同时调用多个工具，严禁漏掉必要工具。
 
-核心规则：
-当用户的提问同时包含“法律定性/咨询”和“找案例”时，你必须同时在 JSON 数组中输出法条检索工具 search_law_articles 和案例检索工具 search_case_text 或 query_neo4j_graph。
-
-绝对禁止：
-1. 遇到复合问题时，绝不能只调用单一工具。
-2. 绝不能输出 JSON 以外的解释、前后缀或 Markdown。
-
-返回格式：
+输出格式：
 {
   "tool_calls": [
     {"name": "search_law_articles", "arguments": {"query": "..."}},
@@ -45,18 +39,35 @@ ROUTER_PROMPT = """
 }
 """.strip()
 
-EXPERT_SYSTEM_PROMPT = """
+REFLECTOR_SYSTEM_PROMPT = """
+你是一个严谨的法学反思专家。请评估“当前检索结果”是否足以支撑对“用户问题”的确定性回答。
+你必须只返回 JSON，格式如下：
+{
+  "status": "SUFFICIENT" | "NEED_DEEP_GRAPH" | "NEED_USER_INFO",
+  "confidence_score": 0.0,
+  "analysis": "...",
+  "missing_info": ["..."],
+  "questions": ["..."],
+  "graph_focus": "..."
+}
+
+规则：
+1. SUFFICIENT：现有法条、案例或图谱结果已足以回答。
+2. NEED_DEEP_GRAPH：需要继续查询人物、案由、裁判关系等更深层图谱线索。
+3. NEED_USER_INFO：缺少关键案情事实，必须先向用户追问。
+4. confidence_score 取值 0 到 1。
+5. questions 仅在 NEED_USER_INFO 时给出 1-2 个关键追问。
+6. graph_focus 仅在 NEED_DEEP_GRAPH 时提供一个适合查询 Neo4j 的实体或案由短语。
+""".strip()
+
+LEGAL_ADVISOR_SYSTEM_PROMPT = """
 你是一个严谨的中国执业律师。你必须严格依据提供的检索内容回答，绝不捏造法条、案例、金额或文件名。
 引用案例时必须写出具体判决结果。若检索内容无关，直接回答未找到依据。
-你必须只返回 JSON，对象格式固定为：
+你必须只返回 JSON：
 {
-  "needs_retry": false,
-  "retry_query": "",
   "answer": "...",
   "sources": ["..."]
 }
-如果证据不足，请将 needs_retry 设为 true，并在 retry_query 中提出新的检索方向。
-如果证据充足，请将 needs_retry 设为 false，并基于证据生成专业建议。
 sources 只能填写检索结果中真实出现过的来源文件名，不能新增、改写或猜测。
 """.strip()
 
@@ -73,6 +84,11 @@ class LegalGraphAgent:
             api_key=settings.ZHIPUAI_API_KEY,
             temperature=0.1,
         )
+        self.reflector_llm = ChatZhipuAI(
+            model="glm-4",
+            api_key=settings.ZHIPUAI_API_KEY,
+            temperature=0.1,
+        )
         self.expert_llm = ChatZhipuAI(
             model="glm-4",
             api_key=settings.ZHIPUAI_API_KEY,
@@ -80,12 +96,11 @@ class LegalGraphAgent:
         )
         self.graph = build_legal_agent_graph(self)
 
-    async def _chat_with_router_model(
+    async def _chat_model(
         self,
+        llm: ChatZhipuAI,
         messages: list[dict[str, str]],
-        max_tokens: int = 1024,
     ) -> str:
-        del max_tokens
         langchain_messages = []
         for message in messages:
             role = message.get("role")
@@ -95,8 +110,17 @@ class LegalGraphAgent:
             else:
                 langchain_messages.append(HumanMessage(content=content))
 
-        response = await self.router_llm.ainvoke(langchain_messages)
+        response = await llm.ainvoke(langchain_messages)
         return response.content if isinstance(response.content, str) else str(response.content)
+
+    def _safe_json_load(self, raw_content: str, fallback: dict[str, Any]) -> dict[str, Any]:
+        try:
+            parsed = json.loads(repair_json(raw_content))
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception as exc:
+            logger.warning("Failed to parse JSON payload: %s", exc)
+        return fallback
 
     def _extract_candidate_sources(self, tool_results: list[dict[str, Any]]) -> list[str]:
         sources: list[str] = []
@@ -154,78 +178,30 @@ class LegalGraphAgent:
 
         return candidate_sources[:5]
 
-    def _merge_retry_query(self, current_query: str, retry_query: str) -> str:
-        refined = retry_query.strip()
-        if not refined:
-            return current_query
-        if refined in current_query:
-            return current_query
-        return f"{current_query} {refined}".strip()
-
-    async def _generate_advisor_decision(
+    def _merge_tool_results(
         self,
-        question: str,
-        current_query: str,
-        tool_results: list[dict[str, Any]],
-        loop_count: int,
-    ) -> dict[str, Any]:
-        candidate_sources = self._extract_candidate_sources(tool_results)
-        context_blocks = []
+        base_results: list[dict[str, Any]],
+        new_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        for item in [*base_results, *new_results]:
+            key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+
+        return merged
+
+    def _build_context_blocks(self, tool_results: list[dict[str, Any]]) -> str:
+        blocks = []
         for item in tool_results:
-            context_blocks.append(
+            blocks.append(
                 f"工具: {item['tool']}\n参数: {json.dumps(item['arguments'], ensure_ascii=False)}\n结果: {item['result']}"
             )
-
-        user_prompt = (
-            f"用户问题：{question}\n\n"
-            f"当前检索查询：{current_query}\n"
-            f"当前循环次数：{loop_count}\n"
-            f"可用来源文件：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
-            f"以下是全部检索上下文：\n{chr(10).join(context_blocks)}\n\n"
-            "请先评估检索到的上下文是否足以回答用户问题。"
-            "如果证据不足，请设置 needs_retry=true，并在 retry_query 中给出新的检索方向。"
-            "如果证据充足，请设置 needs_retry=false，并基于证据输出专业建议。"
-            "必须严格返回 JSON。"
-        )
-
-        response = await self.expert_llm.ainvoke(
-            [
-                SystemMessage(content=EXPERT_SYSTEM_PROMPT),
-                HumanMessage(content=user_prompt),
-            ]
-        )
-        raw_content = response.content if isinstance(response.content, str) else str(response.content)
-
-        try:
-            parsed = json.loads(repair_json(raw_content))
-            answer = parsed.get("answer") or parsed.get("response") or ""
-            retry_query = parsed.get("retry_query") or parsed.get("refined_query") or ""
-            needs_retry = bool(parsed.get("needs_retry"))
-            sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
-
-            if not isinstance(answer, str):
-                answer = ""
-            if not isinstance(retry_query, str):
-                retry_query = ""
-
-            if needs_retry and not retry_query.strip():
-                needs_retry = False
-
-            return {
-                "response": answer.strip() or "未找到依据。",
-                "sources": sources,
-                "needs_retry": needs_retry,
-                "retry_query": retry_query.strip(),
-            }
-        except Exception as exc:
-            logger.warning("Failed to parse advisor response as JSON: %s", exc)
-            fallback_response = raw_content.strip() if raw_content.strip() else "未找到依据。"
-            return {
-                "response": fallback_response,
-                "sources": candidate_sources[:5],
-                "needs_retry": False,
-                "retry_query": "",
-            }
+        return "\n\n".join(blocks)
 
     def _detect_intents(self, question: str) -> dict[str, bool]:
         lowered = question.lower()
@@ -238,12 +214,11 @@ class LegalGraphAgent:
             "民法典",
             "刑法",
             "劳动合同法",
-            "消费者权益",
+            "赔偿",
             "算不算",
             "怎么判",
             "如何认定",
             "是否构成",
-            "赔偿标准",
             "工伤",
         ]
         case_keywords = [
@@ -251,8 +226,6 @@ class LegalGraphAgent:
             "类案",
             "判决",
             "案情",
-            "作案手法",
-            "历史案例",
             "指导案例",
             "裁判",
             "有没有案例",
@@ -343,14 +316,14 @@ class LegalGraphAgent:
 
     async def _route_tools(self, question: str) -> list[dict[str, Any]]:
         try:
-            content = await self._chat_with_router_model(
+            content = await self._chat_model(
+                self.router_llm,
                 [
                     {"role": "system", "content": ROUTER_PROMPT},
                     {"role": "user", "content": question},
                 ],
-                max_tokens=300,
             )
-            parsed = json.loads(repair_json(content))
+            parsed = self._safe_json_load(content, {"tool_calls": []})
             tool_calls = parsed.get("tool_calls", [])
             valid_calls = []
             for call in tool_calls:
@@ -385,6 +358,113 @@ class LegalGraphAgent:
         ]
         return await asyncio.gather(*tasks)
 
+    async def _generate_reflection(self, state: AgentState) -> dict[str, Any]:
+        tool_results = state.get("tool_results", [])
+        context_blocks = self._build_context_blocks(tool_results)
+        fallback = {
+            "status": "NEED_USER_INFO",
+            "confidence_score": 0.25,
+            "analysis": "现有证据不足，无法稳定定性。",
+            "missing_info": ["关键案情事实不足"],
+            "questions": ["请补充案件发生时间、主体关系和争议焦点。"],
+            "graph_focus": "",
+        }
+
+        content = await self._chat_model(
+            self.reflector_llm,
+            [
+                {"role": "system", "content": REFLECTOR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户问题：{state['question']}\n\n"
+                        f"当前检索查询：{state.get('current_query', state['question'])}\n"
+                        f"当前循环次数：{state.get('loop_count', 0)}\n\n"
+                        f"当前检索结果：\n{context_blocks or '无有效检索结果'}"
+                    ),
+                },
+            ],
+        )
+        parsed = self._safe_json_load(content, fallback)
+
+        status = str(parsed.get("status", fallback["status"])).upper()
+        if status not in {"SUFFICIENT", "NEED_DEEP_GRAPH", "NEED_USER_INFO"}:
+            status = fallback["status"]
+
+        confidence_score = parsed.get("confidence_score", fallback["confidence_score"])
+        try:
+            confidence_value = float(confidence_score)
+        except Exception:
+            confidence_value = float(fallback["confidence_score"])
+        confidence_value = max(0.0, min(1.0, confidence_value))
+
+        missing_info = parsed.get("missing_info", [])
+        if not isinstance(missing_info, list):
+            missing_info = []
+        missing_info = [item.strip() for item in missing_info if isinstance(item, str) and item.strip()]
+
+        questions = parsed.get("questions", [])
+        if not isinstance(questions, list):
+            questions = []
+        questions = [item.strip() for item in questions if isinstance(item, str) and item.strip()][:2]
+
+        analysis = parsed.get("analysis", fallback["analysis"])
+        if not isinstance(analysis, str) or not analysis.strip():
+            analysis = fallback["analysis"]
+
+        graph_focus = parsed.get("graph_focus", "")
+        if not isinstance(graph_focus, str):
+            graph_focus = ""
+        graph_focus = graph_focus.strip() or state.get("current_query", state["question"])
+
+        return {
+            "reflection_status": status,
+            "confidence_score": confidence_value,
+            "reflection_analysis": analysis.strip(),
+            "missing_info": missing_info,
+            "clarification_questions": questions,
+            "graph_focus": graph_focus,
+        }
+
+    async def _generate_final_answer(self, state: AgentState) -> dict[str, Any]:
+        tool_results = state.get("tool_results", [])
+        candidate_sources = self._extract_candidate_sources(tool_results)
+        context_blocks = self._build_context_blocks(tool_results)
+        fallback = {
+            "answer": "未找到依据。",
+            "sources": [],
+        }
+
+        content = await self._chat_model(
+            self.expert_llm,
+            [
+                {"role": "system", "content": LEGAL_ADVISOR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"用户问题：{state['question']}\n\n"
+                        f"反思结论：{state.get('reflection_status', 'SUFFICIENT')}\n"
+                        f"证据置信度：{state.get('confidence_score', 0.0)}\n"
+                        f"可用来源文件：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
+                        f"检索上下文：\n{context_blocks or '无有效检索结果'}"
+                    ),
+                },
+            ],
+        )
+        parsed = self._safe_json_load(content, fallback)
+
+        answer = parsed.get("answer") or parsed.get("response") or fallback["answer"]
+        if not isinstance(answer, str) or not answer.strip():
+            answer = fallback["answer"]
+
+        sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
+
+        return {
+            "response": answer.strip(),
+            "sources": sources,
+            "is_final": True,
+        }
+
     async def tool_router_node(self, state: AgentState) -> AgentState:
         current_query = state.get("current_query") or state["question"]
         tool_calls = await self._route_tools(current_query)
@@ -406,37 +486,51 @@ class LegalGraphAgent:
             "current_query": current_query,
             "routed_query": current_query,
             "tool_calls": tool_calls,
-            "tool_results": tool_results,
+            "tool_results": self._merge_tool_results([], tool_results),
         }
 
-    async def advisor_node(self, state: AgentState) -> AgentState:
-        current_query = state.get("current_query") or state["question"]
-        loop_count = int(state.get("loop_count", 0))
-        decision = await self._generate_advisor_decision(
-            question=state["question"],
-            current_query=current_query,
-            tool_results=state.get("tool_results", []),
-            loop_count=loop_count,
+    async def reflector_node(self, state: AgentState) -> AgentState:
+        reflection = await self._generate_reflection(state)
+        return {
+            **reflection,
+            "loop_count": int(state.get("loop_count", 0)) + 1,
+        }
+
+    async def neo4j_specialist_node(self, state: AgentState) -> AgentState:
+        graph_focus = state.get("graph_focus") or state.get("current_query") or state["question"]
+        graph_result = await self._execute_tool_call(
+            GRAPH_TOOL,
+            {"entity_name": graph_focus},
         )
+        merged_results = self._merge_tool_results(state.get("tool_results", []), [graph_result])
+        return {
+            "tool_results": merged_results,
+            "current_query": graph_focus,
+        }
 
-        updated_loop_count = loop_count + 1
-        retry_query = decision.get("retry_query", "")
-        needs_retry = bool(decision.get("needs_retry"))
-        next_query = current_query
+    async def clarifier_node(self, state: AgentState) -> AgentState:
+        progress = state.get("reflection_analysis", "现有材料还不足以给出稳定结论。").strip()
+        missing_info = state.get("missing_info", [])
+        questions = state.get("clarification_questions", [])
 
-        if needs_retry:
-            next_query = self._merge_retry_query(current_query, retry_query)
-            if next_query == current_query:
-                needs_retry = False
+        lines = [f"目前进展：{progress}"]
+        if missing_info:
+            lines.append("我还缺少这些关键案情要素：" + "；".join(missing_info))
+        if questions:
+            lines.append("请优先补充以下信息：")
+            for index, question in enumerate(questions, start=1):
+                lines.append(f"{index}. {question}")
+        else:
+            lines.append("请补充案件时间、主体关系、争议焦点等关键信息。")
 
         return {
-            "response": decision.get("response", "未找到依据。"),
-            "sources": decision.get("sources", []),
-            "needs_retry": needs_retry,
-            "retry_query": retry_query,
-            "current_query": next_query,
-            "loop_count": updated_loop_count,
+            "response": "\n".join(lines),
+            "sources": self._extract_candidate_sources(state.get("tool_results", [])),
+            "is_final": False,
         }
+
+    async def legal_advisor_node(self, state: AgentState) -> AgentState:
+        return await self._generate_final_answer(state)
 
     async def ask(self, session_id: str, question: str) -> dict[str, Any]:
         initial_state: AgentState = {
@@ -444,21 +538,26 @@ class LegalGraphAgent:
             "question": question,
             "current_query": question,
             "loop_count": 0,
-            "needs_retry": False,
+            "confidence_score": 0.0,
+            "missing_info": [],
+            "clarification_questions": [],
             "tool_calls": [],
             "tool_results": [],
             "sources": [],
             "response": "",
-            "retry_query": "",
+            "reflection_status": "",
+            "reflection_analysis": "",
+            "graph_focus": "",
+            "is_final": False,
         }
 
         final_state = await self.graph.ainvoke(initial_state)
-        response = final_state.get("response") or "未找到依据。"
-        sources = final_state.get("sources") or []
-
         return {
-            "response": response,
-            "sources": sources,
+            "response": final_state.get("response") or "未找到依据。",
+            "sources": final_state.get("sources") or [],
+            "is_final": bool(final_state.get("is_final", False)),
+            "confidence_score": float(final_state.get("confidence_score", 0.0)),
+            "missing_info": final_state.get("missing_info") or [],
         }
 
 
