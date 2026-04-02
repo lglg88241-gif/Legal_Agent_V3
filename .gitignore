@@ -11,3 +11,4 @@ __pycache__/
 # Runtime vector stores
 chroma_data/
 runtime_chroma_data/
+*.pkl
