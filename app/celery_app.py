@@ -15,6 +15,7 @@ from app.services.conversation_store import (
     list_recent_conversation_messages,
     store_message,
 )
+from app.services.graph_extractor import format_graph_memory, sync_case_graph_from_history
 from app.services.legal_agent import legal_agent
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,10 @@ async def load_chat_history(
     return "\n".join(lines)
 
 
+async def load_graph_memory(conversation_id: int) -> str:
+    return await format_graph_memory(conversation_id=conversation_id)
+
+
 async def persist_assistant_message(
     conversation_id: int,
     content: str,
@@ -109,7 +114,17 @@ def ask_agent_task(
 
     try:
         chat_history = asyncio.run(load_chat_history(conversation_id=conversation_id, limit=6))
-        answer = asyncio.run(legal_agent.ask(user_id, session_id, question, chat_history=chat_history))
+        asyncio.run(sync_case_graph_from_history(conversation_id=conversation_id, chat_history=chat_history))
+        graph_memory = asyncio.run(load_graph_memory(conversation_id=conversation_id))
+        answer = asyncio.run(
+            legal_agent.ask(
+                user_id,
+                session_id,
+                question,
+                chat_history=chat_history,
+                graph_memory=graph_memory,
+            )
+        )
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
         response_sources = answer.get("sources", []) if isinstance(answer, dict) else []

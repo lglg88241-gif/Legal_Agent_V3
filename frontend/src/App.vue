@@ -149,10 +149,10 @@ import {
   clearConversationMessages,
   createConversation,
   deleteConversation,
+  getConversationGraph,
   getConversationMessages,
   getConversationSummary,
   getConversations,
-  getGraphSubgraph,
   getSystemStatus,
   sendMessage,
   submitFeedback,
@@ -363,6 +363,7 @@ async function switchConversation(conversationId) {
     resetGraph()
     const { data } = await getConversationMessages(conversationId)
     applyConversationPayload(data)
+    await fetchConversationGraph(conversationId)
   } catch (error) {
     console.error('Failed to load conversation messages:', error)
     ElMessage.error('加载会话消息失败。')
@@ -425,9 +426,14 @@ async function removeConversation(conversationId) {
     .catch(() => {})
 }
 
-async function fetchGraph(query) {
+async function fetchConversationGraph(conversationId, query = '') {
+  if (!conversationId) {
+    resetGraph()
+    return
+  }
+
   const requestId = ++latestGraphRequestId.value
-  currentGraph.query = query
+  currentGraph.query = query || currentConversation.value?.title || `会话 ${conversationId} 案情图谱`
   currentGraph.nodes = []
   currentGraph.edges = []
   currentGraph.tokens = []
@@ -436,9 +442,9 @@ async function fetchGraph(query) {
   currentGraph.error = ''
 
   try {
-    const { data } = await getGraphSubgraph(query)
+    const { data } = await getConversationGraph(conversationId)
     if (requestId !== latestGraphRequestId.value) return
-    currentGraph.query = data.query || query
+    currentGraph.query = data.query || query || currentGraph.query
     currentGraph.nodes = data.nodes || []
     currentGraph.edges = data.edges || []
     currentGraph.tokens = data.tokens || []
@@ -509,7 +515,9 @@ async function send() {
   graphSidebarCollapsed.value = false
   touchConversationLocal(conversationId)
   void ensureConversationTitle(text)
-  void fetchGraph(text)
+  currentGraph.loading = true
+  currentGraph.error = ''
+  currentGraph.query = text
   scrollBottom()
 
   try {
@@ -530,6 +538,7 @@ async function send() {
     currentAnalysis.actions = data.agent_actions || []
     currentAnalysis.sources = data.sources || []
     await refreshConversationList(conversationId)
+    await fetchConversationGraph(conversationId, text)
   } catch (error) {
     console.error('Failed to send message:', error)
     updatePendingMessage(tempKey, { pending: false })
@@ -545,6 +554,7 @@ async function send() {
     })
   } finally {
     sending.value = false
+    currentGraph.loading = false
     scrollBottom()
   }
 }

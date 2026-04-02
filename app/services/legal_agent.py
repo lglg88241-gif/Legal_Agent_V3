@@ -788,5 +788,97 @@ class LegalGraphAgent:
             "missing_info": final_state.get("missing_info") or [],
         }
 
+async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
+    tool_results = state.get("tool_results", [])
+    candidate_sources = self._extract_candidate_sources(tool_results)
+    context_blocks = self._build_context_blocks(tool_results)
+    graph_memory = (state.get("graph_memory") or "").strip() or "无可用案情结构图"
+    fallback = {
+        "answer": "未找到依据。",
+        "sources": [],
+    }
+
+    content = await self._chat_model(
+        self.expert_llm,
+        [
+            {"role": "system", "content": LEGAL_ADVISOR_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"用户问题：{state['question']}\n\n"
+                    f"这是系统梳理出的当前案情结构图：\n{graph_memory}\n\n"
+                    f"反思结论：{state.get('reflection_status', 'SUFFICIENT')}\n"
+                    f"证据置信度：{state.get('confidence_score', 0.0)}\n"
+                    f"可用来源文件：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
+                    f"检索上下文：\n{context_blocks or '无有效检索结果'}"
+                ),
+            },
+        ],
+    )
+    parsed = self._safe_json_load(content, fallback)
+
+    answer = parsed.get("answer") or parsed.get("response") or fallback["answer"]
+    if not isinstance(answer, str) or not answer.strip():
+        answer = fallback["answer"]
+
+    sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
+
+    return {
+        "response": answer.strip(),
+        "sources": sources,
+        "is_final": True,
+    }
+
+
+async def _patched_ask(
+    self: LegalGraphAgent,
+    user_id: int,
+    session_id: str,
+    question: str,
+    chat_history: str = "",
+    graph_memory: str = "",
+) -> dict[str, Any]:
+    initial_state: AgentState = {
+        "user_id": user_id,
+        "session_id": session_id,
+        "question": question,
+        "chat_history": chat_history,
+        "graph_memory": graph_memory,
+        "current_query": question,
+        "route_intent": TOOLS_INTENT,
+        "loop_count": 0,
+        "confidence_score": 0.0,
+        "missing_info": [],
+        "clarification_questions": [],
+        "tool_calls": [],
+        "tool_results": [],
+        "sources": [],
+        "response": "",
+        "reflection_status": "",
+        "reflection_analysis": "",
+        "graph_focus": "",
+        "is_final": False,
+    }
+
+    final_state = await self.graph.ainvoke(
+        initial_state,
+        config={
+            "configurable": {
+                "thread_id": session_id,
+                "user_id": str(user_id),
+            }
+        },
+    )
+    return {
+        "response": final_state.get("response") or "未找到依据。",
+        "sources": final_state.get("sources") or [],
+        "is_final": bool(final_state.get("is_final", False)),
+        "confidence_score": float(final_state.get("confidence_score", 0.0)),
+        "missing_info": final_state.get("missing_info") or [],
+    }
+
+
+LegalGraphAgent._generate_final_answer = _patched_generate_final_answer
+LegalGraphAgent.ask = _patched_ask
 
 legal_agent = LegalGraphAgent()

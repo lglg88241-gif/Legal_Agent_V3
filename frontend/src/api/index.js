@@ -70,6 +70,8 @@ export const healthCheck = () => api.get('/health')
 export const getSystemStatus = () => api.get('/system/status')
 export const getKnowledgeStatus = () => api.get('/knowledge/status')
 export const getGraphSubgraph = (query) => api.get('/graph/subgraph', { params: { query } })
+export const getConversationGraph = (conversationId) =>
+  api.get(`/conversations/${conversationId}/graph`)
 export const searchKnowledge = (query, topK = 5, domain = null) =>
   api.post('/knowledge/search', { query, top_k: topK, domain })
 export const getAgentStatus = () => api.get('/agent/status')

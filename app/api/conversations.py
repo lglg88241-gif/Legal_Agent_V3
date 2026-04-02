@@ -19,6 +19,7 @@ from app.services.conversation_store import (
     serialize_message,
     update_conversation_title,
 )
+from app.services.graph_extractor import delete_case_graph, get_case_graph
 from app.services.llm_service import llm_service
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -99,6 +100,25 @@ async def get_conversation_messages(
     }
 
 
+@router.get("/{conversation_id}/graph")
+async def get_conversation_graph(
+    conversation_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    conversation = await get_conversation_for_user(db, current_user.user_id, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    graph = await get_case_graph(conversation.id)
+    return {
+        "status": "success",
+        "conversation_id": conversation.id,
+        **graph,
+    }
+
+
 @router.delete("/{conversation_id}")
 async def delete_conversation(
     conversation_id: int,
@@ -112,6 +132,7 @@ async def delete_conversation(
 
     await delete_conversation_record(db, conversation.id)
     await db.commit()
+    await delete_case_graph(conversation.id)
     return {"status": "success"}
 
 
@@ -128,6 +149,7 @@ async def clear_messages(
 
     await clear_conversation_messages(db, conversation.id)
     await db.commit()
+    await delete_case_graph(conversation.id)
     return {"status": "success"}
 
 
