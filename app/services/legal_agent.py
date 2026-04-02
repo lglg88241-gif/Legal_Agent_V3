@@ -12,6 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from app.agent.graph import AgentState, build_legal_agent_graph
 from app.agent.tools import AGENT_TOOLS
 from app.core.config import settings
+from app.services.graph_extractor import format_graph_memory
 
 logger = logging.getLogger(__name__)
 
@@ -853,19 +854,32 @@ class LegalGraphAgent:
 async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
     tool_results = state.get("tool_results", [])
     candidate_sources = self._extract_candidate_sources(tool_results)
-    context_blocks = self._build_context_blocks(tool_results)
+    retrieved_docs = self._build_context_blocks(tool_results)
     case_summary = (state.get("case_summary") or "").strip() or "无卷宗摘要"
-    graph_memory = (state.get("graph_memory") or "").strip() or "无可用案情结构图"
+    graph_context = (
+        (state.get("graph_context") or "").strip()
+        or (state.get("graph_memory") or "").strip()
+        or "无可用案情结构图"
+    )
     fallback = {
         "answer": "未找到依据。",
         "sources": [],
     }
-    advisor_system_prompt = (
-        f"{LEGAL_ADVISOR_SYSTEM_PROMPT}\n\n"
-        f"Case_Summary:\n{case_summary}\n\n"
-        f"Case_Graph:\n{graph_memory}\n\n"
-        "你必须把上述 Case_Graph 视为当前卷宗的事实骨架，只能围绕这份卷宗内的事实、检索结果和来源作答。"
-    )
+    advisor_system_prompt = f"""
+你是一个极其专业的法律分析师。
+【当前案件纯净摘要】：
+{case_summary}
+
+【当前案件逻辑图谱】：
+{graph_context}
+
+【检索到的指导性案例与法条】：
+{retrieved_docs or "无有效检索结果"}
+
+分析指令：请严格基于【摘要】和【图谱】中的事实，应用【检索案例】中的判决规则，为用户提供专业的法律解答与索赔预估。
+你必须显式区分“已知事实”“适用规则”“不确定事项”，禁止编造卷宗中不存在的事实。
+输出格式保持为 JSON，至少包含 answer 和 sources 字段。
+""".strip()
 
     content = await self._chat_model(
         self.expert_llm,
@@ -878,7 +892,7 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
                     f"反思结论：{state.get('reflection_status', 'SUFFICIENT')}\n"
                     f"证据置信度：{state.get('confidence_score', 0.0)}\n"
                     f"可用来源文件：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
-                    f"检索上下文：\n{context_blocks or '无有效检索结果'}"
+                    f"检索上下文：\n{retrieved_docs or '无有效检索结果'}"
                 ),
             },
         ],
@@ -913,16 +927,17 @@ TRIPLE_TRACK_ROUTER_PROMPT_V2 = """
 """.strip()
 
 FACT_UPDATER_SYSTEM_PROMPT_V2 = """
-你是案件事实摘要清洗器。你的任务是根据旧摘要和用户最新输入，输出一份“净白版”案情摘要。
+你是一个案卷整理员。你的任务是根据旧摘要和用户最新输入，输出一份“净白版”案情摘要。
 
 要求：
-【最高指令】：绝对禁止遗漏旧摘要中的具体细节（金额、时间、名称）。必须增量合并！
+【最高指令】：绝对禁止遗漏旧摘要中已存在的具体金额、时间、公司名称、身份关系、地点等核心细节！必须进行增量合并，除非用户明确推翻了某件事，否则所有旧数据必须一字不差地保留在最新摘要中！
 1. 只保留客观事实，不写法律结论、不写推测、不写情绪。
 2. 如果用户否认、修正、推翻了旧事实，必须删除被推翻的旧事实，只保留最新版本。
-3. 如果用户输入与案件无关，保持原摘要。
-4. 输出 JSON：
+3. 如果用户输入与案件无关，保持原摘要不变。
+4. 新摘要必须尽可能完整，优先保留旧摘要中的细节，再补入本轮新增事实。
+5. 输出 JSON：
 {"case_summary": "..."}
-5. case_summary 用简洁中文表述；没有有效事实时返回空字符串。
+6. case_summary 用简洁中文表述；没有有效事实时返回空字符串。
 """.strip()
 
 
@@ -1223,6 +1238,7 @@ async def _patched_vector_researcher_node(self: LegalGraphAgent, state: AgentSta
     route_intent = str(state.get("route_intent", "GENERAL_CONSULT")).upper()
     chat_history = state.get("chat_history", "")
     case_summary = state.get("case_summary", "")
+    conversation_id = state.get("conversation_id")
     tool_calls = state.get("tool_calls") or []
 
     if not tool_calls or state.get("routed_query") != current_query:
@@ -1235,13 +1251,30 @@ async def _patched_vector_researcher_node(self: LegalGraphAgent, state: AgentSta
             arguments["chat_history"] = case_summary or chat_history
         enriched_tool_calls.append({"name": call["name"], "arguments": arguments})
 
-    tool_results = await self._execute_tool_calls(enriched_tool_calls)
+    graph_context = (state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip()
+    retrieval_task = self._execute_tool_calls(enriched_tool_calls)
+    graph_task = None
+    if conversation_id:
+        graph_task = format_graph_memory(int(conversation_id))
+
+    if graph_task is not None:
+        tool_results, latest_graph_memory = await asyncio.gather(retrieval_task, graph_task)
+        graph_context = (
+            f"当前案件图谱事实：\n{latest_graph_memory.strip()}"
+            if isinstance(latest_graph_memory, str) and latest_graph_memory.strip()
+            else graph_context
+        )
+    else:
+        tool_results = await retrieval_task
+
     return {
         "current_query": current_query,
         "routed_query": current_query,
         "route_intent": route_intent,
         "tool_calls": enriched_tool_calls,
         "tool_results": self._merge_tool_results([], tool_results),
+        "graph_context": graph_context,
+        "graph_memory": graph_context,
     }
 
 
@@ -1394,14 +1427,17 @@ async def _patched_ask(
     case_summary: str = "",
     graph_memory: str = "",
     proactive_graph_mode: bool = True,
+    conversation_id: int | None = None,
 ) -> dict[str, Any]:
     initial_state: AgentState = {
         "user_id": user_id,
+        "conversation_id": int(conversation_id) if conversation_id is not None else 0,
         "session_id": session_id,
         "question": question,
         "proactive_graph_mode": bool(proactive_graph_mode),
         "chat_history": chat_history,
         "case_summary": case_summary,
+        "graph_context": graph_memory,
         "graph_memory": graph_memory,
         "current_query": question,
         "route_intent": "GENERAL_CONSULT",

@@ -237,6 +237,7 @@ def ask_agent_task(
                 case_summary=case_summary,
                 graph_memory=graph_memory,
                 proactive_graph_mode=proactive_graph_mode,
+                conversation_id=conversation_id,
             )
         )
         latency_ms = int((time.time() - start_time) * 1000)

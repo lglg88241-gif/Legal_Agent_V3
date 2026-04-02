@@ -13,11 +13,13 @@ MAX_GRAPH_LOOPS = 2
 
 class AgentState(TypedDict, total=False):
     user_id: int
+    conversation_id: int
     session_id: str
     question: str
     proactive_graph_mode: bool
     chat_history: str
     case_summary: str
+    graph_context: str
     graph_memory: str
     current_query: str
     routed_query: str
