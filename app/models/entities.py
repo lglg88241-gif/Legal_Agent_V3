@@ -38,7 +38,7 @@ class Conversation(Base):
     )
     session_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    case_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    case_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,

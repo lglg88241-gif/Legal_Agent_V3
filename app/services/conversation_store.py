@@ -55,11 +55,11 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
             sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN case_summary TEXT"))
         elif dialect == "postgresql":
             sync_conn.execute(
-                text("ALTER TABLE conversations ADD COLUMN case_summary TEXT NOT NULL DEFAULT ''")
+                text("ALTER TABLE conversations ADD COLUMN case_summary TEXT DEFAULT NULL")
             )
         else:
             sync_conn.execute(
-                text("ALTER TABLE conversations ADD COLUMN case_summary TEXT NOT NULL DEFAULT ''")
+                text("ALTER TABLE conversations ADD COLUMN case_summary TEXT DEFAULT NULL")
             )
 
     sync_conn.execute(
