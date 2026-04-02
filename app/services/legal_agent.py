@@ -854,6 +854,7 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
     tool_results = state.get("tool_results", [])
     candidate_sources = self._extract_candidate_sources(tool_results)
     context_blocks = self._build_context_blocks(tool_results)
+    case_summary = (state.get("case_summary") or "").strip() or "无卷宗摘要"
     graph_memory = (state.get("graph_memory") or "").strip() or "无可用案情结构图"
     fallback = {
         "answer": "未找到依据。",
@@ -861,6 +862,7 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
     }
     advisor_system_prompt = (
         f"{LEGAL_ADVISOR_SYSTEM_PROMPT}\n\n"
+        f"Case_Summary:\n{case_summary}\n\n"
         f"Case_Graph:\n{graph_memory}\n\n"
         "你必须把上述 Case_Graph 视为当前卷宗的事实骨架，只能围绕这份卷宗内的事实、检索结果和来源作答。"
     )
@@ -894,6 +896,33 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
         "sources": sources,
         "is_final": True,
     }
+
+
+TRIPLE_TRACK_ROUTER_PROMPT_V2 = """
+你是法律智能体的中枢路由器。你必须把用户输入分到三类之一，并只返回 JSON：
+{
+  "route_intent": "GREETING" | "GENERAL_CONSULT" | "CASE_UPDATE"
+}
+
+判定规则：
+1. GREETING：只有寒暄、试探在线、无意义客套，例如“你好”“在吗”“hello”。
+2. GENERAL_CONSULT：纯法律常识、法条、赔偿标准、量刑标准、程序规则、理论咨询，不是在补充当前卷宗事实。
+3. CASE_UPDATE：在补充、修正、否认、澄清、追答当前案件事实，包括极短回复；如果历史对话或 case_summary 表明正在讨论某个案件，而用户回复是“是”“不是”“没有”“他”“老板”“对方”“那辆车”等，也判为 CASE_UPDATE。
+
+严禁把正在更新案件事实的输入误判为 GENERAL_CONSULT。
+""".strip()
+
+FACT_UPDATER_SYSTEM_PROMPT_V2 = """
+你是案件事实摘要清洗器。你的任务是根据旧摘要和用户最新输入，输出一份“净白版”案情摘要。
+
+要求：
+1. 只保留客观事实，不写法律结论、不写推测、不写情绪。
+2. 如果用户否认、修正、推翻了旧事实，必须删除被推翻的旧事实，只保留最新版本。
+3. 如果用户输入与案件无关，保持原摘要。
+4. 输出 JSON：
+{"case_summary": "..."}
+5. case_summary 用简洁中文表述；没有有效事实时返回空字符串。
+""".strip()
 
 
 async def _patched_generate_reflection(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
@@ -1005,12 +1034,363 @@ async def _patched_generate_clarifier_question(self: LegalGraphAgent, state: Age
         return fallback
 
 
+def _patched_is_case_update(self: LegalGraphAgent, question: str, chat_history: str = "", case_summary: str = "") -> bool:
+    text = " ".join((question or "").strip().split())
+    if not text:
+        return False
+
+    update_tokens = [
+        "是",
+        "不是",
+        "没有",
+        "有",
+        "对",
+        "不对",
+        "补充",
+        "更正",
+        "改成",
+        "记错",
+        "纠正",
+        "其实",
+        "实际上",
+        "后来",
+        "老板",
+        "对方",
+        "那辆车",
+        "那个公司",
+        "他",
+        "她",
+    ]
+    if any(token in text for token in update_tokens):
+        return bool((chat_history or "").strip() or (case_summary or "").strip()) or len(text) <= 12
+    return self._is_contextual_followup(text, chat_history) and bool((case_summary or "").strip() or (chat_history or "").strip())
+
+
+def _patched_is_general_consult(self: LegalGraphAgent, question: str, case_summary: str = "") -> bool:
+    text = " ".join((question or "").strip().split())
+    if not text:
+        return False
+    if self._has_substantive_legal_intent(text) and not self._patched_is_case_update(text, case_summary=case_summary):
+        return True
+
+    consult_tokens = [
+        "怎么判",
+        "赔多少",
+        "量刑",
+        "法条",
+        "法律依据",
+        "算不算",
+        "是否构成",
+        "认定",
+        "标准",
+        "流程",
+        "程序",
+    ]
+    return any(token in text for token in consult_tokens)
+
+
+def _patched_build_tool_calls_for_intent(
+    self: LegalGraphAgent,
+    route_intent: str,
+    query: str,
+) -> list[dict[str, Any]]:
+    cleaned_query = " ".join((query or "").strip().split())
+    if not cleaned_query or route_intent == "GREETING":
+        return []
+
+    if route_intent == "CASE_UPDATE":
+        routes = [
+            {"name": LAW_TOOL, "arguments": {"query": cleaned_query}},
+            {"name": CASE_TOOL, "arguments": {"query": cleaned_query}},
+        ]
+        if any(token in cleaned_query for token in ["公司", "老板", "对方", "原告", "被告", "案由", "罪名"]):
+            routes.append({"name": GRAPH_TOOL, "arguments": {"entity_name": cleaned_query}})
+        return self._dedupe_tool_calls(routes)
+
+    fallback = self._fallback_route_decision(cleaned_query)
+    return fallback.get("tool_calls", [])
+
+
+async def _patched_route_decision(
+    self: LegalGraphAgent,
+    question: str,
+    chat_history: str = "",
+    case_summary: str = "",
+) -> dict[str, Any]:
+    history_text = (chat_history or "").strip() or "无历史对话"
+    summary_text = (case_summary or "").strip() or "无案情摘要"
+    cleaned_question = " ".join((question or "").strip().split())
+
+    if self._looks_like_chitchat(cleaned_question, chat_history=chat_history) and not self._patched_is_case_update(
+        cleaned_question, chat_history=chat_history, case_summary=case_summary
+    ):
+        return {"route_intent": "GREETING", "tool_calls": []}
+
+    fallback_intent = "CASE_UPDATE" if self._patched_is_case_update(
+        cleaned_question,
+        chat_history=chat_history,
+        case_summary=case_summary,
+    ) else "GENERAL_CONSULT"
+    if not self._patched_is_general_consult(cleaned_question, case_summary=case_summary):
+        fallback_intent = "CASE_UPDATE" if fallback_intent != "GREETING" and summary_text != "无案情摘要" else fallback_intent
+
+    try:
+        content = await self._chat_model(
+            self.router_llm,
+            [
+                {"role": "system", "content": TRIPLE_TRACK_ROUTER_PROMPT_V2},
+                {
+                    "role": "user",
+                    "content": (
+                        f"历史对话：\n{history_text}\n\n"
+                        f"当前卷宗摘要：\n{summary_text}\n\n"
+                        f"用户最新输入：{cleaned_question}"
+                    ),
+                },
+            ],
+        )
+        parsed = self._safe_json_load(content, {"route_intent": fallback_intent})
+        route_intent = str(parsed.get("route_intent", fallback_intent)).upper()
+        if route_intent not in {"GREETING", "GENERAL_CONSULT", "CASE_UPDATE"}:
+            route_intent = fallback_intent
+    except Exception as exc:
+        logger.warning("Triple-track routing failed, fallback to heuristic route: %s", exc)
+        route_intent = fallback_intent
+
+    retrieval_query = cleaned_question
+    if route_intent == "CASE_UPDATE" and summary_text != "无案情摘要":
+        retrieval_query = summary_text
+
+    return {
+        "route_intent": route_intent,
+        "tool_calls": self._patched_build_tool_calls_for_intent(route_intent, retrieval_query),
+    }
+
+
+async def _patched_fact_updater_node(self: LegalGraphAgent, state: AgentState) -> AgentState:
+    previous_summary = (state.get("case_summary") or "").strip()
+    question = " ".join((state.get("question") or "").strip().split())
+    fallback_summary = previous_summary or question
+
+    try:
+        content = await self._chat_model(
+            self.expert_llm,
+            [
+                {"role": "system", "content": FACT_UPDATER_SYSTEM_PROMPT_V2},
+                {
+                    "role": "user",
+                    "content": (
+                        f"旧摘要：{previous_summary or '无'}\n\n"
+                        f"用户最新输入：{question}"
+                    ),
+                },
+            ],
+        )
+        parsed = self._safe_json_load(content, {"case_summary": fallback_summary})
+        case_summary = parsed.get("case_summary", fallback_summary)
+        if not isinstance(case_summary, str):
+            case_summary = fallback_summary
+        case_summary = " ".join(case_summary.strip().split())
+    except Exception as exc:
+        logger.warning("Fact updater failed, fallback to previous summary: %s", exc)
+        case_summary = fallback_summary
+
+    retrieval_query = case_summary or question
+    return {
+        "case_summary": case_summary,
+        "current_query": retrieval_query,
+        "routed_query": "",
+        "tool_calls": self._patched_build_tool_calls_for_intent("CASE_UPDATE", retrieval_query),
+    }
+
+
+async def _patched_tool_router_node(self: LegalGraphAgent, state: AgentState) -> AgentState:
+    current_query = state.get("current_query") or state["question"]
+    chat_history = state.get("chat_history", "")
+    case_summary = state.get("case_summary", "")
+    decision = await self._patched_route_decision(current_query, chat_history=chat_history, case_summary=case_summary)
+    return {
+        "current_query": current_query,
+        "routed_query": current_query,
+        "route_intent": decision["route_intent"],
+        "tool_calls": decision["tool_calls"],
+    }
+
+
+async def _patched_vector_researcher_node(self: LegalGraphAgent, state: AgentState) -> AgentState:
+    current_query = state.get("current_query") or state["question"]
+    route_intent = str(state.get("route_intent", "GENERAL_CONSULT")).upper()
+    chat_history = state.get("chat_history", "")
+    case_summary = state.get("case_summary", "")
+    tool_calls = state.get("tool_calls") or []
+
+    if not tool_calls or state.get("routed_query") != current_query:
+        tool_calls = self._patched_build_tool_calls_for_intent(route_intent, current_query)
+
+    enriched_tool_calls = []
+    for call in tool_calls:
+        arguments = dict(call["arguments"])
+        if call["name"] in {LAW_TOOL, CASE_TOOL}:
+            arguments["chat_history"] = case_summary or chat_history
+        enriched_tool_calls.append({"name": call["name"], "arguments": arguments})
+
+    tool_results = await self._execute_tool_calls(enriched_tool_calls)
+    return {
+        "current_query": current_query,
+        "routed_query": current_query,
+        "route_intent": route_intent,
+        "tool_calls": enriched_tool_calls,
+        "tool_results": self._merge_tool_results([], tool_results),
+    }
+
+
+def _patched_build_reflector_user_prompt(
+    self: LegalGraphAgent,
+    state: AgentState,
+    chat_history: str,
+    context_blocks: str,
+) -> str:
+    mode_enabled = self._proactive_graph_mode_enabled(state)
+    mode_label = "ON" if mode_enabled else "OFF"
+    case_summary = (state.get("case_summary") or "").strip() or "无案情摘要"
+    mode_instruction = (
+        "主动案情梳理模式已开启。除了法律要件是否缺失，你还必须检查案情摘要和最新输入里是否存在指代不明的实体、代词或模糊称谓。"
+        "如果存在，把最关键的 1 到 2 个实体澄清要求写入 missing_info。"
+    )
+    if not mode_enabled:
+        mode_instruction = (
+            "主动案情梳理模式已关闭。你只关注法律要件是否缺失，忽略“他”“老板”“对方”“那辆车”这类实体指代歧义。"
+        )
+
+    return (
+        f"用户问题：{state['question']}\n\n"
+        f"主动案情梳理模式：{mode_label}\n"
+        f"{mode_instruction}\n\n"
+        f"当前卷宗净白摘要：\n{case_summary}\n\n"
+        "请注意：摘要中已经明确的事实，一律视为已知证据，严禁重复写入 missing_info。\n\n"
+        f"当前检索查询：{state.get('current_query', state['question'])}\n"
+        f"当前循环次数：{state.get('loop_count', 0)}\n\n"
+        f"当前检索结果：\n{context_blocks or '无有效检索结果'}"
+    )
+
+
+async def _patched_generate_reflection_v2(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
+    tool_results = state.get("tool_results", [])
+    context_blocks = self._build_context_blocks(tool_results)
+    case_summary = (state.get("case_summary") or "").strip() or "无案情摘要"
+    chat_history = (state.get("chat_history") or "").strip() or "无历史对话"
+    proactive_graph_mode = self._proactive_graph_mode_enabled(state)
+    fallback_missing = ["关键案情事实不足"]
+    if proactive_graph_mode:
+        fallback_missing.append("请明确最关键的实体指代对象")
+    fallback = {
+        "status": "NEED_USER_INFO",
+        "confidence_score": 0.25,
+        "analysis": "现有证据不足，无法稳定定性。",
+        "missing_info": fallback_missing,
+        "questions": ["请补充案件发生时间、主体关系和最核心的争议焦点。"],
+        "graph_focus": "",
+    }
+
+    content = await self._chat_model(
+        self.reflector_llm,
+        [
+            {"role": "system", "content": REFLECTOR_SYSTEM_PROMPT_V2},
+            {
+                "role": "user",
+                "content": self._patched_build_reflector_user_prompt(state, chat_history, context_blocks),
+            },
+        ],
+    )
+    parsed = self._safe_json_load(content, fallback)
+
+    status = str(parsed.get("status", fallback["status"])).upper()
+    if status not in {"SUFFICIENT", "NEED_DEEP_GRAPH", "NEED_USER_INFO"}:
+        status = fallback["status"]
+
+    confidence_score = parsed.get("confidence_score", fallback["confidence_score"])
+    try:
+        confidence_value = float(confidence_score)
+    except Exception:
+        confidence_value = float(fallback["confidence_score"])
+    confidence_value = max(0.0, min(1.0, confidence_value))
+
+    missing_info = parsed.get("missing_info", [])
+    if not isinstance(missing_info, list):
+        missing_info = []
+    missing_info = [item.strip() for item in missing_info if isinstance(item, str) and item.strip()]
+
+    questions = parsed.get("questions", [])
+    if not isinstance(questions, list):
+        questions = []
+    questions = [item.strip() for item in questions if isinstance(item, str) and item.strip()][:2]
+
+    analysis = parsed.get("analysis", fallback["analysis"])
+    if not isinstance(analysis, str) or not analysis.strip():
+        analysis = fallback["analysis"]
+
+    graph_focus = parsed.get("graph_focus", "")
+    if not isinstance(graph_focus, str):
+        graph_focus = ""
+    graph_focus = graph_focus.strip() or case_summary or state.get("current_query", state["question"])
+
+    return {
+        "reflection_status": status,
+        "confidence_score": confidence_value,
+        "reflection_analysis": analysis.strip(),
+        "missing_info": missing_info,
+        "clarification_questions": questions,
+        "graph_focus": graph_focus,
+    }
+
+
+async def _patched_generate_clarifier_question_v2(self: LegalGraphAgent, state: AgentState) -> str:
+    missing_info = state.get("missing_info", [])
+    if not isinstance(missing_info, list):
+        missing_info = []
+    missing_info = [item.strip() for item in missing_info if isinstance(item, str) and item.strip()][:2]
+
+    questions = state.get("clarification_questions", [])
+    if not isinstance(questions, list):
+        questions = []
+    questions = [item.strip() for item in questions if isinstance(item, str) and item.strip()][:2]
+
+    case_summary = (state.get("case_summary") or "").strip() or "无案情摘要"
+    proactive_graph_mode = "ON" if self._proactive_graph_mode_enabled(state) else "OFF"
+    fallback = questions[0] if questions else "请再补充一下案件发生时间、双方关系和争议焦点。"
+
+    try:
+        response = await self._chat_model(
+            self.expert_llm,
+            [
+                {"role": "system", "content": CLARIFIER_SYSTEM_PROMPT_V2},
+                {
+                    "role": "user",
+                    "content": (
+                        f"主动案情梳理模式：{proactive_graph_mode}\n\n"
+                        f"当前卷宗净白摘要：\n{case_summary}\n\n"
+                        f"用户原问题：{state['question']}\n"
+                        f"缺失信息：{json.dumps(missing_info, ensure_ascii=False)}\n"
+                        f"建议追问：{json.dumps(questions, ensure_ascii=False)}\n\n"
+                        "请只用一段自然的话进行追问；最多覆盖 1 到 2 个最关键问题。"
+                    ),
+                },
+            ],
+        )
+        cleaned = " ".join((response or "").strip().split())
+        return cleaned or fallback
+    except Exception as exc:
+        logger.warning("Clarifier generation failed, fallback to template question: %s", exc)
+        return fallback
+
+
 async def _patched_ask(
     self: LegalGraphAgent,
     user_id: int,
     session_id: str,
     question: str,
     chat_history: str = "",
+    case_summary: str = "",
     graph_memory: str = "",
     proactive_graph_mode: bool = True,
 ) -> dict[str, Any]:
@@ -1020,9 +1400,10 @@ async def _patched_ask(
         "question": question,
         "proactive_graph_mode": bool(proactive_graph_mode),
         "chat_history": chat_history,
+        "case_summary": case_summary,
         "graph_memory": graph_memory,
         "current_query": question,
-        "route_intent": TOOLS_INTENT,
+        "route_intent": "GENERAL_CONSULT",
         "loop_count": 0,
         "confidence_score": 0.0,
         "missing_info": [],
@@ -1052,12 +1433,23 @@ async def _patched_ask(
         "is_final": bool(final_state.get("is_final", False)),
         "confidence_score": float(final_state.get("confidence_score", 0.0)),
         "missing_info": final_state.get("missing_info") or [],
+        "route_intent": str(final_state.get("route_intent") or "GENERAL_CONSULT").upper(),
+        "case_summary": final_state.get("case_summary") or case_summary or "",
     }
 
 
+LegalGraphAgent._route_decision = _patched_route_decision
+LegalGraphAgent._patched_route_decision = _patched_route_decision
+LegalGraphAgent._patched_build_tool_calls_for_intent = _patched_build_tool_calls_for_intent
+LegalGraphAgent._patched_is_case_update = _patched_is_case_update
+LegalGraphAgent._patched_is_general_consult = _patched_is_general_consult
+LegalGraphAgent._patched_build_reflector_user_prompt = _patched_build_reflector_user_prompt
+LegalGraphAgent.tool_router_node = _patched_tool_router_node
+LegalGraphAgent.fact_updater_node = _patched_fact_updater_node
+LegalGraphAgent.vector_researcher_node = _patched_vector_researcher_node
 LegalGraphAgent._generate_final_answer = _patched_generate_final_answer
-LegalGraphAgent._generate_reflection = _patched_generate_reflection
-LegalGraphAgent._generate_clarifier_question = _patched_generate_clarifier_question
+LegalGraphAgent._generate_reflection = _patched_generate_reflection_v2
+LegalGraphAgent._generate_clarifier_question = _patched_generate_clarifier_question_v2
 LegalGraphAgent.ask = _patched_ask
 
 legal_agent = LegalGraphAgent()

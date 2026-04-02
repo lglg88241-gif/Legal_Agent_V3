@@ -10,6 +10,11 @@
       </el-button>
     </div>
 
+    <div class="summary-card">
+      <div class="summary-title">卷宗净白摘要</div>
+      <div class="summary-text">{{ activeSummary || '当前卷宗暂无摘要，案情补充后会在这里展示。' }}</div>
+    </div>
+
     <el-scrollbar height="calc(100vh - 200px)">
       <div
         v-for="session in sessions"
@@ -52,6 +57,7 @@ import { ChatDotRound, Delete, Edit, Plus } from '@element-plus/icons-vue'
 defineProps({
   sessions: { type: Array, default: () => [] },
   currentId: { type: [String, Number], default: '' },
+  activeSummary: { type: String, default: '' },
 })
 
 defineEmits(['create', 'switch', 'delete', 'rename'])
@@ -94,6 +100,28 @@ function formatTime(value) {
 .subtitle {
   font-size: 11px;
   color: #909399;
+}
+
+.summary-card {
+  margin-bottom: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f7f9fc;
+  border: 1px solid #e5e7eb;
+}
+
+.summary-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  margin-bottom: 6px;
+}
+
+.summary-text {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+  white-space: pre-wrap;
 }
 
 .session-item {

@@ -15,8 +15,6 @@ from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
     list_recent_conversation_messages,
-    maybe_update_conversation_title,
-    store_message,
 )
 from app.services.graph_extractor import format_graph_memory
 
@@ -58,7 +56,7 @@ async def process_dialog(
             for item in recent_messages
             if (item.content or "").strip()
         )
-        current_graph_summary = await format_graph_memory(conversation.id)
+        current_graph_summary = (conversation.case_summary or "").strip() or await format_graph_memory(conversation.id)
 
         if not request.force_current_case:
             boundary = await detect_case_boundary(
@@ -78,16 +76,6 @@ async def process_dialog(
                         "为了保证案情分析与图谱记忆的准确性，是否为您建立一份新的独立卷宗？"
                     ),
                 }
-
-        await store_message(
-            db,
-            conversation_id=conversation.id,
-            role="user",
-            content=clean_input,
-            metadata={},
-        )
-        await maybe_update_conversation_title(db, conversation, clean_input)
-        await db.commit()
 
         task = ask_agent_task.apply_async(
             args=[

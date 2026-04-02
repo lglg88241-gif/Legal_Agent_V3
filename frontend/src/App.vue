@@ -46,6 +46,7 @@
         <SessionList
           :sessions="conversations"
           :current-id="currentConversationId"
+          :active-summary="currentConversation?.case_summary || ''"
           @create="createNewConversation"
           @switch="switchConversation"
           @rename="promptRenameConversation"

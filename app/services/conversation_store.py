@@ -48,6 +48,28 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
         )
     )
 
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "case_summary" not in columns:
+        dialect = sync_conn.dialect.name
+        if dialect == "sqlite":
+            sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN case_summary TEXT"))
+        elif dialect == "postgresql":
+            sync_conn.execute(
+                text("ALTER TABLE conversations ADD COLUMN case_summary TEXT NOT NULL DEFAULT ''")
+            )
+        else:
+            sync_conn.execute(
+                text("ALTER TABLE conversations ADD COLUMN case_summary TEXT NOT NULL DEFAULT ''")
+            )
+
+    sync_conn.execute(
+        text(
+            "UPDATE conversations "
+            "SET case_summary = COALESCE(case_summary, '') "
+            "WHERE case_summary IS NULL"
+        )
+    )
+
 
 async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
     target_engine = bind_engine or engine
@@ -166,6 +188,16 @@ async def update_conversation_title(
     return conversation
 
 
+async def update_conversation_case_summary(
+    db: AsyncSession,
+    conversation: Conversation,
+    case_summary: str,
+) -> Conversation:
+    conversation.case_summary = (case_summary or "").strip()
+    await touch_conversation(db, conversation=conversation)
+    return conversation
+
+
 async def store_message(
     db: AsyncSession,
     conversation_id: int,
@@ -199,6 +231,10 @@ async def clear_conversation_messages(
     conversation_id: int,
 ) -> None:
     await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is not None:
+        conversation.case_summary = ""
+        await touch_conversation(db, conversation=conversation)
 
 
 async def maybe_update_conversation_title(
@@ -218,12 +254,23 @@ async def maybe_update_conversation_title(
     await db.flush()
 
 
+async def load_conversation_case_summary(
+    db: AsyncSession,
+    conversation_id: int,
+) -> str:
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        return ""
+    return (conversation.case_summary or "").strip()
+
+
 def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
     return {
         "id": conversation.id,
         "user_id": conversation.user_id,
         "session_id": conversation.session_id,
         "title": conversation.title,
+        "case_summary": conversation.case_summary or "",
         "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
     }

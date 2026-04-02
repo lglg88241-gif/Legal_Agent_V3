@@ -17,6 +17,7 @@ class AgentState(TypedDict, total=False):
     question: str
     proactive_graph_mode: bool
     chat_history: str
+    case_summary: str
     graph_memory: str
     current_query: str
     routed_query: str
@@ -36,10 +37,19 @@ class AgentState(TypedDict, total=False):
 
 
 def route_after_tool_router(state: AgentState) -> str:
-    route_intent = str(state.get("route_intent", "TOOLS")).upper()
-    if route_intent == "CHITCHAT":
+    route_intent = str(state.get("route_intent", "GENERAL_CONSULT")).upper()
+    if route_intent == "GREETING":
         return "greeting"
+    if route_intent == "CASE_UPDATE":
+        return "fact_updater"
     return "vector_researcher"
+
+
+def route_after_vector_researcher(state: AgentState) -> str:
+    route_intent = str(state.get("route_intent", "GENERAL_CONSULT")).upper()
+    if route_intent == "GENERAL_CONSULT":
+        return "legal_advisor"
+    return "reflector"
 
 
 def decide_next_step(state: AgentState) -> str:
@@ -63,6 +73,7 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
     graph = StateGraph(AgentState)
     graph.add_node("tool_router", agent.tool_router_node)
     graph.add_node("greeting", agent.greeting_node)
+    graph.add_node("fact_updater", agent.fact_updater_node)
     graph.add_node("vector_researcher", agent.vector_researcher_node)
     graph.add_node("reflector", agent.reflector_node)
     graph.add_node("neo4j_specialist", agent.neo4j_specialist_node)
@@ -75,11 +86,20 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
         route_after_tool_router,
         {
             "greeting": "greeting",
+            "fact_updater": "fact_updater",
             "vector_researcher": "vector_researcher",
         },
     )
     graph.add_edge("greeting", END)
-    graph.add_edge("vector_researcher", "reflector")
+    graph.add_edge("fact_updater", "vector_researcher")
+    graph.add_conditional_edges(
+        "vector_researcher",
+        route_after_vector_researcher,
+        {
+            "reflector": "reflector",
+            "legal_advisor": "legal_advisor",
+        },
+    )
     graph.add_conditional_edges(
         "reflector",
         decide_next_step,
