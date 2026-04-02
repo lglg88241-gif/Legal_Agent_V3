@@ -99,6 +99,62 @@ DELETE
 }
 """.strip()
 
+BELIEF_REVISION_PROMPT_V2 = """
+你是一个带有强迫症的案情图谱清理大师。
+这是图谱里现有的节点：{existing_nodes}
+这是图谱现有关系：{current_graph}
+这是用户的新输入：{user_input}
+
+【最高指令】
+1. 你必须进行冲突检测。如果新输入推翻、纠正、覆盖了旧事实，你绝对不能只输出 ADD，必须输出 DELETE 或 UPDATE。
+2. 当输出 DELETE 或 UPDATE 时，凡是已经存在于 existing_nodes 中的节点名，必须一字不差地复制使用，禁止改写、近义替换或重新命名。
+3. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”，“对方车/对方车辆”统一为“肇事车辆”。
+4. category 只能是：主体、客体、事件、后果。
+5. 只能输出合法 JSON，不要输出解释文字。
+
+【动作规则】
+- ADD：新增事实。
+- UPDATE：修正已有事实。必须同时给出 source、relation、old_target、new_target。
+- DELETE：删除错误事实。
+  - 如果要删除一条关系，给出 source、relation，以及 target 或 old_target。
+  - 如果要直接删除一个错误节点，保留 target 为要删除的精准节点名，source 和 relation 可以留空字符串。
+
+输出格式：
+{
+  "actions": [
+    {
+      "action": "ADD",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "主张",
+      "target": "赔偿",
+      "target_category": "后果"
+    },
+    {
+      "action": "UPDATE",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "过马路状态",
+      "old_target": "闯红灯",
+      "new_target": "绿灯通行",
+      "target_category": "事件"
+    },
+    {
+      "action": "DELETE",
+      "source": "当事人",
+      "relation": "存在事实",
+      "target": "错误事实"
+    },
+    {
+      "action": "DELETE",
+      "source": "",
+      "relation": "",
+      "target": "机器"
+    }
+  ]
+}
+""".strip()
+
 FETCH_FACTS_QUERY = """
 MATCH (source:DynamicCaseEntity {conversation_id: $conversation_id})-[rel:CASE_RELATION {conversation_id: $conversation_id}]->(target:DynamicCaseEntity {conversation_id: $conversation_id})
 RETURN source.name AS source_name,
@@ -234,7 +290,20 @@ def _normalize_triples(raw_payload: Any) -> list[dict[str, str]]:
     return normalized
 
 
-def _normalize_actions(raw_payload: Any) -> list[dict[str, str]]:
+def _resolve_existing_node_name(name: Any, existing_nodes: set[str] | None = None) -> str:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned:
+        return ""
+    if existing_nodes and cleaned in existing_nodes:
+        return cleaned
+
+    canonical = _canonicalize_entity(cleaned)
+    if existing_nodes and canonical in existing_nodes:
+        return canonical
+    return canonical or cleaned
+
+
+def _normalize_actions(raw_payload: Any, existing_nodes: set[str] | None = None) -> list[dict[str, str]]:
     if isinstance(raw_payload, dict):
         candidates = raw_payload.get("actions", [])
     elif isinstance(raw_payload, list):
@@ -252,16 +321,17 @@ def _normalize_actions(raw_payload: Any) -> list[dict[str, str]]:
         if action not in ALLOWED_ACTIONS:
             continue
 
-        source = _canonicalize_entity(item.get("source", ""))
+        source = _resolve_existing_node_name(item.get("source", ""), existing_nodes)
         relation = _normalize_relation(item.get("relation", ""))
-        target = _canonicalize_entity(item.get("target", "") or item.get("new_target", ""))
-        old_target = _canonicalize_entity(item.get("old_target", "") or item.get("target", ""))
+        target = _resolve_existing_node_name(item.get("new_target", "") or item.get("target", ""), existing_nodes)
+        old_target = _resolve_existing_node_name(item.get("old_target", "") or item.get("target", ""), existing_nodes)
+        delete_target = _resolve_existing_node_name(item.get("target", "") or item.get("old_target", ""), existing_nodes)
 
         if action == "ADD" and (not source or not relation or not target):
             continue
         if action == "UPDATE" and (not source or not relation or not old_target or not target):
             continue
-        if action == "DELETE" and (not source or not relation or not old_target):
+        if action == "DELETE" and not delete_target:
             continue
 
         normalized.append(
@@ -270,7 +340,7 @@ def _normalize_actions(raw_payload: Any) -> list[dict[str, str]]:
                 "source": source,
                 "source_category": _normalize_category(item.get("source_category"), source),
                 "relation": relation,
-                "target": target,
+                "target": target if action != "DELETE" else delete_target,
                 "target_category": _normalize_category(item.get("target_category"), target),
                 "old_target": old_target,
             }
@@ -345,6 +415,20 @@ def _delete_fact(session, conversation_id: int, source: str, relation: str, targ
     ).consume()
 
 
+def _delete_node(session, conversation_id: int, target_name: str) -> None:
+    session.run(
+        """
+        MATCH (n)
+        WHERE n.name = $target_name AND n.conversation_id = $conversation_id
+        DETACH DELETE n
+        """,
+        {
+            "conversation_id": conversation_id,
+            "target_name": target_name,
+        },
+    ).consume()
+
+
 def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, str]]) -> dict[str, Any]:
     driver = _build_driver()
     applied = 0
@@ -387,13 +471,20 @@ def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, st
                     )
                     applied += 1
                 elif action_type == "DELETE":
-                    _delete_fact(
-                        session,
-                        conversation_id,
-                        action["source"],
-                        action["relation"],
-                        action["old_target"],
-                    )
+                    if action["source"] and action["relation"]:
+                        _delete_fact(
+                            session,
+                            conversation_id,
+                            action["source"],
+                            action["relation"],
+                            action["old_target"] or action["target"],
+                        )
+                    else:
+                        _delete_node(
+                            session,
+                            conversation_id,
+                            action["target"] or action["old_target"],
+                        )
                     applied += 1
 
             _cleanup_orphans(session, conversation_id)
@@ -466,7 +557,7 @@ async def format_current_graph_state(conversation_id: int) -> str:
     return json.dumps(facts, ensure_ascii=False)
 
 
-async def plan_graph_actions(current_graph: str, user_input: str) -> list[dict[str, str]]:
+async def _plan_graph_actions_legacy(current_graph: str, user_input: str) -> list[dict[str, str]]:
     clean_input = (user_input or "").strip()
     if not clean_input:
         return []
@@ -485,6 +576,44 @@ async def plan_graph_actions(current_graph: str, user_input: str) -> list[dict[s
         )
         content = response.content if isinstance(response.content, str) else str(response.content)
         return _normalize_actions(_safe_json_load(content, {"actions": []}))
+    except Exception as exc:
+        logger.warning("Belief revision planning failed: %s", exc)
+        return []
+
+
+async def plan_graph_actions(current_graph: str, user_input: str) -> list[dict[str, str]]:
+    clean_input = (user_input or "").strip()
+    if not clean_input:
+        return []
+
+    try:
+        current_graph_payload = _safe_json_load(current_graph or "[]", [])
+        existing_node_names = sorted(
+            {
+                str(fact.get("source", "")).strip()
+                for fact in current_graph_payload
+                if isinstance(fact, dict) and str(fact.get("source", "")).strip()
+            }
+            | {
+                str(fact.get("target", "")).strip()
+                for fact in current_graph_payload
+                if isinstance(fact, dict) and str(fact.get("target", "")).strip()
+            }
+        )
+        response = await _get_graph_llm().ainvoke(
+            [
+                SystemMessage(content="你必须只输出合法 JSON。"),
+                HumanMessage(
+                    content=BELIEF_REVISION_PROMPT_V2.format(
+                        existing_nodes=json.dumps(existing_node_names, ensure_ascii=False),
+                        current_graph=current_graph or "[]",
+                        user_input=clean_input,
+                    )
+                ),
+            ]
+        )
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        return _normalize_actions(_safe_json_load(content, {"actions": []}), set(existing_node_names))
     except Exception as exc:
         logger.warning("Belief revision planning failed: %s", exc)
         return []
