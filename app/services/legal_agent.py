@@ -31,6 +31,7 @@ ROUTER_PROMPT = """
 3. 历史案例、类案、指导案例、裁判思路等问题，必须调用 search_case_text。
 4. 当问题涉及具体当事人、公司名称、案由、罪名、判决结果线索时，应调用 query_neo4j_graph。
 5. 复合问题允许同时调用多个工具，严禁漏掉必要工具。
+6. 结合传入的历史对话和用户最新输入一起判断。如果历史对话表明当前正在进行案情沟通，且用户的简短回复（如“是”“对”“没有”“有”“不是”）是在回答之前的提问，必须判定为法律语境，输出 TOOLS，绝对严禁判定为 CHITCHAT。
 
 你必须只返回 JSON，不要解释。格式如下：
 {
@@ -252,10 +253,68 @@ class LegalGraphAgent:
         ]
         return any(keyword in question for keyword in keywords)
 
-    def _looks_like_chitchat(self, question: str) -> bool:
+    def _history_indicates_legal_dialogue(self, chat_history: str) -> bool:
+        history = (chat_history or "").strip()
+        if not history:
+            return False
+
+        keywords = [
+            "法条",
+            "法律",
+            "赔偿",
+            "工伤",
+            "劳动",
+            "合同",
+            "纠纷",
+            "仲裁",
+            "诉讼",
+            "责任",
+            "案由",
+            "案例",
+            "判决",
+            "赔多少",
+            "算不算",
+            "是否",
+            "认定",
+            "解除",
+            "公司",
+            "离职",
+            "工资",
+            "补偿",
+        ]
+        return any(keyword in history for keyword in keywords)
+
+    def _is_contextual_followup(self, question: str, chat_history: str) -> bool:
+        cleaned = "".join(question.lower().strip().split())
+        if not cleaned or not self._history_indicates_legal_dialogue(chat_history):
+            return False
+
+        short_replies = {
+            "是",
+            "对",
+            "对的",
+            "嗯",
+            "嗯嗯",
+            "有",
+            "没有",
+            "不是",
+            "是的",
+            "有的",
+            "没有的",
+            "对啊",
+            "是啊",
+            "好",
+            "好的",
+            "行",
+        }
+        return cleaned in short_replies or len(cleaned) <= 4
+
+    def _looks_like_chitchat(self, question: str, chat_history: str = "") -> bool:
         cleaned = "".join(question.lower().strip().split())
         if not cleaned:
             return True
+        if self._is_contextual_followup(question, chat_history):
+            return False
         if self._has_substantive_legal_intent(question):
             return False
 
@@ -283,7 +342,7 @@ class LegalGraphAgent:
             return True
         return len(cleaned) <= 6 and all(char in punctuation for char in cleaned)
 
-    def _detect_intents(self, question: str) -> dict[str, bool]:
+    def _detect_intents(self, question: str, chat_history: str = "") -> dict[str, bool]:
         lowered = question.lower()
         law_keywords = [
             "法条",
@@ -329,7 +388,7 @@ class LegalGraphAgent:
         has_law_intent = any(keyword in question for keyword in law_keywords)
         has_case_intent = any(keyword in question for keyword in case_keywords)
         has_graph_intent = any(keyword in question for keyword in graph_keywords) or "case" in lowered
-        is_chitchat = self._looks_like_chitchat(question)
+        is_chitchat = self._looks_like_chitchat(question, chat_history=chat_history)
 
         return {
             "has_law_intent": has_law_intent,
@@ -339,8 +398,8 @@ class LegalGraphAgent:
             "is_chitchat": is_chitchat,
         }
 
-    def _fallback_route_decision(self, question: str) -> dict[str, Any]:
-        intents = self._detect_intents(question)
+    def _fallback_route_decision(self, question: str, chat_history: str = "") -> dict[str, Any]:
+        intents = self._detect_intents(question, chat_history=chat_history)
         if intents["is_chitchat"]:
             return {"route_intent": CHITCHAT_INTENT, "tool_calls": []}
 
@@ -401,8 +460,9 @@ class LegalGraphAgent:
 
         return self._dedupe_tool_calls(enforced)
 
-    async def _route_decision(self, question: str) -> dict[str, Any]:
-        heuristic_decision = self._fallback_route_decision(question)
+    async def _route_decision(self, question: str, chat_history: str = "") -> dict[str, Any]:
+        history_text = (chat_history or "").strip() or "无历史对话"
+        heuristic_decision = self._fallback_route_decision(question, chat_history=chat_history)
         if heuristic_decision["route_intent"] == CHITCHAT_INTENT:
             return heuristic_decision
 
@@ -411,7 +471,15 @@ class LegalGraphAgent:
                 self.router_llm,
                 [
                     {"role": "system", "content": ROUTER_PROMPT},
-                    {"role": "user", "content": question},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"这是历史对话：\n{history_text}\n\n"
+                            f"用户最新输入：{question}\n\n"
+                            "请注意：如果历史对话表明当前正在进行案情沟通，且用户的简短回复是在回答之前的提问，"
+                            "必须判定为法律语境，输出 TOOLS，绝对严禁判定为 CHITCHAT。"
+                        ),
+                    },
                 ],
             )
             parsed = self._safe_json_load(
@@ -420,6 +488,8 @@ class LegalGraphAgent:
             )
             route_intent = str(parsed.get("route_intent", TOOLS_INTENT)).upper()
             if route_intent == CHITCHAT_INTENT:
+                if self._is_contextual_followup(question, chat_history):
+                    return self._fallback_route_decision(question, chat_history=chat_history)
                 return {"route_intent": CHITCHAT_INTENT, "tool_calls": []}
 
             tool_calls = parsed.get("tool_calls", [])
@@ -602,7 +672,8 @@ class LegalGraphAgent:
 
     async def tool_router_node(self, state: AgentState) -> AgentState:
         current_query = state.get("current_query") or state["question"]
-        decision = await self._route_decision(current_query)
+        chat_history = state.get("chat_history", "")
+        decision = await self._route_decision(current_query, chat_history=chat_history)
         return {
             "current_query": current_query,
             "routed_query": current_query,
@@ -623,7 +694,7 @@ class LegalGraphAgent:
         chat_history = state.get("chat_history", "")
 
         if not tool_calls or state.get("routed_query") != current_query:
-            decision = await self._route_decision(current_query)
+            decision = await self._route_decision(current_query, chat_history=chat_history)
             tool_calls = decision["tool_calls"]
 
         enriched_tool_calls = []
