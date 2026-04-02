@@ -5,7 +5,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import delete, inspect, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.database.mysql_db import Base, engine
 from app.models import Conversation, Message
@@ -49,8 +49,9 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
     )
 
 
-async def ensure_storage_schema() -> None:
-    async with engine.begin() as conn:
+async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
+    target_engine = bind_engine or engine
+    async with target_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_ensure_conversation_updated_at)
 

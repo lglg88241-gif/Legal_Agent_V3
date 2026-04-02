@@ -6,9 +6,10 @@ import time
 from typing import Any
 
 from celery import Celery
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
-from app.database.mysql_db import AsyncSessionLocal
 from app.services.conversation_store import ensure_storage_schema, store_message
 from app.services.legal_agent import legal_agent
 
@@ -34,16 +35,30 @@ async def persist_assistant_message(
     content: str,
     metadata: dict[str, Any],
 ) -> None:
-    await ensure_storage_schema()
-    async with AsyncSessionLocal() as db:
-        await store_message(
-            db,
-            conversation_id=conversation_id,
-            role="assistant",
-            content=content,
-            metadata=metadata,
-        )
-        await db.commit()
+    celery_engine = create_async_engine(
+        settings.DATABASE_URL,
+        echo=False,
+        poolclass=NullPool,
+        pool_pre_ping=True,
+    )
+    session_factory = async_sessionmaker(
+        celery_engine,
+        expire_on_commit=False,
+    )
+
+    try:
+        await ensure_storage_schema(bind_engine=celery_engine)
+        async with session_factory() as db:
+            await store_message(
+                db,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=content,
+                metadata=metadata,
+            )
+            await db.commit()
+    finally:
+        await celery_engine.dispose()
 
 
 @celery_app.task(bind=True, name="ask_agent_task")
