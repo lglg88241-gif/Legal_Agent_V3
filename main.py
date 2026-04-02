@@ -10,6 +10,7 @@ from neo4j import GraphDatabase
 from openai import AsyncOpenAI
 from redis import Redis
 
+from app.api.auth import router as auth_router
 from app.api.dialog import router as dialog_router
 from app.api.feedback import router as feedback_router
 from app.api.graph import router as graph_router
@@ -176,6 +177,7 @@ app.include_router(history_router)
 app.include_router(summary_router)
 app.include_router(feedback_router)
 app.include_router(graph_router)
+app.include_router(auth_router)
 
 
 @app.get("/health")

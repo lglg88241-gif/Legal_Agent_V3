@@ -22,6 +22,7 @@
         <span class="app-title">智能法律咨询系统</span>
       </div>
       <div class="header-right">
+        <span class="user-chip">{{ currentUsername }}</span>
         <el-button text @click="handleSummary" :loading="summaryLoading" :disabled="!systemStatus.ready">
           <el-icon><Document /></el-icon>对话总结
         </el-button>
@@ -30,6 +31,9 @@
         </el-button>
         <el-button text type="danger" @click="handleClear">
           <el-icon><Delete /></el-icon>清空
+        </el-button>
+        <el-button text type="danger" @click="handleLogout">
+          退出登录
         </el-button>
       </div>
     </el-header>
@@ -114,19 +118,23 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import AnalysisPanel from './components/AnalysisPanel.vue'
-import ChatMessage from './components/ChatMessage.vue'
-import SessionList from './components/SessionList.vue'
+ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+ import { useRouter } from 'vue-router'
+ import { ElMessage, ElMessageBox } from 'element-plus'
+ import AnalysisPanel from './components/AnalysisPanel.vue'
+ import ChatMessage from './components/ChatMessage.vue'
+ import SessionList from './components/SessionList.vue'
 import {
   getGraphSubgraph,
   getSummary,
   getSystemStatus,
   resetDialog,
-  sendMessage,
-  submitFeedback,
-} from './api/index.js'
+   sendMessage,
+   submitFeedback,
+ } from './api/index.js'
+ import { clearAuthSession, getStoredUser } from './utils/auth.js'
+
+ const router = useRouter()
 
 const messages = ref([])
 const inputText = ref('')
@@ -167,6 +175,8 @@ const currentGraph = reactive({
   loading: false,
   error: '',
 })
+
+const currentUsername = computed(() => getStoredUser()?.username || '已登录用户')
 
 onMounted(() => {
   loadSessions()
@@ -427,6 +437,12 @@ function handleExport() {
   ElMessage.success('已导出')
 }
 
+function handleLogout() {
+  clearAuthSession()
+  ElMessage.success('已退出登录')
+  router.replace('/login')
+}
+
 function handleClear() {
   ElMessageBox.confirm('确定清空当前对话吗？', '提示', { type: 'warning' })
     .then(async () => {
@@ -564,7 +580,20 @@ body,
 
 .header-right {
   display: flex;
+  align-items: center;
   gap: 4px;
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .main-area {

@@ -1,10 +1,42 @@
 import axios from 'axios'
+import { clearAuthSession, getToken } from '../utils/auth.js'
 
 const api = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000',
   timeout: 60000,
   headers: { 'Content-Type': 'application/json' },
 })
+
+api.interceptors.request.use(
+  (config) => {
+    const token = getToken()
+    if (token) {
+      config.headers = config.headers || {}
+      config.headers.Authorization = `Bearer ${token}`
+    }
+    return config
+  },
+  (error) => Promise.reject(error)
+)
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error?.response?.status === 401) {
+      clearAuthSession()
+      if (window.location.hash !== '#/login') {
+        window.location.hash = '#/login'
+      }
+    }
+    return Promise.reject(error)
+  }
+)
+
+export const register = (username, password) =>
+  api.post('/auth/register', { username, password })
+
+export const login = (username, password) =>
+  api.post('/auth/login', { username, password })
 
 export const healthCheck = () => api.get('/health')
 export const getSystemStatus = () => api.get('/system/status')
@@ -38,7 +70,7 @@ export const sendMessage = async (userInput, sessionId) => {
           resolve({ data: statusData.data })
         } else if (statusData.status === 'failed') {
           clearInterval(timer)
-          reject(new Error(statusData.error || 'Agent 内部推理出错'))
+          reject(new Error(statusData.error || 'Agent internal error'))
         }
       } catch (pollError) {
         clearInterval(timer)
