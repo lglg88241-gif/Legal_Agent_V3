@@ -532,8 +532,9 @@ class LegalGraphAgent:
     async def legal_advisor_node(self, state: AgentState) -> AgentState:
         return await self._generate_final_answer(state)
 
-    async def ask(self, session_id: str, question: str) -> dict[str, Any]:
+    async def ask(self, user_id: int, session_id: str, question: str) -> dict[str, Any]:
         initial_state: AgentState = {
+            "user_id": user_id,
             "session_id": session_id,
             "question": question,
             "current_query": question,
@@ -551,7 +552,15 @@ class LegalGraphAgent:
             "is_final": False,
         }
 
-        final_state = await self.graph.ainvoke(initial_state)
+        final_state = await self.graph.ainvoke(
+            initial_state,
+            config={
+                "configurable": {
+                    "thread_id": session_id,
+                    "user_id": str(user_id),
+                }
+            },
+        )
         return {
             "response": final_state.get("response") or "未找到依据。",
             "sources": final_state.get("sources") or [],

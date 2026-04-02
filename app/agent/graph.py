@@ -12,6 +12,7 @@ MAX_GRAPH_LOOPS = 2
 
 
 class AgentState(TypedDict, total=False):
+    user_id: int
     session_id: str
     question: str
     current_query: str
