@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, hash_password, verify_password
 from app.database.mysql_db import Base, engine, get_db
-from app.models import Conversation, Message, User
+from app.models import Conversation, User
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -58,7 +58,7 @@ async def register(payload: AuthRequest, db: AsyncSession = Depends(get_db)):
     conversation = Conversation(
         user_id=user.id,
         session_id=f"user_{user.id}_default",
-        title="默认会话",
+        title="",
     )
     db.add(conversation)
 

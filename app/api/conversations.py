@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,15 +17,19 @@ from app.services.conversation_store import (
     list_user_conversations,
     serialize_conversation,
     serialize_message,
+    update_conversation_title,
 )
 from app.services.llm_service import llm_service
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
 class ConversationCreateRequest(BaseModel):
     title: str = Field(default=DEFAULT_CONVERSATION_TITLE, max_length=255)
+
+
+class ConversationUpdateRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
 
 
 @router.post("")
@@ -58,6 +60,24 @@ async def get_conversations(
         "status": "success",
         "conversations": [serialize_conversation(item) for item in conversations],
     }
+
+
+@router.put("/{conversation_id}")
+async def rename_conversation(
+    conversation_id: int,
+    payload: ConversationUpdateRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    conversation = await get_conversation_for_user(db, current_user.user_id, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    await update_conversation_title(db, conversation, payload.title)
+    await db.commit()
+    await db.refresh(conversation)
+    return {"status": "success", "conversation": serialize_conversation(conversation)}
 
 
 @router.get("/{conversation_id}/messages")
@@ -125,10 +145,10 @@ async def summarize_conversation(
     messages = await list_conversation_messages(db, conversation.id)
     user_messages = [message.content for message in messages if message.role == "user"]
     if not user_messages:
-        return {"status": "success", "summary": "No user messages to summarize yet."}
+        return {"status": "success", "summary": "当前会话暂无可总结的内容。"}
 
     summary = await llm_service.async_generate(
-        "Summarize the following user requests in under 50 words:\n" + "\n".join(user_messages[:20]),
-        system_prompt="You are a concise legal assistant.",
+        "请将以下用户问题总结为 50 字以内的中文摘要：\n" + "\n".join(user_messages[:20]),
+        system_prompt="你是一个简洁的法律助理。",
     )
     return {"status": "success", "summary": summary}

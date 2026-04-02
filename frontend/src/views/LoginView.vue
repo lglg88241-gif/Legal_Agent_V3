@@ -3,9 +3,9 @@
     <div class="auth-shell">
       <div class="auth-copy">
         <p class="eyebrow">Legal Agent V3</p>
-        <h1 class="headline">安全登录后再进入法律咨询工作台</h1>
+        <h1 class="headline">登录后即可进入法律智能工作台</h1>
         <p class="subhead">
-          登录后，系统会自动携带 JWT Token，保护对话、追问和检索结果的用户隔离。
+          登录后，系统会自动携带 JWT Token，保护你的会话、检索结果和多轮追问数据隔离。
         </p>
       </div>
 
@@ -46,7 +46,7 @@
             :loading="submitting"
             @click="handleSubmit"
           >
-            {{ mode === 'login' ? '登录并进入工作台' : '注册并创建账户' }}
+            {{ mode === 'login' ? '登录并进入工作台' : '注册并创建账号' }}
           </el-button>
         </el-form>
       </div>
@@ -77,17 +77,17 @@ async function handleSubmit() {
   const password = form.password.trim()
 
   if (!username || !password) {
-    ElMessage.warning('请输入用户名和密码')
+    ElMessage.warning('请输入用户名和密码。')
     return
   }
 
   if (username.length < 2) {
-    ElMessage.warning('用户名至少需要 2 个字符')
+    ElMessage.warning('用户名至少需要 2 个字符。')
     return
   }
 
   if (password.length < 6) {
-    ElMessage.warning('密码至少需要 6 个字符')
+    ElMessage.warning('密码至少需要 6 个字符。')
     return
   }
 
@@ -96,14 +96,14 @@ async function handleSubmit() {
     const action = mode.value === 'login' ? login : register
     const { data } = await action(username, password)
     setAuthSession(data)
-    ElMessage.success(mode.value === 'login' ? '登录成功' : '注册成功')
+    ElMessage.success(mode.value === 'login' ? '登录成功。' : '注册成功。')
     router.replace(route.query.redirect || '/chat')
   } catch (error) {
     const detail = error?.response?.data?.detail
     const message = Array.isArray(detail)
       ? detail.map((item) => item?.msg || '请求校验失败').join('；')
       : detail ||
-        (mode.value === 'login' ? '登录失败，请检查用户名或密码' : '注册失败，请稍后重试')
+        (mode.value === 'login' ? '登录失败，请检查用户名或密码。' : '注册失败，请稍后重试。')
     ElMessage.error(message)
   } finally {
     submitting.value = false

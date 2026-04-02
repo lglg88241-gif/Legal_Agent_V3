@@ -8,10 +8,10 @@ function formatValidationDetail(detail) {
         if (typeof item === 'string') return item
         if (item && typeof item === 'object') {
           const path = Array.isArray(item.loc) ? item.loc.join('.') : ''
-          const message = item.msg || 'Validation error'
+          const message = item.msg || '请求校验失败'
           return path ? `${path}: ${message}` : message
         }
-        return 'Validation error'
+        return '请求校验失败'
       })
       .join('\n')
   }
@@ -20,7 +20,7 @@ function formatValidationDetail(detail) {
     return detail
   }
 
-  return 'Request validation failed'
+  return '请求校验失败'
 }
 
 const api = axios.create({
@@ -77,6 +77,8 @@ export const submitFeedback = (data) => api.post('/feedback', data)
 
 export const createConversation = (payload = {}) => api.post('/conversations', payload)
 export const getConversations = () => api.get('/conversations')
+export const updateConversationTitle = (conversationId, title) =>
+  api.put(`/conversations/${conversationId}`, { title })
 export const getConversationMessages = (conversationId) =>
   api.get(`/conversations/${conversationId}/messages`)
 export const deleteConversation = (conversationId) =>
@@ -108,7 +110,7 @@ export const sendMessage = async (userInput, conversationId) => {
           resolve({ data: statusData.data })
         } else if (statusData.status === 'failed') {
           clearInterval(timer)
-          reject(new Error(statusData.error || 'Agent internal error'))
+          reject(new Error(statusData.error || '智能体执行失败'))
         }
       } catch (pollError) {
         clearInterval(timer)

@@ -9,14 +9,15 @@
 
     <div class="bubble-wrap">
       <div class="meta">
-        <span class="name">{{ isUser ? 'User' : 'Assistant' }}</span>
+        <span class="name">{{ isUser ? '我' : '法律助手' }}</span>
         <span class="time">{{ displayTime }}</span>
+        <span v-if="props.msg.pending" class="pending-flag">发送中...</span>
       </div>
 
       <div v-if="agentActions.length" class="agent-actions">
         <div class="action-header">
           <el-icon><Operation /></el-icon>
-          <span>Agent Pipeline</span>
+          <span>Agent 推理过程</span>
         </div>
 
         <div v-for="(action, index) in agentActions" :key="index" class="action-item">
@@ -30,7 +31,7 @@
       <div class="bubble" v-html="formatted"></div>
 
       <div v-if="normalizedSources.length" class="rag-sources">
-        <span class="sources-label">Sources</span>
+        <span class="sources-label">参考来源</span>
         <el-popover
           v-for="(source, index) in normalizedSources"
           :key="`${source.full}-${index}`"
@@ -44,7 +45,7 @@
             </el-tag>
           </template>
           <div class="source-card">
-            <div class="source-card-title">Reference file</div>
+            <div class="source-card-title">来源文件</div>
             <div class="source-card-name">{{ source.full }}</div>
           </div>
         </el-popover>
@@ -63,10 +64,7 @@ const props = defineProps({
 
 const isUser = computed(() => props.msg.role === 'user')
 
-const displayTime = computed(() => {
-  if (!props.msg.time) return ''
-  return props.msg.time
-})
+const displayTime = computed(() => props.msg.time || '')
 
 const formatted = computed(() => {
   if (!props.msg.content) return ''
@@ -108,9 +106,9 @@ const normalizedSources = computed(() => {
 })
 
 const toolLabels = {
-  tool_router: 'Router',
-  retrieval_tools: 'Retrieval',
-  legal_advisor: 'Advisor',
+  tool_router: '工具路由',
+  retrieval_tools: '多路召回',
+  legal_advisor: '法律分析',
 }
 
 const toolTagTypes = {
@@ -166,6 +164,10 @@ function toolTagType(name) {
 .name {
   font-weight: 500;
   color: #606266;
+}
+
+.pending-flag {
+  color: #e6a23c;
 }
 
 .agent-actions {

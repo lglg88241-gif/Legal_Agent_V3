@@ -4,7 +4,7 @@
       <div class="system-banner-main">
         <el-icon v-if="systemStatus.ready" class="banner-icon"><CircleCheckFilled /></el-icon>
         <el-icon v-else class="banner-icon rotating"><Loading /></el-icon>
-        <span>{{ systemStatus.ready ? 'System Ready' : 'System Initializing...' }}</span>
+        <span>{{ systemStatus.ready ? '系统已就绪' : '系统核心组件初始化中...' }}</span>
       </div>
       <div class="system-banner-meta">
         <span>Chroma {{ componentLabel(systemStatus.components.chroma) }}</span>
@@ -19,7 +19,7 @@
     <el-header class="app-header">
       <div class="header-left">
         <el-icon :size="22"><Promotion /></el-icon>
-        <span class="app-title">Legal Agent Workspace</span>
+        <span class="app-title">法律智能工作台</span>
       </div>
       <div class="header-right">
         <span class="user-chip">{{ currentUsername }}</span>
@@ -29,15 +29,15 @@
           :loading="summaryLoading"
           :disabled="!systemStatus.ready || !currentConversationId"
         >
-          <el-icon><Document /></el-icon>Summary
+          <el-icon><Document /></el-icon>总结摘要
         </el-button>
         <el-button text @click="handleExport" :disabled="!currentConversationId">
-          <el-icon><Download /></el-icon>Export
+          <el-icon><Download /></el-icon>导出
         </el-button>
         <el-button text type="danger" @click="handleClear" :disabled="!currentConversationId">
-          <el-icon><Delete /></el-icon>Clear
+          <el-icon><Delete /></el-icon>清空当前会话
         </el-button>
-        <el-button text type="danger" @click="handleLogout">Logout</el-button>
+        <el-button text type="danger" @click="handleLogout">退出登录</el-button>
       </div>
     </el-header>
 
@@ -48,6 +48,7 @@
           :current-id="currentConversationId"
           @create="createNewConversation"
           @switch="switchConversation"
+          @rename="promptRenameConversation"
           @delete="removeConversation"
         />
       </el-aside>
@@ -56,9 +57,9 @@
         <div v-if="!systemStatus.ready" class="init-overlay">
           <div class="init-card">
             <el-icon class="init-icon rotating"><Loading /></el-icon>
-            <div class="init-title">System Initializing...</div>
+            <div class="init-title">系统核心组件初始化中...</div>
             <div class="init-subtitle">
-              Warming up Chroma, Neo4j, local LLM and Celery. Input is locked until all components are ready.
+              正在预热 Chroma、Neo4j、本地模型与 Celery，输入框将在全部组件可用后自动解锁。
             </div>
           </div>
         </div>
@@ -66,9 +67,9 @@
         <el-scrollbar ref="scrollRef" class="chat-scroll">
           <div class="message-list" ref="messageListRef">
             <div v-if="!messages.length" class="empty-state">
-              <div class="empty-title">Start a new legal conversation</div>
+              <div class="empty-title">发起新的法律咨询</div>
               <div class="empty-subtitle">
-                Create or select a conversation from the left sidebar, then ask your question.
+                从左侧选择历史会话，或创建一个新会话后开始提问。
               </div>
             </div>
 
@@ -105,7 +106,7 @@
             :loading="sending"
             :disabled="!systemStatus.ready || !inputText.trim() || !currentConversationId"
           >
-            Send
+            发送
           </el-button>
         </div>
       </el-main>
@@ -155,6 +156,7 @@ import {
   getSystemStatus,
   sendMessage,
   submitFeedback,
+  updateConversationTitle,
 } from './api/index.js'
 import { clearAuthSession, getStoredUser } from './utils/auth.js'
 
@@ -200,12 +202,15 @@ const currentGraph = reactive({
   error: '',
 })
 
-const currentUsername = computed(() => getStoredUser()?.username || 'Authenticated User')
+const currentUsername = computed(() => getStoredUser()?.username || '已登录用户')
+const currentConversation = computed(() =>
+  conversations.value.find((item) => item.id === currentConversationId.value) || null
+)
 
 const inputPlaceholder = computed(() => {
-  if (!systemStatus.ready) return 'System is initializing. Input is temporarily locked.'
-  if (!currentConversationId.value) return 'Create or select a conversation first.'
-  return 'Enter your legal question. Press Enter to send, Shift+Enter for newline.'
+  if (!systemStatus.ready) return '系统初始化中，输入框暂时锁定。'
+  if (!currentConversationId.value) return '请先创建或选择一个会话。'
+  return '请输入法律问题，Enter 发送，Shift + Enter 换行。'
 })
 
 onMounted(async () => {
@@ -218,19 +223,420 @@ onUnmounted(() => {
 })
 
 function componentLabel(value) {
-  return value === 'connected' ? 'connected' : 'loading'
+  return value === 'connected' ? '已连接' : '加载中'
 }
 
-function startSystemStatusPolling() {
-  void refreshSystemStatus()
-  if (statusTimer.value) clearInterval(statusTimer.value)
-  statusTimer.value = setInterval(refreshSystemStatus, 1000)
+function sortConversations(list) {
+  return [...list].sort((left, right) => {
+    const leftTime = new Date(left.updated_at || left.created_at || 0).getTime()
+    const rightTime = new Date(right.updated_at || right.created_at || 0).getTime()
+    return rightTime - leftTime
+  })
 }
 
-function stopSystemStatusPolling() {
-  if (statusTimer.value) {
-    clearInterval(statusTimer.value)
-    statusTimer.value = null
+function setConversations(list) {
+  conversations.value = sortConversations(list)
+}
+
+function upsertConversationLocal(conversation) {
+  if (!conversation) return
+  const next = [...conversations.value]
+  const index = next.findIndex((item) => item.id === conversation.id)
+  if (index >= 0) next[index] = { ...next[index], ...conversation }
+  else next.push(conversation)
+  setConversations(next)
+}
+
+function removeConversationLocal(conversationId) {
+  setConversations(conversations.value.filter((item) => item.id !== conversationId))
+}
+
+function touchConversationLocal(conversationId, patch = {}) {
+  const target = conversations.value.find((item) => item.id === conversationId)
+  if (!target) return
+  upsertConversationLocal({
+    ...target,
+    ...patch,
+    updated_at: new Date().toISOString(),
+  })
+}
+
+function resetAnalysis() {
+  currentAnalysis.actions = []
+  currentAnalysis.sources = []
+}
+
+function resetGraph() {
+  currentGraph.query = ''
+  currentGraph.nodes = []
+  currentGraph.edges = []
+  currentGraph.tokens = []
+  currentGraph.generatedAt = ''
+  currentGraph.loading = false
+  currentGraph.error = ''
+}
+
+function buildMessageViewModel(message, index = 0) {
+  const metadata = message.metadata || {}
+  return {
+    id: message.id || `${message.role}-${index}`,
+    key: `${message.id || 'message'}-${index}`,
+    role: message.role === 'assistant' ? 'assistant' : 'user',
+    content: message.content || '',
+    time: formatTime(message.created_at),
+    sources: metadata.sources || [],
+    agentActions: metadata.agent_actions || [],
+    pending: false,
+  }
+}
+
+function syncCurrentAnalysisFromMessages() {
+  resetAnalysis()
+  const latestAssistant = [...messages.value].reverse().find((item) => item.role !== 'user')
+  if (!latestAssistant) return
+  currentAnalysis.actions = latestAssistant.agentActions || []
+  currentAnalysis.sources = latestAssistant.sources || []
+}
+
+function applyConversationPayload(payload) {
+  const conversation = payload?.conversation
+  const backendMessages = Array.isArray(payload?.messages) ? payload.messages : []
+
+  if (conversation) {
+    upsertConversationLocal(conversation)
+    currentConversationId.value = conversation.id
+    currentSessionId.value = conversation.session_id || ''
+  }
+
+  messages.value = backendMessages.map((message, index) => buildMessageViewModel(message, index))
+  syncCurrentAnalysisFromMessages()
+  scrollBottom()
+}
+
+async function initializeConversations() {
+  try {
+    await refreshConversationList()
+    if (!conversations.value.length) {
+      await createNewConversation({ silent: true })
+      return
+    }
+
+    await switchConversation(conversations.value[0].id)
+  } catch (error) {
+    console.error('Failed to initialize conversations:', error)
+    ElMessage.error('加载会话列表失败。')
+  }
+}
+
+async function refreshConversationList(preferredConversationId = null) {
+  const { data } = await getConversations()
+  const nextList = Array.isArray(data.conversations) ? data.conversations : []
+  setConversations(nextList)
+
+  const activeId = preferredConversationId || currentConversationId.value
+  const active = conversations.value.find((item) => item.id === activeId)
+  if (active) {
+    currentConversationId.value = active.id
+    currentSessionId.value = active.session_id || ''
+  }
+}
+
+async function createNewConversation(options = {}) {
+  try {
+    const { data } = await createConversation({})
+    const conversation = data.conversation
+    upsertConversationLocal(conversation)
+    await switchConversation(conversation.id)
+    if (!options.silent) {
+      ElMessage.success('已创建新会话。')
+    }
+  } catch (error) {
+    console.error('Failed to create conversation:', error)
+    ElMessage.error('创建会话失败。')
+  }
+}
+
+async function switchConversation(conversationId) {
+  if (!conversationId) return
+  try {
+    resetAnalysis()
+    resetGraph()
+    const { data } = await getConversationMessages(conversationId)
+    applyConversationPayload(data)
+  } catch (error) {
+    console.error('Failed to load conversation messages:', error)
+    ElMessage.error('加载会话消息失败。')
+  }
+}
+
+async function promptRenameConversation(session) {
+  if (!session?.id) return
+
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的会话标题', '重命名会话', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      inputValue: session.title || '',
+      inputPattern: /\S+/,
+      inputErrorMessage: '标题不能为空',
+    })
+
+    const title = value.trim()
+    const { data } = await updateConversationTitle(session.id, title)
+    upsertConversationLocal(data.conversation)
+    if (currentConversationId.value === session.id) {
+      currentSessionId.value = data.conversation.session_id || currentSessionId.value
+    }
+    ElMessage.success('会话标题已更新。')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    console.error('Failed to rename conversation:', error)
+    ElMessage.error('更新会话标题失败。')
+  }
+}
+
+async function removeConversation(conversationId) {
+  if (!conversationId) return
+
+  ElMessageBox.confirm('确定删除该会话及其全部消息吗？', '删除确认', { type: 'warning' })
+    .then(async () => {
+      try {
+        await deleteConversation(conversationId)
+        removeConversationLocal(conversationId)
+
+        if (conversationId === currentConversationId.value) {
+          const nextConversation = conversations.value[0]
+          if (nextConversation) {
+            await switchConversation(nextConversation.id)
+          } else {
+            currentConversationId.value = null
+            currentSessionId.value = ''
+            messages.value = []
+            await createNewConversation({ silent: true })
+          }
+        }
+
+        ElMessage.success('会话已删除。')
+      } catch (error) {
+        console.error('Failed to delete conversation:', error)
+        ElMessage.error('删除会话失败。')
+      }
+    })
+    .catch(() => {})
+}
+
+async function fetchGraph(query) {
+  const requestId = ++latestGraphRequestId.value
+  currentGraph.query = query
+  currentGraph.nodes = []
+  currentGraph.edges = []
+  currentGraph.tokens = []
+  currentGraph.generatedAt = ''
+  currentGraph.loading = true
+  currentGraph.error = ''
+
+  try {
+    const { data } = await getGraphSubgraph(query)
+    if (requestId !== latestGraphRequestId.value) return
+    currentGraph.query = data.query || query
+    currentGraph.nodes = data.nodes || []
+    currentGraph.edges = data.edges || []
+    currentGraph.tokens = data.tokens || []
+    currentGraph.generatedAt = data.generated_at || ''
+  } catch (error) {
+    if (requestId !== latestGraphRequestId.value) return
+    currentGraph.error = error?.response?.data?.detail || '图谱加载失败。'
+  } finally {
+    if (requestId === latestGraphRequestId.value) {
+      currentGraph.loading = false
+    }
+  }
+}
+
+async function ensureConversationTitle(userText) {
+  if (!currentConversation.value) return
+  if ((currentConversation.value.title || '').trim()) return
+
+  const title = userText.slice(0, 15).trim()
+  if (!title) return
+
+  touchConversationLocal(currentConversation.value.id, { title })
+  try {
+    const { data } = await updateConversationTitle(currentConversation.value.id, title)
+    upsertConversationLocal(data.conversation)
+  } catch (error) {
+    console.error('Failed to set first message title:', error)
+  }
+}
+
+function updatePendingMessage(tempId, patch = {}) {
+  const target = messages.value.find((item) => item.id === tempId)
+  if (!target) return
+  Object.assign(target, patch)
+}
+
+async function send() {
+  if (!systemStatus.ready) {
+    ElMessage.warning('系统仍在初始化，请稍候。')
+    return
+  }
+
+  if (!currentConversationId.value) {
+    ElMessage.warning('请先创建或选择一个会话。')
+    return
+  }
+
+  const text = inputText.value.trim()
+  if (!text || sending.value) return
+
+  const conversationId = currentConversationId.value
+  const tempKey = `temp-user-${Date.now()}`
+  const nowIso = new Date().toISOString()
+
+  messages.value.push({
+    id: tempKey,
+    key: tempKey,
+    role: 'user',
+    content: text,
+    time: formatTime(nowIso),
+    sources: [],
+    agentActions: [],
+    pending: true,
+  })
+
+  inputText.value = ''
+  sending.value = true
+  graphSidebarCollapsed.value = false
+  touchConversationLocal(conversationId)
+  void ensureConversationTitle(text)
+  void fetchGraph(text)
+  scrollBottom()
+
+  try {
+    const { data } = await sendMessage(text, conversationId)
+    updatePendingMessage(tempKey, { pending: false })
+
+    messages.value.push({
+      id: `assistant-${Date.now()}`,
+      key: `assistant-${Date.now()}`,
+      role: 'assistant',
+      content: data.response || '未返回有效内容。',
+      time: formatTime(new Date().toISOString()),
+      sources: data.sources || [],
+      agentActions: data.agent_actions || [],
+      pending: false,
+    })
+
+    currentAnalysis.actions = data.agent_actions || []
+    currentAnalysis.sources = data.sources || []
+    await refreshConversationList(conversationId)
+  } catch (error) {
+    console.error('Failed to send message:', error)
+    updatePendingMessage(tempKey, { pending: false })
+    messages.value.push({
+      id: `assistant-error-${Date.now()}`,
+      key: `assistant-error-${Date.now()}`,
+      role: 'assistant',
+      content: `请求失败：${error.message || '未知错误'}`,
+      time: formatTime(new Date().toISOString()),
+      sources: [],
+      agentActions: [],
+      pending: false,
+    })
+  } finally {
+    sending.value = false
+    scrollBottom()
+  }
+}
+
+function handleKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void send()
+  }
+}
+
+async function handleSummary() {
+  if (!currentConversationId.value) return
+
+  summaryLoading.value = true
+  try {
+    const { data } = await getConversationSummary(currentConversationId.value)
+    messages.value.push({
+      id: `summary-${Date.now()}`,
+      key: `summary-${Date.now()}`,
+      role: 'assistant',
+      content: `会话摘要：\n${data.summary}`,
+      time: formatTime(new Date().toISOString()),
+      sources: [],
+      agentActions: [],
+      pending: false,
+    })
+    scrollBottom()
+    ElMessage.success('摘要生成完成。')
+  } catch (error) {
+    console.error('Failed to summarize conversation:', error)
+    ElMessage.error('生成摘要失败。')
+  } finally {
+    summaryLoading.value = false
+  }
+}
+
+function handleExport() {
+  if (!currentConversationId.value) return
+
+  const payload = {
+    conversation_id: currentConversationId.value,
+    session_id: currentSessionId.value,
+    messages: messages.value,
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `会话记录_${currentConversationId.value}.json`
+  link.click()
+  URL.revokeObjectURL(link.href)
+  ElMessage.success('会话已导出。')
+}
+
+function handleLogout() {
+  clearAuthSession()
+  ElMessage.success('已退出登录。')
+  router.replace('/login')
+}
+
+function handleClear() {
+  if (!currentConversationId.value) return
+
+  ElMessageBox.confirm('确定清空当前会话的全部消息吗？', '清空确认', { type: 'warning' })
+    .then(async () => {
+      try {
+        await clearConversationMessages(currentConversationId.value)
+        messages.value = []
+        resetAnalysis()
+        resetGraph()
+        ElMessage.success('当前会话已清空。')
+      } catch (error) {
+        console.error('Failed to clear conversation:', error)
+        ElMessage.error('清空会话失败。')
+      }
+    })
+    .catch(() => {})
+}
+
+async function handleFeedback({ rating, comment }) {
+  try {
+    await submitFeedback({
+      session_id: currentSessionId.value,
+      turn_index: messages.value.filter((message) => message.role === 'user').length,
+      rating,
+      comment,
+      feedback_type: 'general',
+    })
+    ElMessage.success('反馈已提交。')
+  } catch (error) {
+    console.error('Failed to submit feedback:', error)
+    ElMessage.error('提交反馈失败。')
   }
 }
 
@@ -262,306 +668,16 @@ async function refreshSystemStatus() {
   }
 }
 
-function resetAnalysis() {
-  currentAnalysis.actions = []
-  currentAnalysis.sources = []
+function startSystemStatusPolling() {
+  void refreshSystemStatus()
+  if (statusTimer.value) clearInterval(statusTimer.value)
+  statusTimer.value = setInterval(refreshSystemStatus, 1000)
 }
 
-function resetGraph() {
-  currentGraph.query = ''
-  currentGraph.nodes = []
-  currentGraph.edges = []
-  currentGraph.tokens = []
-  currentGraph.generatedAt = ''
-  currentGraph.loading = false
-  currentGraph.error = ''
-}
-
-function buildMessageViewModel(message, index = 0) {
-  const metadata = message.metadata || {}
-  return {
-    id: message.id || `${message.role}-${index}`,
-    key: `${message.id || 'message'}-${index}`,
-    role: message.role === 'assistant' ? 'assistant' : 'user',
-    content: message.content || '',
-    time: formatTime(message.created_at),
-    sources: metadata.sources || [],
-    agentActions: metadata.agent_actions || [],
-  }
-}
-
-function applyConversationPayload(payload) {
-  const conversation = payload?.conversation
-  const backendMessages = Array.isArray(payload?.messages) ? payload.messages : []
-
-  if (conversation) {
-    currentConversationId.value = conversation.id
-    currentSessionId.value = conversation.session_id || ''
-  }
-
-  messages.value = backendMessages.map((message, index) => buildMessageViewModel(message, index))
-  syncCurrentAnalysisFromMessages()
-  scrollBottom()
-}
-
-function syncCurrentAnalysisFromMessages() {
-  resetAnalysis()
-  const latestAssistant = [...messages.value].reverse().find((item) => item.role !== 'user')
-  if (!latestAssistant) return
-  currentAnalysis.actions = latestAssistant.agentActions || []
-  currentAnalysis.sources = latestAssistant.sources || []
-}
-
-async function initializeConversations() {
-  try {
-    await refreshConversationList()
-    if (!conversations.value.length) {
-      await createNewConversation()
-      return
-    }
-
-    const firstConversation = conversations.value[0]
-    await switchConversation(firstConversation.id)
-  } catch (error) {
-    console.error('Failed to initialize conversations:', error)
-    ElMessage.error('Failed to load conversations.')
-  }
-}
-
-async function refreshConversationList(preferredConversationId = null) {
-  const { data } = await getConversations()
-  conversations.value = Array.isArray(data.conversations) ? data.conversations : []
-
-  if (preferredConversationId) {
-    const exists = conversations.value.find((item) => item.id === preferredConversationId)
-    if (exists) {
-      currentConversationId.value = preferredConversationId
-      currentSessionId.value = exists.session_id || ''
-      return
-    }
-  }
-
-  if (currentConversationId.value) {
-    const active = conversations.value.find((item) => item.id === currentConversationId.value)
-    if (active) {
-      currentSessionId.value = active.session_id || ''
-    }
-  }
-}
-
-async function createNewConversation() {
-  try {
-    const { data } = await createConversation({})
-    const conversation = data.conversation
-    await refreshConversationList(conversation.id)
-    await switchConversation(conversation.id)
-    ElMessage.success('Conversation created.')
-  } catch (error) {
-    console.error('Failed to create conversation:', error)
-    ElMessage.error('Failed to create conversation.')
-  }
-}
-
-async function switchConversation(conversationId) {
-  if (!conversationId) return
-  try {
-    resetAnalysis()
-    resetGraph()
-    const { data } = await getConversationMessages(conversationId)
-    applyConversationPayload(data)
-  } catch (error) {
-    console.error('Failed to load conversation messages:', error)
-    ElMessage.error('Failed to load conversation messages.')
-  }
-}
-
-async function reloadCurrentConversation() {
-  if (!currentConversationId.value) return
-  await refreshConversationList(currentConversationId.value)
-  await switchConversation(currentConversationId.value)
-}
-
-async function removeConversation(conversationId) {
-  if (!conversationId) return
-
-  ElMessageBox.confirm('Delete this conversation?', 'Warning', { type: 'warning' })
-    .then(async () => {
-      await deleteConversation(conversationId)
-      await refreshConversationList()
-
-      if (!conversations.value.length) {
-        currentConversationId.value = null
-        currentSessionId.value = ''
-        messages.value = []
-        await createNewConversation()
-      } else {
-        const nextId = conversations.value[0].id
-        await switchConversation(nextId)
-      }
-
-      ElMessage.success('Conversation deleted.')
-    })
-    .catch(() => {})
-}
-
-async function fetchGraph(query) {
-  const requestId = ++latestGraphRequestId.value
-  currentGraph.query = query
-  currentGraph.nodes = []
-  currentGraph.edges = []
-  currentGraph.tokens = []
-  currentGraph.generatedAt = ''
-  currentGraph.loading = true
-  currentGraph.error = ''
-
-  try {
-    const { data } = await getGraphSubgraph(query)
-    if (requestId !== latestGraphRequestId.value) return
-    currentGraph.query = data.query || query
-    currentGraph.nodes = data.nodes || []
-    currentGraph.edges = data.edges || []
-    currentGraph.tokens = data.tokens || []
-    currentGraph.generatedAt = data.generated_at || ''
-  } catch (error) {
-    if (requestId !== latestGraphRequestId.value) return
-    currentGraph.error = error?.response?.data?.detail || 'Failed to load graph data.'
-  } finally {
-    if (requestId === latestGraphRequestId.value) {
-      currentGraph.loading = false
-    }
-  }
-}
-
-async function send() {
-  if (!systemStatus.ready) {
-    ElMessage.warning('System is still initializing.')
-    return
-  }
-
-  if (!currentConversationId.value) {
-    ElMessage.warning('Create a conversation first.')
-    return
-  }
-
-  const text = inputText.value.trim()
-  if (!text || sending.value) return
-
-  const tempKey = `temp-user-${Date.now()}`
-  messages.value.push({
-    id: tempKey,
-    key: tempKey,
-    role: 'user',
-    content: text,
-    time: formatTime(new Date().toISOString()),
-    sources: [],
-    agentActions: [],
-  })
-  inputText.value = ''
-  sending.value = true
-  graphSidebarCollapsed.value = false
-  scrollBottom()
-  void fetchGraph(text)
-
-  try {
-    await sendMessage(text, currentConversationId.value)
-    await reloadCurrentConversation()
-  } catch (error) {
-    console.error('Failed to send message:', error)
-    messages.value.push({
-      id: `temp-error-${Date.now()}`,
-      key: `temp-error-${Date.now()}`,
-      role: 'assistant',
-      content: `Request failed: ${error.message || 'Unknown error'}`,
-      time: formatTime(new Date().toISOString()),
-      sources: [],
-      agentActions: [],
-    })
-  } finally {
-    sending.value = false
-    scrollBottom()
-  }
-}
-
-function handleKeydown(event) {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault()
-    void send()
-  }
-}
-
-async function handleSummary() {
-  if (!currentConversationId.value) return
-
-  summaryLoading.value = true
-  try {
-    const { data } = await getConversationSummary(currentConversationId.value)
-    messages.value.push({
-      id: `summary-${Date.now()}`,
-      key: `summary-${Date.now()}`,
-      role: 'assistant',
-      content: `Conversation summary:\n${data.summary}`,
-      time: formatTime(new Date().toISOString()),
-      sources: [],
-      agentActions: [],
-    })
-    scrollBottom()
-    ElMessage.success('Summary generated.')
-  } catch (error) {
-    console.error('Failed to summarize conversation:', error)
-    ElMessage.error('Failed to generate summary.')
-  } finally {
-    summaryLoading.value = false
-  }
-}
-
-function handleExport() {
-  if (!currentConversationId.value) return
-
-  const payload = {
-    conversation_id: currentConversationId.value,
-    session_id: currentSessionId.value,
-    messages: messages.value,
-  }
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = `conversation_${currentConversationId.value}.json`
-  link.click()
-  URL.revokeObjectURL(link.href)
-  ElMessage.success('Conversation exported.')
-}
-
-function handleLogout() {
-  clearAuthSession()
-  ElMessage.success('Logged out.')
-  router.replace('/login')
-}
-
-function handleClear() {
-  if (!currentConversationId.value) return
-
-  ElMessageBox.confirm('Clear all messages in this conversation?', 'Warning', { type: 'warning' })
-    .then(async () => {
-      await clearConversationMessages(currentConversationId.value)
-      await reloadCurrentConversation()
-      ElMessage.success('Conversation cleared.')
-    })
-    .catch(() => {})
-}
-
-async function handleFeedback({ rating, comment }) {
-  try {
-    await submitFeedback({
-      session_id: currentSessionId.value,
-      turn_index: messages.value.filter((message) => message.role === 'user').length,
-      rating,
-      comment,
-      feedback_type: 'general',
-    })
-    ElMessage.success('Feedback submitted.')
-  } catch (error) {
-    console.error('Failed to submit feedback:', error)
-    ElMessage.error('Failed to submit feedback.')
+function stopSystemStatusPolling() {
+  if (statusTimer.value) {
+    clearInterval(statusTimer.value)
+    statusTimer.value = null
   }
 }
 

@@ -1,7 +1,7 @@
 <template>
   <div class="session-list">
     <div class="session-header">
-      <span class="title">Conversations</span>
+      <span class="title">历史会话</span>
       <el-button type="primary" :icon="Plus" size="small" circle @click="$emit('create')" />
     </div>
 
@@ -14,34 +14,42 @@
       >
         <div class="session-name">
           <el-icon><ChatDotRound /></el-icon>
-          <span>{{ session.title || `Conversation ${session.id}` }}</span>
+          <span>{{ session.title || `新会话 ${session.id}` }}</span>
         </div>
         <div class="session-meta">
-          <span class="time">{{ formatTime(session.created_at) }}</span>
-          <el-button
-            type="danger"
-            :icon="Delete"
-            size="small"
-            link
-            @click.stop="$emit('delete', session.id)"
-          />
+          <span class="time">{{ formatTime(session.updated_at || session.created_at) }}</span>
+          <div class="action-group">
+            <el-button
+              :icon="Edit"
+              size="small"
+              link
+              @click.stop="$emit('rename', session)"
+            />
+            <el-button
+              type="danger"
+              :icon="Delete"
+              size="small"
+              link
+              @click.stop="$emit('delete', session.id)"
+            />
+          </div>
         </div>
       </div>
 
-      <el-empty v-if="!sessions.length" description="No conversations" :image-size="60" />
+      <el-empty v-if="!sessions.length" description="暂无历史会话" :image-size="60" />
     </el-scrollbar>
   </div>
 </template>
 
 <script setup>
-import { ChatDotRound, Delete, Plus } from '@element-plus/icons-vue'
+import { ChatDotRound, Delete, Edit, Plus } from '@element-plus/icons-vue'
 
 defineProps({
   sessions: { type: Array, default: () => [] },
   currentId: { type: [String, Number], default: '' },
 })
 
-defineEmits(['create', 'switch', 'delete'])
+defineEmits(['create', 'switch', 'delete', 'rename'])
 
 function formatTime(value) {
   if (!value) return ''
@@ -93,6 +101,10 @@ function formatTime(value) {
   color: rgba(255, 255, 255, 0.7);
 }
 
+.session-item.active .action-group :deep(.el-button) {
+  color: rgba(255, 255, 255, 0.86);
+}
+
 .session-name {
   display: flex;
   align-items: center;
@@ -105,6 +117,13 @@ function formatTime(value) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
+}
+
+.action-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .time {
