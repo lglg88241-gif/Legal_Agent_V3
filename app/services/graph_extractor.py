@@ -228,6 +228,152 @@ BELIEF_REVISION_PROMPT_V2 = """
 }
 """.strip()
 
+INCREMENTAL_EXTRACTION_PROMPT = """
+你是一个案情图谱增量抽取器。
+这是用户最新的补充口供：{user_input}
+
+请只提取这段新口供里新增的实体和关系，输出 ADD 动作列表。
+要求：
+1. 只输出本轮新增事实，不要重复改写旧事实。
+2. 绝对不要输出 UPDATE 或 DELETE。
+3. 实体要做命名对齐，例如“我/本人/用户”统一为“当事人”。
+4. category 只能是：主体、客体、事件、后果。
+5. 只能输出合法 JSON，不要解释。
+
+输出格式：
+{{
+  "actions": [
+    {{
+      "action": "ADD",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "主张",
+      "target": "赔偿",
+      "target_category": "后果"
+    }}
+  ]
+}}
+""".strip()
+
+SEMANTIC_GC_PROMPT = """
+你是一个图谱对齐引擎。
+这是当前案卷的唯一确凿事实：{case_summary}
+这是图谱数据库中现有的节点集合：{current_nodes}
+
+请交叉对比，找出图谱中那些已经与最新事实冲突、被推翻、或者根本不存在于摘要中的幽灵节点。
+要求：
+1. 只返回确实应该被剔除的节点名称。
+2. 输出的节点名必须逐字复制自给定节点集合，禁止改写、扩写或杜撰。
+3. 如果节点虽然暂时没有在摘要中展开，但仍与现有事实一致，则不要删除。
+4. 只能输出合法 JSON，不要解释。
+
+输出格式：
+{{"obsolete_nodes": ["旧公司名", "错误金额"]}}
+
+如果完全一致，返回：
+{{"obsolete_nodes": []}}
+""".strip()
+
+BELIEF_REVISION_PROMPT = """
+你是一个严谨的案情图谱管理员。这是当前图谱状态：{current_graph}
+这是用户的最新输入：{user_input}
+
+请判断新输入是对案情的补充，还是对之前错误信息的修正/推翻。请严格输出 JSON，动作类型只能是以下三种之一：ADD、UPDATE、DELETE。
+
+要求：
+1. 如果是新增事实，输出 ADD。
+2. 如果是修正已有事实，输出 UPDATE，并明确 old_target 与 new_target。
+3. 如果是推翻错误事实，输出 DELETE。
+4. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”。
+5. 所有 category 只能是：主体、客体、事件、后果。
+6. 只输出 JSON，不要输出解释性文字。
+
+输出格式：
+{{
+  "actions": [
+    {{
+      "action": "ADD",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "主张",
+      "target": "赔偿",
+      "target_category": "后果"
+    }},
+    {{
+      "action": "UPDATE",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "过马路状态",
+      "old_target": "闯红灯",
+      "new_target": "绿灯通行",
+      "target_category": "事件"
+    }},
+    {{
+      "action": "DELETE",
+      "source": "当事人",
+      "relation": "存在事实",
+      "target": "错误事实"
+    }}
+  ]
+}}
+""".strip()
+
+BELIEF_REVISION_PROMPT_V2 = """
+你是一个图谱数据库的底层操作员。你的任务是根据用户的输入，输出对图谱的 CRUD 操作 JSON。
+【当前已有节点】：{existing_nodes}
+【当前已有关系】：{current_graph}
+【用户最新输入】：{user_input}
+
+极度危险警告：绝对不要把用户的“否认、要求删除、记错了、改成、不是A而是B”这类元指令当作实体或关系写入图谱。它们是执行指令，不是事实本身。遇到这类表达，你必须直接输出 DELETE 或 UPDATE。
+
+【硬性规则】
+1. 你必须先做冲突检测。只要新输入推翻、纠正、覆盖了旧事实，就绝对不能只输出 ADD。
+2. 当输出 DELETE、UPDATE 时，若涉及已有节点，必须从 existing_nodes 中逐字复制节点名，禁止改写。
+3. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”，“对方车/对方车辆”统一为“肇事车辆”。
+4. category 只能是：主体、客体、事件、后果。
+5. 只能输出合法 JSON，不要输出解释文字。
+
+【正确操作示例】
+场景 1 - 纠错反转：
+现有图谱包含：[当事人]-(砸伤)->[车间机器]。用户说：“我没在车间被砸，是路上被车撞了。”
+输出：{{"actions": [{{"action": "DELETE", "target_name": "车间机器"}}, {{"action": "DELETE", "target_name": "砸伤"}}, {{"action": "ADD", "source": "当事人", "source_category": "主体", "relation": "撞伤", "target": "肇事车辆", "target_category": "客体"}}]}}
+
+场景 2 - 明确要求删除：
+现有图谱包含：[机器]。用户说：“把跟机器相关的事情删掉。”
+输出：{{"actions": [{{"action": "DELETE", "target_name": "机器"}}]}}
+
+【绝对禁止的错误做法】
+将“要求删除”“否认”“记错了”这些指令写成关系，比如：[当事人]-(要求删除)->[机器]
+这是严重错误。
+
+【输出格式】
+{{
+  "actions": [
+    {{
+      "action": "ADD",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "主张",
+      "target": "赔偿",
+      "target_category": "后果"
+    }},
+    {{
+      "action": "UPDATE",
+      "source": "当事人",
+      "source_category": "主体",
+      "relation": "过马路状态",
+      "old_target": "闯红灯",
+      "new_target": "绿灯通行",
+      "target_category": "事件"
+    }},
+    {{
+      "action": "DELETE",
+      "target_name": "机器"
+    }}
+  ]
+}}
+""".strip()
+
 FETCH_FACTS_QUERY = """
 MATCH (source:DynamicCaseEntity {conversation_id: $conversation_id})-[rel:CASE_RELATION {conversation_id: $conversation_id}]->(target:DynamicCaseEntity {conversation_id: $conversation_id})
 RETURN source.name AS source_name,
