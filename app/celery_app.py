@@ -102,6 +102,37 @@ async def persist_assistant_message(
         await celery_engine.dispose()
 
 
+@celery_app.task(name="update_graph_task")
+def update_graph_task(conversation_id: int):
+    try:
+        chat_history = asyncio.run(load_chat_history(conversation_id=conversation_id, limit=12))
+        current_graph_summary = asyncio.run(load_graph_memory(conversation_id=conversation_id))
+        updated = asyncio.run(
+            sync_case_graph_from_history(
+                conversation_id=conversation_id,
+                chat_history=chat_history,
+            )
+        )
+        logger.info(
+            "Graph update task completed | conversation_id=%s triples_updated=%s had_graph=%s",
+            conversation_id,
+            updated,
+            bool((current_graph_summary or "").strip()),
+        )
+        return {
+            "status": "success",
+            "conversation_id": conversation_id,
+            "triples_updated": updated,
+        }
+    except Exception as exc:
+        logger.exception("update_graph_task failed | conversation_id=%s", conversation_id)
+        return {
+            "status": "failed",
+            "conversation_id": conversation_id,
+            "error": str(exc),
+        }
+
+
 @celery_app.task(bind=True, name="ask_agent_task")
 def ask_agent_task(
     self,
@@ -114,7 +145,6 @@ def ask_agent_task(
 
     try:
         chat_history = asyncio.run(load_chat_history(conversation_id=conversation_id, limit=6))
-        asyncio.run(sync_case_graph_from_history(conversation_id=conversation_id, chat_history=chat_history))
         graph_memory = asyncio.run(load_graph_memory(conversation_id=conversation_id))
         answer = asyncio.run(
             legal_agent.ask(
@@ -161,6 +191,7 @@ def ask_agent_task(
                 },
             )
         )
+        update_graph_task.delay(conversation_id)
         return result
     except Exception as exc:
         logger.exception("ask_agent_task failed")

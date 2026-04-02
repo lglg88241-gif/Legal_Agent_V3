@@ -172,6 +172,8 @@ const summaryLoading = ref(false)
 const scrollRef = ref(null)
 const messageListRef = ref(null)
 const statusTimer = ref(null)
+const graphRefreshTimer = ref(null)
+const graphRefreshStopTimer = ref(null)
 const graphSidebarCollapsed = ref(false)
 const latestGraphRequestId = ref(0)
 
@@ -220,6 +222,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopSystemStatusPolling()
+  stopGraphRefreshPolling()
 })
 
 function componentLabel(value) {
@@ -274,6 +277,17 @@ function resetGraph() {
   currentGraph.generatedAt = ''
   currentGraph.loading = false
   currentGraph.error = ''
+}
+
+function stopGraphRefreshPolling() {
+  if (graphRefreshTimer.value) {
+    clearInterval(graphRefreshTimer.value)
+    graphRefreshTimer.value = null
+  }
+  if (graphRefreshStopTimer.value) {
+    clearTimeout(graphRefreshStopTimer.value)
+    graphRefreshStopTimer.value = null
+  }
 }
 
 function buildMessageViewModel(message, index = 0) {
@@ -358,7 +372,9 @@ async function createNewConversation(options = {}) {
 
 async function switchConversation(conversationId) {
   if (!conversationId) return
+  stopGraphRefreshPolling()
   try {
+    stopGraphRefreshPolling()
     resetAnalysis()
     resetGraph()
     const { data } = await getConversationMessages(conversationId)
@@ -426,19 +442,22 @@ async function removeConversation(conversationId) {
     .catch(() => {})
 }
 
-async function fetchConversationGraph(conversationId, query = '') {
+async function fetchConversationGraph(conversationId, query = '', options = {}) {
   if (!conversationId) {
     resetGraph()
     return
   }
 
   const requestId = ++latestGraphRequestId.value
+  const preserveData = Boolean(options.preserveData)
   currentGraph.query = query || currentConversation.value?.title || `会话 ${conversationId} 案情图谱`
-  currentGraph.nodes = []
-  currentGraph.edges = []
-  currentGraph.tokens = []
-  currentGraph.generatedAt = ''
-  currentGraph.loading = true
+  if (!preserveData) {
+    currentGraph.nodes = []
+    currentGraph.edges = []
+    currentGraph.tokens = []
+    currentGraph.generatedAt = ''
+  }
+  currentGraph.loading = !options.silent
   currentGraph.error = ''
 
   try {
@@ -453,7 +472,7 @@ async function fetchConversationGraph(conversationId, query = '') {
     if (requestId !== latestGraphRequestId.value) return
     currentGraph.error = error?.response?.data?.detail || '图谱加载失败。'
   } finally {
-    if (requestId === latestGraphRequestId.value) {
+    if (requestId === latestGraphRequestId.value && !options.silent) {
       currentGraph.loading = false
     }
   }
@@ -473,6 +492,27 @@ async function ensureConversationTitle(userText) {
   } catch (error) {
     console.error('Failed to set first message title:', error)
   }
+}
+
+function startGraphRefreshPolling(conversationId, previousNodeCount, query = '') {
+  stopGraphRefreshPolling()
+  if (!conversationId) return
+
+  graphRefreshTimer.value = setInterval(async () => {
+    try {
+      await fetchConversationGraph(conversationId, query, { preserveData: true, silent: true })
+      if ((currentGraph.nodes?.length || 0) !== previousNodeCount) {
+        stopGraphRefreshPolling()
+      }
+    } catch (error) {
+      console.error('Graph refresh polling failed:', error)
+      stopGraphRefreshPolling()
+    }
+  }, 3000)
+
+  graphRefreshStopTimer.value = setTimeout(() => {
+    stopGraphRefreshPolling()
+  }, 15000)
 }
 
 function updatePendingMessage(tempId, patch = {}) {
@@ -614,6 +654,7 @@ async function sendImpl(textOverride = null, options = {}) {
   const forceCurrentCase = Boolean(options.forceCurrentCase)
   const tempKey = `temp-user-${Date.now()}`
   const nowIso = new Date().toISOString()
+  const previousNodeCount = currentGraph.nodes?.length || 0
 
   messages.value.push({
     id: tempKey,
@@ -680,6 +721,7 @@ async function sendImpl(textOverride = null, options = {}) {
     void ensureConversationTitle(text)
     await refreshConversationList(baseConversationId)
     await fetchConversationGraph(baseConversationId, text)
+    startGraphRefreshPolling(baseConversationId, previousNodeCount, text)
   } catch (error) {
     console.error('Failed to send message:', error)
     updatePendingMessage(tempKey, { pending: false })
@@ -709,6 +751,7 @@ function handleKeydown(event) {
 
 async function handleSummary() {
   if (!currentConversationId.value) return
+  stopGraphRefreshPolling()
 
   summaryLoading.value = true
   try {
