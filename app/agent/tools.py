@@ -28,7 +28,7 @@ RETURN labels(n) AS source_labels,
 LIMIT 5
 """
 
-CHROMA_RECALL_K = 20
+CHROMA_RECALL_K = 10
 LAW_TOP_K = 3
 CASE_TOP_K = 2
 

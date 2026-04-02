@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+import torch
 from sentence_transformers import CrossEncoder
 
 from app.core.config import settings
@@ -30,8 +31,10 @@ class BGEReranker:
                     model_path, local_files_only = resolve_embedding_model_path(
                         settings.RERANKER_MODEL_PATH
                     )
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
                     self._model = CrossEncoder(
                         model_name_or_path=model_path,
+                        device=device,
                         local_files_only=local_files_only,
                     )
         return self._model
