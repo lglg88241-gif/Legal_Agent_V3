@@ -48,8 +48,15 @@ class GraphActionList(BaseModel):
     actions: list[GraphAction]
 
 
-class ObsoleteNodeList(BaseModel):
+class GraphTriple(BaseModel):
+    source: str
+    relation: str
+    target: str
+
+
+class GraphGCOutput(BaseModel):
     obsolete_nodes: list[str] = Field(default_factory=list)
+    obsolete_edges: list[GraphTriple] = Field(default_factory=list)
 
 
 INCREMENTAL_EXTRACTION_PROMPT = """
@@ -256,22 +263,28 @@ INCREMENTAL_EXTRACTION_PROMPT = """
 """.strip()
 
 SEMANTIC_GC_PROMPT = """
-你是一个图谱对齐引擎。
+你是一个严谨的图谱对齐与清理引擎。
 这是当前案卷的唯一确凿事实：{case_summary}
 这是图谱数据库中现有的节点集合：{current_nodes}
+这是图谱数据库中现有的关系集合：{current_graph}
 
-请交叉对比，找出图谱中那些已经与最新事实冲突、被推翻、或者根本不存在于摘要中的幽灵节点。
+你的任务是交叉对比最新事实与当前图谱，识别两类需要清理的脏数据：
+1. 幽灵节点：已经与最新事实冲突、被推翻、或根本不存在于摘要中的节点。
+2. 幽灵关系：两个节点本身依然有效，但它们之间某条旧关系已经被最新事实推翻，例如之前的“主动辞职”现在应改为“被迫离职”。
+
 要求：
-1. 只返回确实应该被剔除的节点名称。
-2. 输出的节点名必须逐字复制自给定节点集合，禁止改写、扩写或杜撰。
-3. 如果节点虽然暂时没有在摘要中展开，但仍与现有事实一致，则不要删除。
-4. 只能输出合法 JSON，不要解释。
+1. obsolete_nodes 只返回确实应该被剔除的节点名称。
+2. obsolete_edges 只返回确实应该被删除的旧关系三元组。
+3. 输出的节点名和关系涉及的 source/target 必须逐字复制自给定节点集合，禁止改写、扩写或杜撰。
+4. 如果两个节点仍然有效，但旧连线已经失真，你必须把这条旧关系提取到 obsolete_edges。
+5. 如果节点或关系仍与现有事实一致，则不要删除。
+6. 只能输出合法 JSON，不要解释。
 
 输出格式：
-{{"obsolete_nodes": ["旧公司名", "错误金额"]}}
+{{"obsolete_nodes": ["旧公司名"], "obsolete_edges": [{{"source": "当事人", "relation": "主动辞职", "target": "深圳旺铺"}}]}}
 
 如果完全一致，返回：
-{{"obsolete_nodes": []}}
+{{"obsolete_nodes": [], "obsolete_edges": []}}
 """.strip()
 
 BELIEF_REVISION_PROMPT = """
@@ -495,24 +508,47 @@ def _parse_graph_action_response(
     )
 
 
-def _parse_obsolete_nodes_response(
+def _parse_graph_gc_response(
     raw_content: str,
     existing_nodes: set[str] | None = None,
-) -> list[str]:
+) -> dict[str, list[Any]]:
     repaired_content = repair_json(raw_content)
     json.loads(repaired_content)
-    parsed = ObsoleteNodeList.model_validate_json(repaired_content)
+    parsed = GraphGCOutput.model_validate_json(repaired_content)
 
-    normalized: list[str] = []
-    seen: set[str] = set()
+    normalized_nodes: list[str] = []
+    seen_nodes: set[str] = set()
     for node_name in parsed.obsolete_nodes:
         resolved_name = _resolve_existing_node_name(node_name, existing_nodes)
-        if not resolved_name or resolved_name in seen:
+        if not resolved_name or resolved_name in seen_nodes:
             continue
-        seen.add(resolved_name)
-        normalized.append(resolved_name)
+        seen_nodes.add(resolved_name)
+        normalized_nodes.append(resolved_name)
 
-    return normalized
+    normalized_edges: list[dict[str, str]] = []
+    seen_edges: set[tuple[str, str, str]] = set()
+    for edge in parsed.obsolete_edges:
+        source = _resolve_existing_node_name(edge.source, existing_nodes)
+        relation = _normalize_relation(edge.relation)
+        target = _resolve_existing_node_name(edge.target, existing_nodes)
+        if not source or not relation or not target:
+            continue
+        key = (source, relation, target)
+        if key in seen_edges:
+            continue
+        seen_edges.add(key)
+        normalized_edges.append(
+            {
+                "source": source,
+                "relation": relation,
+                "target": target,
+            }
+        )
+
+    return {
+        "obsolete_nodes": normalized_nodes,
+        "obsolete_edges": normalized_edges,
+    }
 
 
 def _normalize_triples(raw_payload: Any) -> list[dict[str, str]]:
@@ -848,6 +884,29 @@ def _delete_obsolete_nodes_sync(conversation_id: int, obsolete_nodes: list[str])
     return len(obsolete_nodes)
 
 
+def _delete_obsolete_edges_sync(conversation_id: int, obsolete_edges: list[dict[str, str]]) -> int:
+    if not obsolete_edges:
+        return 0
+
+    driver = _build_driver()
+    deleted_count = 0
+    try:
+        with driver.session() as session:
+            for edge in obsolete_edges:
+                source = edge.get("source", "").strip()
+                relation = edge.get("relation", "").strip()
+                target = edge.get("target", "").strip()
+                if not source or not relation or not target:
+                    continue
+                _delete_fact(session, conversation_id, source, relation, target)
+                deleted_count += 1
+            _cleanup_orphans(session, conversation_id)
+    finally:
+        driver.close()
+
+    return deleted_count
+
+
 async def extract_case_triples(text: str) -> list[dict[str, str]]:
     clean_text = (text or "").strip()
     if not clean_text:
@@ -891,6 +950,17 @@ async def delete_obsolete_nodes(conversation_id: int, obsolete_nodes: list[str])
         return await asyncio.to_thread(_delete_obsolete_nodes_sync, conversation_id, obsolete_nodes)
     except Exception as exc:
         logger.warning("Failed to delete obsolete graph nodes for conversation %s: %s", conversation_id, exc)
+        return 0
+
+
+async def delete_obsolete_edges(conversation_id: int, obsolete_edges: list[dict[str, str]]) -> int:
+    if not obsolete_edges:
+        return 0
+
+    try:
+        return await asyncio.to_thread(_delete_obsolete_edges_sync, conversation_id, obsolete_edges)
+    except Exception as exc:
+        logger.warning("Failed to delete obsolete graph edges for conversation %s: %s", conversation_id, exc)
         return 0
 
 
@@ -1037,10 +1107,10 @@ async def extract_incremental_graph_actions(user_input: str) -> list[dict[str, s
     return []
 
 
-async def plan_obsolete_nodes(case_summary: str, current_nodes: list[str]) -> list[str]:
+async def plan_graph_gc(case_summary: str, current_nodes: list[str], current_graph: str) -> dict[str, list[Any]]:
     summary_text = (case_summary or "").strip()
     if not summary_text or not current_nodes:
-        return []
+        return {"obsolete_nodes": [], "obsolete_edges": []}
 
     max_retries = 3
     feedback = ""
@@ -1050,6 +1120,7 @@ async def plan_obsolete_nodes(case_summary: str, current_nodes: list[str]) -> li
         prompt = SEMANTIC_GC_PROMPT.format(
             case_summary=summary_text,
             current_nodes=json.dumps(current_nodes, ensure_ascii=False),
+            current_graph=current_graph or "[]",
         )
         if feedback:
             prompt = (
@@ -1066,7 +1137,7 @@ async def plan_obsolete_nodes(case_summary: str, current_nodes: list[str]) -> li
                 ]
             )
             content = response.content if isinstance(response.content, str) else str(response.content)
-            return _parse_obsolete_nodes_response(content, existing_nodes)
+            return _parse_graph_gc_response(content, existing_nodes)
         except (ValidationError, json.JSONDecodeError) as exc:
             feedback = str(exc)
             logger.warning(
@@ -1077,10 +1148,10 @@ async def plan_obsolete_nodes(case_summary: str, current_nodes: list[str]) -> li
             )
         except Exception as exc:
             logger.warning("Semantic GC planning failed on attempt %s/%s: %s", attempt, max_retries, exc)
-            return []
+            return {"obsolete_nodes": [], "obsolete_edges": []}
 
     logger.warning("Semantic GC exhausted retries for summary: %s", summary_text)
-    return []
+    return {"obsolete_nodes": [], "obsolete_edges": []}
 
 
 async def execute_graph_actions(conversation_id: int, actions: list[dict[str, str]]) -> dict[str, Any]:
@@ -1147,17 +1218,23 @@ async def refresh_case_graph(conversation_id: int, user_input: str, case_summary
 
     add_result = await execute_graph_actions(conversation_id, add_actions)
     current_nodes = await get_case_graph_node_names(conversation_id)
-    obsolete_nodes = await plan_obsolete_nodes(case_summary, current_nodes)
+    current_graph = await format_current_graph_state(conversation_id)
+    gc_result = await plan_graph_gc(case_summary, current_nodes, current_graph)
+    obsolete_nodes = gc_result.get("obsolete_nodes", [])
+    obsolete_edges = gc_result.get("obsolete_edges", [])
     deleted_count = await delete_obsolete_nodes(conversation_id, obsolete_nodes)
+    deleted_edge_count = await delete_obsolete_edges(conversation_id, obsolete_edges)
 
     return {
         "conversation_id": conversation_id,
-        "actions_applied": int(add_result.get("actions_applied", 0)) + deleted_count,
+        "actions_applied": int(add_result.get("actions_applied", 0)) + deleted_count + deleted_edge_count,
         "actions": add_result.get("actions", []),
         "added_actions": add_result.get("actions", []),
         "added_count": int(add_result.get("actions_applied", 0)),
         "obsolete_nodes": obsolete_nodes,
+        "obsolete_edges": obsolete_edges,
         "deleted_count": deleted_count,
+        "deleted_edge_count": deleted_edge_count,
     }
 
 
