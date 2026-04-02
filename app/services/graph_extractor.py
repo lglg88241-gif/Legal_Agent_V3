@@ -100,26 +100,37 @@ DELETE
 """.strip()
 
 BELIEF_REVISION_PROMPT_V2 = """
-你是一个带有强迫症的案情图谱清理大师。
-这是图谱里现有的节点：{existing_nodes}
-这是图谱现有关系：{current_graph}
-这是用户的新输入：{user_input}
+你是一个图谱数据库的底层操作员。你的任务是根据用户的输入，输出对图谱的 CRUD 操作 JSON。
+【当前已有节点】：{existing_nodes}
+【当前已有关系】：{current_graph}
+【用户最新输入】：{user_input}
 
-【最高指令】
-1. 你必须进行冲突检测。如果新输入推翻、纠正、覆盖了旧事实，你绝对不能只输出 ADD，必须输出 DELETE 或 UPDATE。
-2. 当输出 DELETE 或 UPDATE 时，凡是已经存在于 existing_nodes 中的节点名，必须一字不差地复制使用，禁止改写、近义替换或重新命名。
+⚠️ 极度危险警告：绝对不要把用户的“否认、要求删除、记错了、改成、不是A而是B”这类元指令当作实体或关系写入图谱。它们是执行指令，不是事实本身。遇到这类表达，你必须直接输出 DELETE 或 UPDATE。
+
+【硬性规则】
+1. 你必须先做冲突检测。只要新输入推翻、纠正、覆盖了旧事实，就绝对不能只输出 ADD。
+2. 当输出 DELETE、UPDATE 时，若涉及已有节点，必须从 existing_nodes 中逐字复制节点名，禁止改写。
 3. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”，“对方车/对方车辆”统一为“肇事车辆”。
 4. category 只能是：主体、客体、事件、后果。
 5. 只能输出合法 JSON，不要输出解释文字。
 
-【动作规则】
-- ADD：新增事实。
-- UPDATE：修正已有事实。必须同时给出 source、relation、old_target、new_target。
-- DELETE：删除错误事实。
-  - 如果要删除一条关系，给出 source、relation，以及 target 或 old_target。
-  - 如果要直接删除一个错误节点，保留 target 为要删除的精准节点名，source 和 relation 可以留空字符串。
+【正确操作示例】
+场景 1 - 纠错反转：
+现有图谱包含：[当事人]-(砸伤)->[车间机器]。用户说：“我没在车间被砸，是路上被车撞了。”
+输出：
+{"actions": [{"action": "DELETE", "target_name": "车间机器"}, {"action": "DELETE", "target_name": "砸伤"}, {"action": "ADD", "source": "当事人", "source_category": "主体", "relation": "撞伤", "target": "肇事车辆", "target_category": "客体"}]}
 
-输出格式：
+场景 2 - 明确要求删除：
+现有图谱包含：[机器]。用户说：“把跟机器相关的事情删掉。”
+输出：
+{"actions": [{"action": "DELETE", "target_name": "机器"}]}
+
+【绝对禁止的错误做法】
+将“要求删除”“否认”“记错了”这些指令写成关系，比如：
+[当事人]-(要求删除)->[机器]
+这是严重错误。
+
+【输出格式】
 {
   "actions": [
     {
@@ -141,15 +152,7 @@ BELIEF_REVISION_PROMPT_V2 = """
     },
     {
       "action": "DELETE",
-      "source": "当事人",
-      "relation": "存在事实",
-      "target": "错误事实"
-    },
-    {
-      "action": "DELETE",
-      "source": "",
-      "relation": "",
-      "target": "机器"
+      "target_name": "机器"
     }
   ]
 }
@@ -325,13 +328,16 @@ def _normalize_actions(raw_payload: Any, existing_nodes: set[str] | None = None)
         relation = _normalize_relation(item.get("relation", ""))
         target = _resolve_existing_node_name(item.get("new_target", "") or item.get("target", ""), existing_nodes)
         old_target = _resolve_existing_node_name(item.get("old_target", "") or item.get("target", ""), existing_nodes)
-        delete_target = _resolve_existing_node_name(item.get("target", "") or item.get("old_target", ""), existing_nodes)
+        target_name = _resolve_existing_node_name(
+            item.get("target_name", "") or item.get("target", "") or item.get("old_target", ""),
+            existing_nodes,
+        )
 
         if action == "ADD" and (not source or not relation or not target):
             continue
         if action == "UPDATE" and (not source or not relation or not old_target or not target):
             continue
-        if action == "DELETE" and not delete_target:
+        if action == "DELETE" and not (target_name or (source and relation and old_target)):
             continue
 
         normalized.append(
@@ -340,9 +346,10 @@ def _normalize_actions(raw_payload: Any, existing_nodes: set[str] | None = None)
                 "source": source,
                 "source_category": _normalize_category(item.get("source_category"), source),
                 "relation": relation,
-                "target": target if action != "DELETE" else delete_target,
+                "target": target if action != "DELETE" else target_name,
                 "target_category": _normalize_category(item.get("target_category"), target),
                 "old_target": old_target,
+                "target_name": target_name,
             }
         )
 
@@ -353,9 +360,7 @@ def _cleanup_orphans(session, conversation_id: int) -> None:
     session.run(
         """
         MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
-        OPTIONAL MATCH (n)-[r:CASE_RELATION {conversation_id: $conversation_id}]-()
-        WITH n, count(r) AS rel_count
-        WHERE rel_count = 0
+        WHERE degree(n) = 0
         DELETE n
         """,
         {"conversation_id": conversation_id},
@@ -418,9 +423,22 @@ def _delete_fact(session, conversation_id: int, source: str, relation: str, targ
 def _delete_node(session, conversation_id: int, target_name: str) -> None:
     session.run(
         """
-        MATCH (n)
-        WHERE n.name = $target_name AND n.conversation_id = $conversation_id
+        MATCH (n:DynamicCaseEntity)
+        WHERE n.conversation_id = $conversation_id
+          AND (n.name = $target_name OR n.name CONTAINS $target_name)
         DETACH DELETE n
+        """,
+        {
+            "conversation_id": conversation_id,
+            "target_name": target_name,
+        },
+    ).consume()
+
+    session.run(
+        """
+        MATCH ()-[rel:CASE_RELATION {conversation_id: $conversation_id}]->()
+        WHERE rel.relation = $target_name OR rel.relation CONTAINS $target_name
+        DELETE rel
         """,
         {
             "conversation_id": conversation_id,
@@ -483,7 +501,7 @@ def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, st
                         _delete_node(
                             session,
                             conversation_id,
-                            action["target"] or action["old_target"],
+                            action.get("target_name") or action["target"] or action["old_target"],
                         )
                     applied += 1
 
