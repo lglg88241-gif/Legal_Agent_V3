@@ -102,7 +102,7 @@
           />
           <el-button
             type="primary"
-            @click="send"
+            @click="sendImpl"
             :loading="sending"
             :disabled="!systemStatus.ready || !inputText.trim() || !currentConversationId"
           >
@@ -481,6 +481,10 @@ function updatePendingMessage(tempId, patch = {}) {
   Object.assign(target, patch)
 }
 
+function removeMessageById(messageId) {
+  messages.value = messages.value.filter((item) => item.id !== messageId)
+}
+
 async function send() {
   if (!systemStatus.ready) {
     ElMessage.warning('系统仍在初始化，请稍候。')
@@ -559,10 +563,147 @@ async function send() {
   }
 }
 
+async function createCaseForResend() {
+  const { data } = await createConversation({})
+  const conversation = data.conversation
+  upsertConversationLocal(conversation)
+  await switchConversation(conversation.id)
+  ElMessage.success('已为新法律问题建立独立卷宗。')
+  return conversation
+}
+
+async function resolveCaseBoundarySuggestion(message) {
+  try {
+    await ElMessageBox.confirm(
+      message || '发现您似乎开启了一个新的法律问题，是否新建独立卷宗？',
+      '检测到新案件',
+      {
+        confirmButtonText: '是，新建卷宗',
+        cancelButtonText: '否，继续在当前补充',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      }
+    )
+    return 'new_case'
+  } catch (error) {
+    if (error === 'cancel') {
+      return 'stay_current'
+    }
+    if (error === 'close') {
+      return 'cancelled'
+    }
+    throw error
+  }
+}
+
+async function sendImpl(textOverride = null, options = {}) {
+  if (!systemStatus.ready) {
+    ElMessage.warning('系统仍在初始化，请稍后。')
+    return
+  }
+
+  const baseConversationId = options.conversationId || currentConversationId.value
+  if (!baseConversationId) {
+    ElMessage.warning('请先新建或选择一份卷宗。')
+    return
+  }
+
+  const text = (textOverride ?? inputText.value).trim()
+  if (!text || sending.value) return
+
+  const forceCurrentCase = Boolean(options.forceCurrentCase)
+  const tempKey = `temp-user-${Date.now()}`
+  const nowIso = new Date().toISOString()
+
+  messages.value.push({
+    id: tempKey,
+    key: tempKey,
+    role: 'user',
+    content: text,
+    time: formatTime(nowIso),
+    sources: [],
+    agentActions: [],
+    pending: true,
+  })
+
+  inputText.value = ''
+  sending.value = true
+  graphSidebarCollapsed.value = false
+  touchConversationLocal(baseConversationId)
+  currentGraph.loading = true
+  currentGraph.error = ''
+  currentGraph.query = text
+  scrollBottom()
+
+  try {
+    const initRes = await sendMessage(text, baseConversationId, { forceCurrentCase })
+    const initData = initRes?.data || {}
+
+    if (initData.action === 'suggest_new_case') {
+      removeMessageById(tempKey)
+      const nextAction = await resolveCaseBoundarySuggestion(initData.message)
+      sending.value = false
+      currentGraph.loading = false
+
+      if (nextAction === 'new_case') {
+        const newConversation = await createCaseForResend()
+        if (newConversation?.id) {
+          await sendImpl(text, { conversationId: newConversation.id, forceCurrentCase: false })
+        }
+        return
+      }
+
+      if (nextAction === 'cancelled') {
+        return
+      }
+
+      await sendImpl(text, { conversationId: baseConversationId, forceCurrentCase: true })
+      return
+    }
+
+    const data = initData.task_id ? (await initRes).data : initData
+    updatePendingMessage(tempKey, { pending: false })
+
+    messages.value.push({
+      id: `assistant-${Date.now()}`,
+      key: `assistant-${Date.now()}`,
+      role: 'assistant',
+      content: data.response || '未返回有效内容。',
+      time: formatTime(new Date().toISOString()),
+      sources: data.sources || [],
+      agentActions: data.agent_actions || [],
+      pending: false,
+    })
+
+    currentAnalysis.actions = data.agent_actions || []
+    currentAnalysis.sources = data.sources || []
+    void ensureConversationTitle(text)
+    await refreshConversationList(baseConversationId)
+    await fetchConversationGraph(baseConversationId, text)
+  } catch (error) {
+    console.error('Failed to send message:', error)
+    updatePendingMessage(tempKey, { pending: false })
+    messages.value.push({
+      id: `assistant-error-${Date.now()}`,
+      key: `assistant-error-${Date.now()}`,
+      role: 'assistant',
+      content: `请求失败：${error.message || '未知错误'}`,
+      time: formatTime(new Date().toISOString()),
+      sources: [],
+      agentActions: [],
+      pending: false,
+    })
+  } finally {
+    sending.value = false
+    currentGraph.loading = false
+    scrollBottom()
+  }
+}
+
 function handleKeydown(event) {
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault()
-    void send()
+    void sendImpl()
   }
 }
 
@@ -871,6 +1012,18 @@ body,
   font-size: 18px;
   font-weight: 700;
   color: #1f2937;
+  line-height: 1.4;
+}
+
+.empty-title {
+  font-size: 0;
+}
+
+.empty-title::after {
+  content: '新建卷宗';
+  font-size: 18px;
+  font-weight: 700;
+  color: #1f2937;
 }
 
 .empty-subtitle {
@@ -878,6 +1031,17 @@ body,
   font-size: 13px;
   line-height: 1.6;
   max-width: 420px;
+}
+
+.empty-subtitle {
+  font-size: 0;
+}
+
+.empty-subtitle::after {
+  content: '从左侧选择我的案件卷宗，或先新建一份独立卷宗后开始法律咨询。';
+  font-size: 13px;
+  line-height: 1.6;
+  color: #6b7280;
 }
 
 .input-area {

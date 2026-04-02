@@ -1,8 +1,13 @@
 <template>
   <div class="session-list">
     <div class="session-header">
-      <span class="title">历史会话</span>
-      <el-button type="primary" :icon="Plus" size="small" circle @click="$emit('create')" />
+      <div class="header-copy">
+        <span class="title">我的案件卷宗</span>
+        <span class="subtitle">My Legal Cases</span>
+      </div>
+      <el-button type="primary" :icon="Plus" size="small" @click="$emit('create')">
+        新建卷宗
+      </el-button>
     </div>
 
     <el-scrollbar height="calc(100vh - 200px)">
@@ -14,7 +19,7 @@
       >
         <div class="session-name">
           <el-icon><ChatDotRound /></el-icon>
-          <span>{{ session.title || `新会话 ${session.id}` }}</span>
+          <span>{{ session.title || `新卷宗 #${session.id}` }}</span>
         </div>
         <div class="session-meta">
           <span class="time">{{ formatTime(session.updated_at || session.created_at) }}</span>
@@ -36,7 +41,7 @@
         </div>
       </div>
 
-      <el-empty v-if="!sessions.length" description="暂无历史会话" :image-size="60" />
+      <el-empty v-if="!sessions.length" description="暂无案件卷宗" :image-size="60" />
     </el-scrollbar>
   </div>
 </template>
@@ -71,13 +76,24 @@ function formatTime(value) {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   margin-bottom: 12px;
 }
 
+.header-copy {
+  display: flex;
+  flex-direction: column;
+}
+
 .title {
-  font-weight: 600;
+  font-weight: 700;
   font-size: 15px;
   color: #303133;
+}
+
+.subtitle {
+  font-size: 11px;
+  color: #909399;
 }
 
 .session-item {
@@ -99,6 +115,10 @@ function formatTime(value) {
 
 .session-item.active .time {
   color: rgba(255, 255, 255, 0.7);
+}
+
+.session-item.active .subtitle {
+  color: rgba(255, 255, 255, 0.74);
 }
 
 .session-item.active .action-group :deep(.el-button) {

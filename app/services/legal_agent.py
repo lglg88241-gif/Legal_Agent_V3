@@ -797,16 +797,20 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
         "answer": "未找到依据。",
         "sources": [],
     }
+    advisor_system_prompt = (
+        f"{LEGAL_ADVISOR_SYSTEM_PROMPT}\n\n"
+        f"Case_Graph:\n{graph_memory}\n\n"
+        "你必须把上述 Case_Graph 视为当前卷宗的事实骨架，只能围绕这份卷宗内的事实、检索结果和来源作答。"
+    )
 
     content = await self._chat_model(
         self.expert_llm,
         [
-            {"role": "system", "content": LEGAL_ADVISOR_SYSTEM_PROMPT},
+            {"role": "system", "content": advisor_system_prompt},
             {
                 "role": "user",
                 "content": (
                     f"用户问题：{state['question']}\n\n"
-                    f"这是系统梳理出的当前案情结构图：\n{graph_memory}\n\n"
                     f"反思结论：{state.get('reflection_status', 'SUFFICIENT')}\n"
                     f"证据置信度：{state.get('confidence_score', 0.0)}\n"
                     f"可用来源文件：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"

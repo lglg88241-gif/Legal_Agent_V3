@@ -90,10 +90,11 @@ export const clearConversationMessages = (conversationId) =>
 export const getConversationSummary = (conversationId) =>
   api.post(`/conversations/${conversationId}/summary`)
 
-export const sendMessage = async (userInput, conversationId) => {
+export const sendMessage = async (userInput, conversationId, options = {}) => {
   const initRes = await api.post('/dialog', {
     user_input: userInput,
     conversation_id: conversationId,
+    force_current_case: Boolean(options.forceCurrentCase),
   })
   const taskId = initRes.data.task_id
 
