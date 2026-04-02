@@ -3,9 +3,9 @@
     <div class="panel-toolbar">
       <div v-if="!collapsed" class="toolbar-title">
         <span class="eyebrow">Neo4j Live</span>
-        <span class="headline">知识图谱侧边栏</span>
+        <span class="headline">Knowledge Graph Panel</span>
       </div>
-      <el-tooltip :content="collapsed ? '展开侧栏' : '收起侧栏'" placement="left">
+      <el-tooltip :content="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" placement="left">
         <el-button circle size="small" @click="$emit('toggle-sidebar')">
           <el-icon><component :is="collapsed ? Expand : Fold" /></el-icon>
         </el-button>
@@ -14,35 +14,35 @@
 
     <div v-if="collapsed" class="collapsed-state">
       <el-icon class="collapsed-icon"><Share /></el-icon>
-      <span class="collapsed-text">图谱</span>
+      <span class="collapsed-text">Graph</span>
     </div>
 
     <template v-else>
       <div class="panel-section graph-first">
-        <div class="section-title">实时子图</div>
+        <div class="section-title">Live Subgraph</div>
         <KnowledgeGraphPanel :graph="graph" />
       </div>
 
       <div class="panel-section">
-        <div class="section-title">系统状态</div>
+        <div class="section-title">System Status</div>
         <div class="info-row">
-          <span class="label">整体状态</span>
+          <span class="label">Overall</span>
           <el-tag :type="status.ready ? 'success' : 'warning'" size="small">
-            {{ status.ready ? '系统就绪' : '初始化中' }}
+            {{ status.ready ? 'Ready' : 'Loading' }}
           </el-tag>
         </div>
         <div class="info-row">
-          <span class="label">知识库文档</span>
+          <span class="label">Knowledge docs</span>
           <span class="value">{{ status.docCount || 0 }}</span>
         </div>
         <div class="info-row">
-          <span class="label">路由模型</span>
+          <span class="label">Model</span>
           <span class="value">{{ status.model || '-' }}</span>
         </div>
       </div>
 
       <div class="panel-section">
-        <div class="section-title">组件连通性</div>
+        <div class="section-title">Components</div>
         <div v-for="(value, key) in status.components" :key="key" class="info-row">
           <span class="label">{{ componentLabel(key) }}</span>
           <el-tag :type="value === 'connected' ? 'success' : 'info'" size="small">
@@ -52,7 +52,7 @@
       </div>
 
       <div class="panel-section">
-        <div class="section-title">检索工具</div>
+        <div class="section-title">Tools</div>
         <div v-if="status.tools?.length" class="tools-list">
           <el-tag
             v-for="tool in status.tools"
@@ -68,43 +68,37 @@
       </div>
 
       <div class="panel-section">
-        <div class="section-title">本轮分析</div>
+        <div class="section-title">Current Analysis</div>
         <div v-if="analysis.actions?.length">
-          <div v-for="(action, i) in analysis.actions" :key="i" class="action-detail">
+          <div v-for="(action, index) in analysis.actions" :key="index" class="action-detail">
             <div class="action-tool">
               <el-tag size="small" effect="dark">{{ action.tool }}</el-tag>
             </div>
             <div class="action-result">
-              <span class="detail-label">结果</span>
+              <span class="detail-label">Result</span>
               <span class="detail-value">{{ action.result_summary }}</span>
             </div>
           </div>
         </div>
         <div v-else class="info-row">
-          <span class="value muted">等待对话触发检索...</span>
+          <span class="value muted">Waiting for a retrieval cycle.</span>
         </div>
       </div>
 
       <div class="panel-section">
-        <div class="section-title">参考来源</div>
-        <div v-if="analysis.sources?.length" class="sources-list">
-          <el-tag
-            v-for="source in normalizedSources"
-            :key="source"
-            size="small"
-            effect="plain"
-            type="info"
-          >
+        <div class="section-title">Sources</div>
+        <div v-if="normalizedSources.length" class="sources-list">
+          <el-tag v-for="source in normalizedSources" :key="source" size="small" effect="plain" type="info">
             {{ source }}
           </el-tag>
         </div>
         <div v-else class="info-row">
-          <span class="value muted">当前回答尚未返回来源标注</span>
+          <span class="value muted">No source labels in the latest answer.</span>
         </div>
       </div>
 
       <div class="panel-section">
-        <div class="section-title">评价反馈</div>
+        <div class="section-title">Feedback</div>
         <div class="rating-row">
           <el-rate v-model="rating" :max="5" />
         </div>
@@ -112,11 +106,11 @@
           v-model="comment"
           type="textarea"
           :rows="2"
-          placeholder="对本轮回答的建议..."
+          placeholder="Share feedback for the latest answer"
           size="small"
         />
         <el-button type="primary" size="small" class="submit-btn" @click="submit">
-          提交反馈
+          Submit Feedback
         </el-button>
       </div>
     </template>
@@ -125,7 +119,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { Expand, Fold } from '@element-plus/icons-vue'
+import { Expand, Fold, Share } from '@element-plus/icons-vue'
 import KnowledgeGraphPanel from './KnowledgeGraphPanel.vue'
 
 const props = defineProps({
@@ -172,7 +166,7 @@ function componentLabel(key) {
   const labels = {
     chroma: 'Chroma',
     neo4j: 'Neo4j',
-    llm: '本地 LLM',
+    llm: 'LLM',
     celery: 'Celery',
   }
   return labels[key] || key

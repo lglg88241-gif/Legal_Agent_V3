@@ -73,14 +73,24 @@ export const getGraphSubgraph = (query) => api.get('/graph/subgraph', { params: 
 export const searchKnowledge = (query, topK = 5, domain = null) =>
   api.post('/knowledge/search', { query, top_k: topK, domain })
 export const getAgentStatus = () => api.get('/agent/status')
-export const resetDialog = (sessionId) => api.delete(`/dialog/${sessionId}`)
-export const getHistory = (sessionId, limit = 50) =>
-  api.get(`/dialog/${sessionId}/history`, { params: { limit } })
-export const getSummary = (sessionId) => api.post(`/dialog/${sessionId}/summary`)
 export const submitFeedback = (data) => api.post('/feedback', data)
 
-export const sendMessage = async (userInput, sessionId) => {
-  const initRes = await api.post('/dialog', { user_input: userInput, session_id: sessionId })
+export const createConversation = (payload = {}) => api.post('/conversations', payload)
+export const getConversations = () => api.get('/conversations')
+export const getConversationMessages = (conversationId) =>
+  api.get(`/conversations/${conversationId}/messages`)
+export const deleteConversation = (conversationId) =>
+  api.delete(`/conversations/${conversationId}`)
+export const clearConversationMessages = (conversationId) =>
+  api.delete(`/conversations/${conversationId}/messages`)
+export const getConversationSummary = (conversationId) =>
+  api.post(`/conversations/${conversationId}/summary`)
+
+export const sendMessage = async (userInput, conversationId) => {
+  const initRes = await api.post('/dialog', {
+    user_input: userInput,
+    conversation_id: conversationId,
+  })
   const taskId = initRes.data.task_id
 
   if (!taskId) {

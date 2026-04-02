@@ -1,23 +1,25 @@
 <template>
-  <div :class="['chat-message', msg.role === 'user' ? 'user-msg' : 'bot-msg']">
+  <div :class="['chat-message', isUser ? 'user-msg' : 'bot-msg']">
     <div class="avatar">
-      <el-avatar :size="36" :style="{ background: msg.role === 'user' ? '#409eff' : '#67c23a' }">
-        <el-icon v-if="msg.role === 'user'"><User /></el-icon>
+      <el-avatar :size="36" :style="{ background: isUser ? '#409eff' : '#67c23a' }">
+        <el-icon v-if="isUser"><User /></el-icon>
         <el-icon v-else><Service /></el-icon>
       </el-avatar>
     </div>
+
     <div class="bubble-wrap">
       <div class="meta">
-        <span class="name">{{ msg.role === 'user' ? '我' : '智能助手' }}</span>
-        <span class="time">{{ msg.time }}</span>
+        <span class="name">{{ isUser ? 'User' : 'Assistant' }}</span>
+        <span class="time">{{ displayTime }}</span>
       </div>
 
-      <div v-if="msg.agentActions && msg.agentActions.length" class="agent-actions">
+      <div v-if="agentActions.length" class="agent-actions">
         <div class="action-header">
           <el-icon><Operation /></el-icon>
-          <span>Agent 推理过程</span>
+          <span>Agent Pipeline</span>
         </div>
-        <div v-for="(action, i) in msg.agentActions" :key="i" class="action-item">
+
+        <div v-for="(action, index) in agentActions" :key="index" class="action-item">
           <el-tag size="small" :type="toolTagType(action.tool)" effect="dark" class="tool-tag">
             {{ toolLabel(action.tool) }}
           </el-tag>
@@ -28,10 +30,10 @@
       <div class="bubble" v-html="formatted"></div>
 
       <div v-if="normalizedSources.length" class="rag-sources">
-        <span class="sources-label">参考来源</span>
+        <span class="sources-label">Sources</span>
         <el-popover
-          v-for="(source, i) in normalizedSources"
-          :key="`${source.full}-${i}`"
+          v-for="(source, index) in normalizedSources"
+          :key="`${source.full}-${index}`"
           placement="top"
           trigger="click"
           :width="260"
@@ -42,7 +44,7 @@
             </el-tag>
           </template>
           <div class="source-card">
-            <div class="source-card-title">来源文件</div>
+            <div class="source-card-title">Reference file</div>
             <div class="source-card-name">{{ source.full }}</div>
           </div>
         </el-popover>
@@ -53,9 +55,17 @@
 
 <script setup>
 import { computed } from 'vue'
+import { Operation, Service, User } from '@element-plus/icons-vue'
 
 const props = defineProps({
   msg: { type: Object, required: true },
+})
+
+const isUser = computed(() => props.msg.role === 'user')
+
+const displayTime = computed(() => {
+  if (!props.msg.time) return ''
+  return props.msg.time
 })
 
 const formatted = computed(() => {
@@ -65,6 +75,10 @@ const formatted = computed(() => {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\n/g, '<br>')
+})
+
+const agentActions = computed(() => {
+  return Array.isArray(props.msg.agentActions) ? props.msg.agentActions : []
 })
 
 const normalizedSources = computed(() => {
@@ -94,9 +108,9 @@ const normalizedSources = computed(() => {
 })
 
 const toolLabels = {
-  tool_router: '工具路由',
-  retrieval_tools: '多路召回',
-  legal_advisor: '法律分析',
+  tool_router: 'Router',
+  retrieval_tools: 'Retrieval',
+  legal_advisor: 'Advisor',
 }
 
 const toolTagTypes = {
