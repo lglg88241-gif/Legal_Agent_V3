@@ -15,7 +15,7 @@ from app.services.conversation_store import (
     list_recent_conversation_messages,
     store_message,
 )
-from app.services.graph_extractor import format_graph_memory, sync_case_graph_from_history
+from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,28 @@ async def load_chat_history(
     return "\n".join(lines)
 
 
+async def load_latest_user_input(conversation_id: int, limit: int = 12) -> str:
+    celery_engine, session_factory = _create_celery_session_factory()
+
+    try:
+        await ensure_storage_schema(bind_engine=celery_engine)
+        async with session_factory() as db:
+            messages = await list_recent_conversation_messages(
+                db,
+                conversation_id=conversation_id,
+                limit=limit,
+            )
+    finally:
+        await celery_engine.dispose()
+
+    for message in reversed(messages):
+        if message.role == "user":
+            content = " ".join((message.content or "").strip().split())
+            if content:
+                return content
+    return ""
+
+
 async def load_graph_memory(conversation_id: int) -> str:
     return await format_graph_memory(conversation_id=conversation_id)
 
@@ -106,23 +128,24 @@ async def persist_assistant_message(
 def update_graph_task(conversation_id: int):
     try:
         chat_history = asyncio.run(load_chat_history(conversation_id=conversation_id, limit=12))
-        current_graph_summary = asyncio.run(load_graph_memory(conversation_id=conversation_id))
-        updated = asyncio.run(
-            sync_case_graph_from_history(
+        latest_user_input = asyncio.run(load_latest_user_input(conversation_id=conversation_id, limit=12))
+        update_result = asyncio.run(
+            refresh_case_graph(
                 conversation_id=conversation_id,
+                user_input=latest_user_input,
                 chat_history=chat_history,
             )
         )
         logger.info(
-            "Graph update task completed | conversation_id=%s triples_updated=%s had_graph=%s",
+            "Graph update task completed | conversation_id=%s actions_applied=%s",
             conversation_id,
-            updated,
-            bool((current_graph_summary or "").strip()),
+            update_result.get("actions_applied", 0),
         )
         return {
             "status": "success",
             "conversation_id": conversation_id,
-            "triples_updated": updated,
+            "actions_applied": update_result.get("actions_applied", 0),
+            "actions": update_result.get("actions", []),
         }
     except Exception as exc:
         logger.exception("update_graph_task failed | conversation_id=%s", conversation_id)
