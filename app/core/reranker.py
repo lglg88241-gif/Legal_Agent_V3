@@ -3,9 +3,6 @@ from __future__ import annotations
 import threading
 from typing import Any
 
-import torch
-from sentence_transformers import CrossEncoder
-
 from app.core.config import settings
 from app.database.chroma_utils import resolve_embedding_model_path
 
@@ -24,10 +21,13 @@ class BGEReranker:
                     cls._instance._predict_lock = threading.Lock()
         return cls._instance
 
-    def _get_model(self) -> CrossEncoder:
+    def _get_model(self) -> Any:
         if self._model is None:
             with self._model_lock:
                 if self._model is None:
+                    import torch
+                    from sentence_transformers import CrossEncoder
+
                     model_path, local_files_only = resolve_embedding_model_path(
                         settings.RERANKER_MODEL_PATH
                     )
