@@ -5,12 +5,13 @@ import json
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal, Optional
 
 from json_repair import repair_json
 from langchain_community.chat_models import ChatZhipuAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from neo4j import GraphDatabase
+from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
 
@@ -27,6 +28,24 @@ ALLOWED_CATEGORIES = {
     CATEGORY_CONSEQUENCE,
 }
 ALLOWED_ACTIONS = {"ADD", "UPDATE", "DELETE"}
+
+
+class GraphAction(BaseModel):
+    action: Literal["ADD", "UPDATE", "DELETE"] = Field(
+        description="必须是 ADD, UPDATE 或 DELETE"
+    )
+    source: Optional[str] = Field(None, description="主语实体，DELETE时可为空")
+    relation: Optional[str] = Field(None, description="关系，DELETE时可为空")
+    target: Optional[str] = Field(None, description="宾语实体，DELETE时可为空")
+    target_name: Optional[str] = Field(None, description="仅DELETE动作需要，指明要删除的节点名称")
+    source_category: Optional[str] = None
+    target_category: Optional[str] = None
+    old_target: Optional[str] = None
+    new_target: Optional[str] = None
+
+
+class GraphActionList(BaseModel):
+    actions: list[GraphAction]
 
 GRAPH_EXTRACTION_PROMPT = """
 你是一个法律案件动态图谱抽取器。
@@ -254,6 +273,24 @@ def _safe_json_load(raw_content: str, fallback: Any) -> Any:
         return fallback
 
 
+def _parse_graph_action_response(
+    raw_content: str,
+    existing_nodes: set[str] | None = None,
+) -> list[dict[str, str]]:
+    repaired_content = repair_json(raw_content)
+    json.loads(repaired_content)
+    parsed = GraphActionList.model_validate_json(repaired_content)
+    return _normalize_actions(
+        {
+            "actions": [
+                action.model_dump(exclude_none=True)
+                for action in parsed.actions
+            ]
+        },
+        existing_nodes,
+    )
+
+
 def _normalize_triples(raw_payload: Any) -> list[dict[str, str]]:
     if isinstance(raw_payload, dict):
         candidates = raw_payload.get("triples") or raw_payload.get("relations") or raw_payload.get("data") or []
@@ -359,8 +396,8 @@ def _normalize_actions(raw_payload: Any, existing_nodes: set[str] | None = None)
 def _cleanup_orphans(session, conversation_id: int) -> None:
     session.run(
         """
-        MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
-        WHERE degree(n) = 0
+        MATCH (n)
+        WHERE n.conversation_id = $conversation_id AND NOT (n)--()
         DELETE n
         """,
         {"conversation_id": conversation_id},
@@ -618,20 +655,48 @@ async def plan_graph_actions(current_graph: str, user_input: str) -> list[dict[s
                 if isinstance(fact, dict) and str(fact.get("target", "")).strip()
             }
         )
-        response = await _get_graph_llm().ainvoke(
-            [
-                SystemMessage(content="你必须只输出合法 JSON。"),
-                HumanMessage(
-                    content=BELIEF_REVISION_PROMPT_V2.format(
-                        existing_nodes=json.dumps(existing_node_names, ensure_ascii=False),
-                        current_graph=current_graph or "[]",
-                        user_input=clean_input,
-                    )
-                ),
-            ]
+        max_retries = 3
+        feedback = ""
+        existing_nodes_set = set(existing_node_names)
+
+        for attempt in range(1, max_retries + 1):
+            prompt = BELIEF_REVISION_PROMPT_V2.format(
+                existing_nodes=json.dumps(existing_node_names, ensure_ascii=False),
+                current_graph=current_graph or "[]",
+                user_input=clean_input,
+            )
+            if feedback:
+                prompt = (
+                    f"{prompt}\n\n"
+                    f"你刚才输出的 JSON 无法解析，报了以下错误：{feedback}。"
+                    "请仔细检查格式和字段规范，并重新输出合法的 JSON。"
+                )
+
+            response = await _get_graph_llm().ainvoke(
+                [
+                    SystemMessage(content="你必须只输出合法 JSON。"),
+                    HumanMessage(content=prompt),
+                ]
+            )
+            content = response.content if isinstance(response.content, str) else str(response.content)
+
+            try:
+                return _parse_graph_action_response(content, existing_nodes_set)
+            except (ValidationError, json.JSONDecodeError) as exc:
+                feedback = str(exc)
+                logger.warning(
+                    "Belief revision response validation failed on attempt %s/%s: %s",
+                    attempt,
+                    max_retries,
+                    exc,
+                )
+
+        logger.warning(
+            "Belief revision planning failed after %s retries for input: %s",
+            max_retries,
+            clean_input,
         )
-        content = response.content if isinstance(response.content, str) else str(response.content)
-        return _normalize_actions(_safe_json_load(content, {"actions": []}), set(existing_node_names))
+        return []
     except Exception as exc:
         logger.warning("Belief revision planning failed: %s", exc)
         return []
