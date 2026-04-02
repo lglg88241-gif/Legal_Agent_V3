@@ -91,15 +91,27 @@
         </el-scrollbar>
 
         <div class="input-area" :class="{ locked: !systemStatus.ready }">
-          <el-input
-            v-model="inputText"
-            type="textarea"
-            :rows="2"
-            :disabled="!systemStatus.ready || sending || !currentConversationId"
-            :placeholder="inputPlaceholder"
-            resize="none"
-            @keydown="handleKeydown"
-          />
+          <div class="input-stack">
+            <div class="mode-switch-row">
+              <span class="mode-switch-label">精准案情梳理</span>
+              <el-switch
+                v-model="proactiveGraphMode"
+                :disabled="sending || !currentConversationId"
+                inline-prompt
+                active-text="开"
+                inactive-text="关"
+              />
+            </div>
+            <el-input
+              v-model="inputText"
+              type="textarea"
+              :rows="2"
+              :disabled="!systemStatus.ready || sending || !currentConversationId"
+              :placeholder="inputPlaceholder"
+              resize="none"
+              @keydown="handleKeydown"
+            />
+          </div>
           <el-button
             type="primary"
             @click="() => sendImpl()"
@@ -167,6 +179,7 @@ const currentConversationId = ref(null)
 const currentSessionId = ref('')
 const messages = ref([])
 const inputText = ref('')
+const proactiveGraphMode = ref(true)
 const sending = ref(false)
 const summaryLoading = ref(false)
 const scrollRef = ref(null)
@@ -565,7 +578,9 @@ async function send() {
   scrollBottom()
 
   try {
-    const { data } = await sendMessage(text, conversationId)
+    const { data } = await sendMessage(text, conversationId, {
+      proactiveGraphMode: proactiveGraphMode.value,
+    })
     updatePendingMessage(tempKey, { pending: false })
 
     messages.value.push({
@@ -678,7 +693,10 @@ async function sendImpl(textOverride = null, options = {}) {
   scrollBottom()
 
   try {
-    const initRes = await sendMessage(text, baseConversationId, { forceCurrentCase })
+    const initRes = await sendMessage(text, baseConversationId, {
+      forceCurrentCase,
+      proactiveGraphMode: proactiveGraphMode.value,
+    })
     const initData = initRes?.data || {}
 
     if (initData.action === 'suggest_new_case') {
@@ -1103,6 +1121,26 @@ body,
 
 .input-area .el-textarea {
   flex: 1;
+}
+
+.input-stack {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mode-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mode-switch-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
 }
 
 .input-area .el-button {

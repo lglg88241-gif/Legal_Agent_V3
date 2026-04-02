@@ -85,6 +85,37 @@ CLARIFIER_SYSTEM_PROMPT = """
 只需输出最自然的一句话追问，语气专业、简洁、口语化。
 """.strip()
 
+REFLECTOR_SYSTEM_PROMPT_V2 = """
+你是一个严谨的法律反思节点。你必须只返回 JSON。
+
+输出格式：
+{
+  "status": "SUFFICIENT" | "NEED_DEEP_GRAPH" | "NEED_USER_INFO",
+  "confidence_score": 0.0,
+  "analysis": "...",
+  "missing_info": ["..."],
+  "questions": ["..."],
+  "graph_focus": "..."
+}
+
+规则：
+1. 历史对话里已经明确提供过的信息，一律视为已知证据，严禁重复写入 missing_info。
+2. 如果 proactive_graph_mode = OFF，只关注法律要件是否缺失，忽略代词、称谓、模糊实体的歧义。
+3. 如果 proactive_graph_mode = ON，除了法律要件，还必须检查是否存在指代不明的实体，例如“他”“老板”“对方”“那辆车”“那个公司”。
+4. 当 proactive_graph_mode = ON 且发现实体歧义时，必须把最关键的实体澄清要求写入 missing_info。
+5. NEED_USER_INFO 时 questions 最多返回 2 个最关键的问题；不要发散提问。
+6. NEED_DEEP_GRAPH 只在需要继续查 Neo4j 图谱时使用，并给出 graph_focus。
+""".strip()
+
+CLARIFIER_SYSTEM_PROMPT_V2 = """
+你是一个真实的律师。你的任务是向用户发问补充信息。
+要求：
+1. 每次最多只问 1 到 2 个最核心的问题，绝对不要像审问一样连续抛出很多问题。
+2. 禁止输出“目前进展”“我还缺少这些关键案情要素”“根据当前分析”等机器分析日志。
+3. 如果 missing_info 里包含实体消歧要求，要用自然、对话式、克制的口吻顺带问清楚，不要显得生硬。
+4. 只输出一段自然的话，不要输出标题、编号、列表或 JSON。
+""".strip()
+
 TOOL_REGISTRY = {tool.name: tool for tool in AGENT_TOOLS}
 LAW_TOOL = "search_law_articles"
 CASE_TOOL = "search_case_text"
@@ -140,6 +171,37 @@ class LegalGraphAgent:
         except Exception as exc:
             logger.warning("Failed to parse JSON payload: %s", exc)
         return fallback
+
+    def _proactive_graph_mode_enabled(self, state: AgentState) -> bool:
+        return bool(state.get("proactive_graph_mode", True))
+
+    def _build_reflector_user_prompt(
+        self,
+        state: AgentState,
+        chat_history: str,
+        context_blocks: str,
+    ) -> str:
+        mode_enabled = self._proactive_graph_mode_enabled(state)
+        mode_label = "ON" if mode_enabled else "OFF"
+        mode_instruction = (
+            "主动案情梳理模式已开启。除了法律要件是否缺失，你还必须检查用户最新问题里是否存在指代不明的实体、代词或模糊称谓。"
+            "如果存在，把最关键的 1 到 2 个实体澄清要求写入 missing_info。"
+        )
+        if not mode_enabled:
+            mode_instruction = (
+                "主动案情梳理模式已关闭。你只关注法律要件是否缺失，忽略“他”“老板”“对方”“那辆车”这类实体指代歧义。"
+            )
+
+        return (
+            f"用户问题：{state['question']}\n\n"
+            f"主动案情梳理模式：{mode_label}\n"
+            f"{mode_instruction}\n\n"
+            f"历史对话：\n{chat_history}\n\n"
+            "请注意：用户在历史对话中已经提供过的案情要素，绝对视为已知证据，严禁将其再次列入 missing_info 列表。\n\n"
+            f"当前检索查询：{state.get('current_query', state['question'])}\n"
+            f"当前循环次数：{state.get('loop_count', 0)}\n\n"
+            f"当前检索结果：\n{context_blocks or '无有效检索结果'}"
+        )
 
     def _extract_candidate_sources(self, tool_results: list[dict[str, Any]]) -> list[str]:
         sources: list[str] = []
@@ -834,6 +896,115 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
     }
 
 
+async def _patched_generate_reflection(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
+    tool_results = state.get("tool_results", [])
+    context_blocks = self._build_context_blocks(tool_results)
+    chat_history = (state.get("chat_history") or "").strip() or "无历史对话"
+    proactive_graph_mode = self._proactive_graph_mode_enabled(state)
+    fallback_missing = ["关键案情事实不足"]
+    if proactive_graph_mode:
+        fallback_missing.append("请明确最关键的实体指代对象")
+    fallback = {
+        "status": "NEED_USER_INFO",
+        "confidence_score": 0.25,
+        "analysis": "现有证据不足，无法稳定定性。",
+        "missing_info": fallback_missing,
+        "questions": ["请补充案件发生时间、主体关系和最核心的争议焦点。"],
+        "graph_focus": "",
+    }
+
+    content = await self._chat_model(
+        self.reflector_llm,
+        [
+            {"role": "system", "content": REFLECTOR_SYSTEM_PROMPT_V2},
+            {
+                "role": "user",
+                "content": self._build_reflector_user_prompt(state, chat_history, context_blocks),
+            },
+        ],
+    )
+    parsed = self._safe_json_load(content, fallback)
+
+    status = str(parsed.get("status", fallback["status"])).upper()
+    if status not in {"SUFFICIENT", "NEED_DEEP_GRAPH", "NEED_USER_INFO"}:
+        status = fallback["status"]
+
+    confidence_score = parsed.get("confidence_score", fallback["confidence_score"])
+    try:
+        confidence_value = float(confidence_score)
+    except Exception:
+        confidence_value = float(fallback["confidence_score"])
+    confidence_value = max(0.0, min(1.0, confidence_value))
+
+    missing_info = parsed.get("missing_info", [])
+    if not isinstance(missing_info, list):
+        missing_info = []
+    missing_info = [item.strip() for item in missing_info if isinstance(item, str) and item.strip()]
+
+    questions = parsed.get("questions", [])
+    if not isinstance(questions, list):
+        questions = []
+    questions = [item.strip() for item in questions if isinstance(item, str) and item.strip()][:2]
+
+    analysis = parsed.get("analysis", fallback["analysis"])
+    if not isinstance(analysis, str) or not analysis.strip():
+        analysis = fallback["analysis"]
+
+    graph_focus = parsed.get("graph_focus", "")
+    if not isinstance(graph_focus, str):
+        graph_focus = ""
+    graph_focus = graph_focus.strip() or state.get("current_query", state["question"])
+
+    return {
+        "reflection_status": status,
+        "confidence_score": confidence_value,
+        "reflection_analysis": analysis.strip(),
+        "missing_info": missing_info,
+        "clarification_questions": questions,
+        "graph_focus": graph_focus,
+    }
+
+
+async def _patched_generate_clarifier_question(self: LegalGraphAgent, state: AgentState) -> str:
+    missing_info = state.get("missing_info", [])
+    if not isinstance(missing_info, list):
+        missing_info = []
+    missing_info = [item.strip() for item in missing_info if isinstance(item, str) and item.strip()][:2]
+
+    questions = state.get("clarification_questions", [])
+    if not isinstance(questions, list):
+        questions = []
+    questions = [item.strip() for item in questions if isinstance(item, str) and item.strip()][:2]
+
+    chat_history = (state.get("chat_history") or "").strip() or "无历史对话"
+    proactive_graph_mode = "ON" if self._proactive_graph_mode_enabled(state) else "OFF"
+    fallback = questions[0] if questions else "请再补充一下案件发生时间、双方关系和争议焦点。"
+
+    try:
+        response = await self._chat_model(
+            self.expert_llm,
+            [
+                {"role": "system", "content": CLARIFIER_SYSTEM_PROMPT_V2},
+                {
+                    "role": "user",
+                    "content": (
+                        f"主动案情梳理模式：{proactive_graph_mode}\n\n"
+                        f"历史对话：\n{chat_history}\n\n"
+                        f"用户原问题：{state['question']}\n"
+                        f"缺失信息：{json.dumps(missing_info, ensure_ascii=False)}\n"
+                        f"建议追问：{json.dumps(questions, ensure_ascii=False)}\n\n"
+                        "请只用一段自然的话进行追问；最多覆盖 1 到 2 个最关键问题。"
+                    ),
+                },
+            ],
+        )
+        cleaned = " ".join((response or "").strip().split())
+        return cleaned or fallback
+    except Exception as exc:
+        logger.warning("Clarifier generation failed, fallback to template question: %s", exc)
+        return fallback
+
+
 async def _patched_ask(
     self: LegalGraphAgent,
     user_id: int,
@@ -841,11 +1012,13 @@ async def _patched_ask(
     question: str,
     chat_history: str = "",
     graph_memory: str = "",
+    proactive_graph_mode: bool = True,
 ) -> dict[str, Any]:
     initial_state: AgentState = {
         "user_id": user_id,
         "session_id": session_id,
         "question": question,
+        "proactive_graph_mode": bool(proactive_graph_mode),
         "chat_history": chat_history,
         "graph_memory": graph_memory,
         "current_query": question,
@@ -883,6 +1056,8 @@ async def _patched_ask(
 
 
 LegalGraphAgent._generate_final_answer = _patched_generate_final_answer
+LegalGraphAgent._generate_reflection = _patched_generate_reflection
+LegalGraphAgent._generate_clarifier_question = _patched_generate_clarifier_question
 LegalGraphAgent.ask = _patched_ask
 
 legal_agent = LegalGraphAgent()

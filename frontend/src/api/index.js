@@ -95,6 +95,7 @@ export const sendMessage = async (userInput, conversationId, options = {}) => {
     user_input: userInput,
     conversation_id: conversationId,
     force_current_case: Boolean(options.forceCurrentCase),
+    proactive_graph_mode: options.proactiveGraphMode !== false,
   })
   const taskId = initRes.data.task_id
 

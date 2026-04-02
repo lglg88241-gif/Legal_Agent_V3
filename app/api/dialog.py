@@ -28,6 +28,7 @@ class DialogRequest(BaseModel):
     user_input: str = Field(..., min_length=1)
     conversation_id: int
     force_current_case: bool = False
+    proactive_graph_mode: bool = True
 
 
 @router.post("/dialog")
@@ -94,6 +95,7 @@ async def process_dialog(
                 conversation.id,
                 conversation.session_id,
                 clean_input,
+                bool(request.proactive_graph_mode),
             ]
         )
         logger.info(

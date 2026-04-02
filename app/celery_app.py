@@ -163,6 +163,7 @@ def ask_agent_task(
     conversation_id: int,
     session_id: str,
     question: str,
+    proactive_graph_mode: bool = True,
 ):
     start_time = time.time()
 
@@ -176,6 +177,7 @@ def ask_agent_task(
                 question,
                 chat_history=chat_history,
                 graph_memory=graph_memory,
+                proactive_graph_mode=proactive_graph_mode,
             )
         )
         latency_ms = int((time.time() - start_time) * 1000)
