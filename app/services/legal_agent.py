@@ -855,14 +855,10 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
     tool_results = state.get("tool_results", [])
     candidate_sources = self._extract_candidate_sources(tool_results)
     retrieved_docs = self._build_context_blocks(tool_results)
-    case_summary = (state.get("case_summary") or "").strip() or "无卷宗摘要"
-    graph_context = (
-        (state.get("graph_context") or "").strip()
-        or (state.get("graph_memory") or "").strip()
-        or "无可用案情结构图"
-    )
+    case_summary = (state.get("case_summary") or "").strip()
+    graph_context = ((state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip())
     fallback = {
-        "answer": "未找到依据。",
+        "answer": "当前检索依据不足，但根据现有法律常识，建议先补充关键事实或继续查看相关法条与类案后再作精确判断。",
         "sources": [],
     }
     advisor_system_prompt = f"""
@@ -876,7 +872,13 @@ async def _patched_generate_final_answer(self: LegalGraphAgent, state: AgentStat
 【检索到的指导性案例与法条】：
 {retrieved_docs or "无有效检索结果"}
 
-分析指令：请严格基于【摘要】和【图谱】中的事实，应用【检索案例】中的判决规则，为用户提供专业的法律解答与索赔预估。
+【分析指令】（请严格遵守以下分支逻辑）：
+
+通用普法模式：如果【当前案件纯净摘要】为空，说明用户只是在咨询通用法律常识。请直接根据用户的提问，结合【检索到的法条与案例】给出详尽的普法解答。
+
+精准断案模式：如果【当前案件纯净摘要】不为空，说明用户正在陈述具体案件。你必须严格锚定【摘要】和【图谱】中的事实前提，应用【检索案例】中的判决规则，提供极其专业的针对性解答与索赔预估。
+
+绝对禁止仅回复“未找到依据”。哪怕检索信息不足，也要基于法理常识进行专业回应。
 你必须显式区分“已知事实”“适用规则”“不确定事项”，禁止编造卷宗中不存在的事实。
 输出格式保持为 JSON，至少包含 answer 和 sources 字段。
 """.strip()
