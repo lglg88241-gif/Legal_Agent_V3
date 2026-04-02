@@ -102,7 +102,7 @@
           />
           <el-button
             type="primary"
-            @click="sendImpl"
+            @click="() => sendImpl()"
             :loading="sending"
             :disabled="!systemStatus.ready || !inputText.trim() || !currentConversationId"
           >
@@ -648,7 +648,8 @@ async function sendImpl(textOverride = null, options = {}) {
     return
   }
 
-  const text = (textOverride ?? inputText.value).trim()
+  const finalStr = (typeof textOverride === 'string' ? textOverride : inputText.value) || ''
+  const text = finalStr.trim()
   if (!text || sending.value) return
 
   const forceCurrentCase = Boolean(options.forceCurrentCase)
