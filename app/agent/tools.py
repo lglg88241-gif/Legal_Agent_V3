@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
-import re
 import threading
 from typing import Any
 
+from json_repair import repair_json
 from langchain_chroma import Chroma
 from langchain_core.tools import tool
 from neo4j import GraphDatabase
@@ -33,10 +35,10 @@ LIMIT 5
 """
 
 QUERY_EXPANSION_SYSTEM_PROMPT = (
-    "你是一个法律搜索优化器。"
-    "请将用户的口语化提问直接转换为 5 个以内的专业法律关键词，用空格分隔。"
-    "严禁输出任何解释、编号、前缀或多余文字。"
-    "只输出关键词，例如：'试用期 录用条件 告知义务 违法解除'。"
+    "你是一个法律搜索专家。"
+    "请根据用户的问题，生成 3 个不同维度的搜索查询语句，以覆盖潜在的法律依据。"
+    "请严格以 JSON 数组格式输出，不要有任何解释。"
+    "输出格式：{'queries': ['查询1', '查询2', '查询3']}。"
 )
 
 CHROMA_RECALL_K = 10
@@ -46,21 +48,6 @@ CASE_TOP_K = 2
 
 _query_expansion_client: OpenAI | None = None
 _query_expansion_client_lock = threading.Lock()
-
-
-def _serialize_documents(results: list[tuple[Any, float]]) -> str:
-    payload = []
-    for document, score in results:
-        metadata = document.metadata or {}
-        payload.append(
-            {
-                "content": document.page_content,
-                "source": metadata.get("source", ""),
-                "metadata": metadata,
-                "score": score,
-            }
-        )
-    return json.dumps(payload, ensure_ascii=False)
 
 
 def _serialize_reranked_documents(
@@ -90,6 +77,8 @@ def _serialize_reranked_documents(
                     "score": item["score"],
                     "coarse_score": candidate.get("score"),
                     "retrieval": candidate.get("retrieval"),
+                    "candidate_id": candidate.get("candidate_id"),
+                    "matched_query": candidate.get("matched_query"),
                 }
             )
         return json.dumps(payload, ensure_ascii=False)
@@ -105,6 +94,8 @@ def _serialize_reranked_documents(
                     "metadata": metadata,
                     "score": candidate.get("score"),
                     "retrieval": candidate.get("retrieval"),
+                    "candidate_id": candidate.get("candidate_id"),
+                    "matched_query": candidate.get("matched_query"),
                 }
             )
         return json.dumps(fallback_payload, ensure_ascii=False)
@@ -124,19 +115,26 @@ def _get_query_expansion_client() -> OpenAI:
     return _query_expansion_client
 
 
-def _sanitize_expanded_query(content: str) -> str:
-    cleaned = content.strip()
-    cleaned = cleaned.replace("\n", " ").replace("\r", " ")
-    cleaned = re.sub(r"^[\"'`]+|[\"'`]+$", "", cleaned)
-    cleaned = re.sub(r"^(关键词|核心概念|扩写结果)[:：]\s*", "", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip()
+def _normalize_query_list(original_query: str, queries: list[Any]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for item in [original_query, *queries]:
+        if not isinstance(item, str):
+            continue
+        cleaned = " ".join(item.strip().split())
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+
+    return normalized or [original_query]
 
 
-def _expand_query(query: str) -> str:
-    query = query.strip()
-    if not query:
-        return ""
+def _expand_queries(query: str) -> list[str]:
+    normalized_query = query.strip()
+    if not normalized_query:
+        return [query]
 
     try:
         client = _get_query_expansion_client()
@@ -144,32 +142,28 @@ def _expand_query(query: str) -> str:
             model=settings.LLM_MODEL_NAME,
             messages=[
                 {"role": "system", "content": QUERY_EXPANSION_SYSTEM_PROMPT},
-                {"role": "user", "content": f"用户提问：{query}"},
+                {"role": "user", "content": f"用户问题：{normalized_query}"},
             ],
             temperature=0.1,
-            max_tokens=64,
+            max_tokens=256,
         )
         content = response.choices[0].message.content or ""
-        expanded_query = _sanitize_expanded_query(content)
-        expanded_query = expanded_query.split("\n")[0].strip()
-        if not expanded_query:
-            return ""
-        if expanded_query == query:
-            return ""
-        return expanded_query
+        repaired = repair_json(content)
+        parsed = json.loads(repaired)
+
+        if isinstance(parsed, dict):
+            queries = parsed.get("queries", [])
+        elif isinstance(parsed, list):
+            queries = parsed
+        else:
+            queries = []
+
+        expanded_queries = _normalize_query_list(normalized_query, queries)
+        logger.info("Expanded query [%s] into %s", normalized_query, expanded_queries)
+        return expanded_queries
     except Exception as exc:
         logger.warning("Query expansion failed, fallback to original query: %s", exc)
-        return ""
-
-
-def _build_final_query(query: str) -> str:
-    expanded_query = _expand_query(query)
-    if not expanded_query:
-        return query
-
-    final_query = f"{query} {expanded_query}".strip()
-    logger.info("Query expanded from [%s] to [%s]", query, final_query)
-    return final_query
+        return [normalized_query]
 
 
 def _get_law_vectorstore() -> Chroma:
@@ -191,67 +185,158 @@ def _get_case_vectorstore() -> Chroma:
     )
 
 
+def _build_candidate_id(content: str, source: str, metadata: dict[str, Any]) -> str:
+    explicit_id = metadata.get("id") or metadata.get("document_id") or metadata.get("chunk_id")
+    if isinstance(explicit_id, str) and explicit_id.strip():
+        return explicit_id.strip()
+
+    raw = json.dumps(
+        {
+            "source": source,
+            "article": metadata.get("article"),
+            "page": metadata.get("page"),
+            "content": content,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _build_candidate(
+    *,
+    content: str,
+    source: str,
+    metadata: dict[str, Any],
+    score: float,
+    retrieval: str,
+    matched_query: str,
+) -> dict[str, Any]:
+    candidate_id = _build_candidate_id(content, source, metadata)
+    return {
+        "candidate_id": candidate_id,
+        "content": content,
+        "source": source,
+        "metadata": metadata,
+        "score": score,
+        "retrieval": retrieval,
+        "matched_query": matched_query,
+    }
+
+
 def _collect_dense_candidates(query: str, vectorstore: Chroma) -> list[dict[str, Any]]:
     results = vectorstore.similarity_search_with_score(query, k=CHROMA_RECALL_K)
     candidates = []
     for document, score in results:
         metadata = document.metadata or {}
+        content = (document.page_content or "").strip()
+        source = str(metadata.get("source", "")).strip()
+        if not content:
+            continue
         candidates.append(
-            {
-                "content": document.page_content,
-                "source": metadata.get("source", ""),
-                "metadata": metadata,
-                "score": score,
-                "retrieval": "dense",
-            }
+            _build_candidate(
+                content=content,
+                source=source,
+                metadata=metadata,
+                score=float(score),
+                retrieval="dense",
+                matched_query=query,
+            )
         )
     return candidates
 
 
-def _merge_hybrid_candidates(query: str, vectorstore: Chroma, corpus: str) -> tuple[str, list[dict[str, Any]]]:
-    final_query = _build_final_query(query)
-    dense_candidates = _collect_dense_candidates(final_query, vectorstore)
-    sparse_candidates = BM25Retriever().search_records(
-        query=final_query,
-        top_k=BM25_RECALL_K,
-        corpus=corpus,
+async def _collect_query_candidates(
+    query: str,
+    vectorstore: Chroma,
+    corpus: str,
+) -> list[dict[str, Any]]:
+    dense_task = asyncio.to_thread(_collect_dense_candidates, query, vectorstore)
+    sparse_task = asyncio.to_thread(
+        BM25Retriever().search_records,
+        query,
+        BM25_RECALL_K,
+        corpus,
     )
+    dense_candidates, sparse_candidates = await asyncio.gather(dense_task, sparse_task)
+
+    normalized_sparse_candidates = []
+    for candidate in sparse_candidates:
+        metadata = candidate.get("metadata") or {}
+        content = (candidate.get("content") or "").strip()
+        source = str(candidate.get("source", "")).strip()
+        if not content:
+            continue
+        normalized_sparse_candidates.append(
+            _build_candidate(
+                content=content,
+                source=source,
+                metadata=metadata,
+                score=float(candidate.get("score", 0.0)),
+                retrieval="sparse",
+                matched_query=query,
+            )
+        )
+
+    return [*dense_candidates, *normalized_sparse_candidates]
+
+
+async def _merge_hybrid_candidates(
+    query: str,
+    vectorstore: Chroma,
+    corpus: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    expanded_queries = _expand_queries(query)
+    retrieval_tasks = [
+        _collect_query_candidates(expanded_query, vectorstore, corpus)
+        for expanded_query in expanded_queries
+    ]
+    query_results = await asyncio.gather(*retrieval_tasks)
 
     merged_candidates: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen_ids: set[str] = set()
 
-    for candidate in dense_candidates + sparse_candidates:
-        content = (candidate.get("content") or "").strip()
-        source = (candidate.get("source") or "").strip()
-        key = (content, source)
-        if not content or key in seen:
-            continue
-        seen.add(key)
-        merged_candidates.append(candidate)
+    for candidates in query_results:
+        for candidate in candidates:
+            candidate_id = str(candidate.get("candidate_id", "")).strip()
+            if not candidate_id or candidate_id in seen_ids:
+                continue
+            seen_ids.add(candidate_id)
+            merged_candidates.append(candidate)
 
-    return final_query, merged_candidates
+    return expanded_queries, merged_candidates
+
+
+def _retrieve_candidates(
+    query: str,
+    vectorstore: Chroma,
+    corpus: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    return asyncio.run(_merge_hybrid_candidates(query, vectorstore, corpus))
 
 
 @tool
 def search_law_articles(query: str) -> str:
     """用于查询法律条文、法规规定、量刑标准等纯法律理论问题。"""
-    final_query, candidates = _merge_hybrid_candidates(
+    expanded_queries, candidates = _retrieve_candidates(
         query,
         _get_law_vectorstore(),
         corpus="law",
     )
-    return _serialize_reranked_documents(final_query, candidates, top_k=LAW_TOP_K)
+    rerank_query = query.strip() or " ".join(expanded_queries)
+    return _serialize_reranked_documents(rerank_query, candidates, top_k=LAW_TOP_K)
 
 
 @tool
 def search_case_text(query: str) -> str:
     """用于根据案情描述、作案手法等模糊信息查找相似的历史指导案例。"""
-    final_query, candidates = _merge_hybrid_candidates(
+    expanded_queries, candidates = _retrieve_candidates(
         query,
         _get_case_vectorstore(),
         corpus="case",
     )
-    return _serialize_reranked_documents(final_query, candidates, top_k=CASE_TOP_K)
+    rerank_query = query.strip() or " ".join(expanded_queries)
+    return _serialize_reranked_documents(rerank_query, candidates, top_k=CASE_TOP_K)
 
 
 @tool
