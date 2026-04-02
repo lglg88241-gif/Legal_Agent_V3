@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
 from typing import Any
 
 from langchain_chroma import Chroma
 from langchain_core.tools import tool
 from neo4j import GraphDatabase
+from openai import OpenAI
 
 from app.core.bm25_retriever import BM25Retriever
 from app.core.config import settings
@@ -29,10 +32,19 @@ RETURN labels(n) AS source_labels,
 LIMIT 5
 """
 
+QUERY_EXPANSION_SYSTEM_PROMPT = (
+    "你是一个法律专业术语转换器。"
+    "请将用户的口语化提问提取并扩写为 3-5 个法律专业关键词或核心概念，"
+    "用空格隔开。不要输出任何解释性文字。"
+)
+
 CHROMA_RECALL_K = 10
 BM25_RECALL_K = 10
 LAW_TOP_K = 3
 CASE_TOP_K = 2
+
+_query_expansion_client: OpenAI | None = None
+_query_expansion_client_lock = threading.Lock()
 
 
 def _serialize_documents(results: list[tuple[Any, float]]) -> str:
@@ -97,6 +109,67 @@ def _serialize_reranked_documents(
         return json.dumps(fallback_payload, ensure_ascii=False)
 
 
+def _get_query_expansion_client() -> OpenAI:
+    global _query_expansion_client
+
+    if _query_expansion_client is None:
+        with _query_expansion_client_lock:
+            if _query_expansion_client is None:
+                _query_expansion_client = OpenAI(
+                    api_key=settings.API_KEY,
+                    base_url=settings.BASE_URL,
+                    timeout=15.0,
+                )
+    return _query_expansion_client
+
+
+def _sanitize_expanded_query(content: str) -> str:
+    cleaned = content.strip()
+    cleaned = cleaned.replace("\n", " ").replace("\r", " ")
+    cleaned = re.sub(r"^[\"'`]+|[\"'`]+$", "", cleaned)
+    cleaned = re.sub(r"^(关键词|核心概念|扩写结果)[:：]\s*", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _expand_query(query: str) -> str:
+    query = query.strip()
+    if not query:
+        return ""
+
+    try:
+        client = _get_query_expansion_client()
+        response = client.chat.completions.create(
+            model=settings.LLM_MODEL_NAME,
+            messages=[
+                {"role": "system", "content": QUERY_EXPANSION_SYSTEM_PROMPT},
+                {"role": "user", "content": f"用户提问：{query}"},
+            ],
+            temperature=0.1,
+            max_tokens=64,
+        )
+        content = response.choices[0].message.content or ""
+        expanded_query = _sanitize_expanded_query(content)
+        if not expanded_query:
+            return ""
+        if expanded_query == query:
+            return ""
+        return expanded_query
+    except Exception as exc:
+        logger.warning("Query expansion failed, fallback to original query: %s", exc)
+        return ""
+
+
+def _build_final_query(query: str) -> str:
+    expanded_query = _expand_query(query)
+    if not expanded_query:
+        return query
+
+    final_query = f"{query} {expanded_query}".strip()
+    logger.info("Query expanded from [%s] to [%s]", query, final_query)
+    return final_query
+
+
 def _get_law_vectorstore() -> Chroma:
     from app.database.chroma_mgr import chroma_mgr
 
@@ -133,10 +206,11 @@ def _collect_dense_candidates(query: str, vectorstore: Chroma) -> list[dict[str,
     return candidates
 
 
-def _merge_hybrid_candidates(query: str, vectorstore: Chroma, corpus: str) -> list[dict[str, Any]]:
-    dense_candidates = _collect_dense_candidates(query, vectorstore)
+def _merge_hybrid_candidates(query: str, vectorstore: Chroma, corpus: str) -> tuple[str, list[dict[str, Any]]]:
+    final_query = _build_final_query(query)
+    dense_candidates = _collect_dense_candidates(final_query, vectorstore)
     sparse_candidates = BM25Retriever().search_records(
-        query=query,
+        query=final_query,
         top_k=BM25_RECALL_K,
         corpus=corpus,
     )
@@ -153,21 +227,29 @@ def _merge_hybrid_candidates(query: str, vectorstore: Chroma, corpus: str) -> li
         seen.add(key)
         merged_candidates.append(candidate)
 
-    return merged_candidates
+    return final_query, merged_candidates
 
 
 @tool
 def search_law_articles(query: str) -> str:
     """用于查询法律条文、法规规定、量刑标准等纯法律理论问题。"""
-    candidates = _merge_hybrid_candidates(query, _get_law_vectorstore(), corpus="law")
-    return _serialize_reranked_documents(query, candidates, top_k=LAW_TOP_K)
+    final_query, candidates = _merge_hybrid_candidates(
+        query,
+        _get_law_vectorstore(),
+        corpus="law",
+    )
+    return _serialize_reranked_documents(final_query, candidates, top_k=LAW_TOP_K)
 
 
 @tool
 def search_case_text(query: str) -> str:
     """用于根据案情描述、作案手法等模糊信息查找相似的历史指导案例。"""
-    candidates = _merge_hybrid_candidates(query, _get_case_vectorstore(), corpus="case")
-    return _serialize_reranked_documents(query, candidates, top_k=CASE_TOP_K)
+    final_query, candidates = _merge_hybrid_candidates(
+        query,
+        _get_case_vectorstore(),
+        corpus="case",
+    )
+    return _serialize_reranked_documents(final_query, candidates, top_k=CASE_TOP_K)
 
 
 @tool
