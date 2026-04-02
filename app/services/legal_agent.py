@@ -8,7 +8,6 @@ from typing import Any
 from json_repair import repair_json
 from langchain_community.chat_models import ChatZhipuAI
 from langchain_core.messages import HumanMessage, SystemMessage
-from openai import AsyncOpenAI
 
 from app.agent.graph import AgentState, build_legal_agent_graph
 from app.agent.tools import AGENT_TOOLS
@@ -69,11 +68,11 @@ GRAPH_TOOL = "query_neo4j_graph"
 
 class LegalGraphAgent:
     def __init__(self):
-        self.local_client = AsyncOpenAI(
-            api_key=settings.API_KEY,
-            base_url=settings.BASE_URL,
+        self.router_llm = ChatZhipuAI(
+            model="glm-4",
+            api_key=settings.ZHIPUAI_API_KEY,
+            temperature=0.1,
         )
-        self.local_model_name = settings.LLM_MODEL_NAME
         self.expert_llm = ChatZhipuAI(
             model="glm-4",
             api_key=settings.ZHIPUAI_API_KEY,
@@ -81,18 +80,23 @@ class LegalGraphAgent:
         )
         self.graph = build_legal_agent_graph(self)
 
-    async def _chat_with_local_model(
+    async def _chat_with_router_model(
         self,
         messages: list[dict[str, str]],
         max_tokens: int = 1024,
     ) -> str:
-        response = await self.local_client.chat.completions.create(
-            model=self.local_model_name,
-            messages=messages,
-            temperature=0.1,
-            max_tokens=max_tokens,
-        )
-        return response.choices[0].message.content or ""
+        del max_tokens
+        langchain_messages = []
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content", "")
+            if role == "system":
+                langchain_messages.append(SystemMessage(content=content))
+            else:
+                langchain_messages.append(HumanMessage(content=content))
+
+        response = await self.router_llm.ainvoke(langchain_messages)
+        return response.content if isinstance(response.content, str) else str(response.content)
 
     def _extract_candidate_sources(self, tool_results: list[dict[str, Any]]) -> list[str]:
         sources: list[str] = []
@@ -339,7 +343,7 @@ class LegalGraphAgent:
 
     async def _route_tools(self, question: str) -> list[dict[str, Any]]:
         try:
-            content = await self._chat_with_local_model(
+            content = await self._chat_with_router_model(
                 [
                     {"role": "system", "content": ROUTER_PROMPT},
                     {"role": "user", "content": question},

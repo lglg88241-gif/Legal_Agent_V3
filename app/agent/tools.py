@@ -9,9 +9,10 @@ from typing import Any
 
 from json_repair import repair_json
 from langchain_chroma import Chroma
+from langchain_community.chat_models import ChatZhipuAI
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from neo4j import GraphDatabase
-from openai import OpenAI
 
 from app.core.bm25_retriever import BM25Retriever
 from app.core.config import settings
@@ -34,20 +35,20 @@ RETURN labels(n) AS source_labels,
 LIMIT 5
 """
 
-QUERY_EXPANSION_SYSTEM_PROMPT = (
-    "你是一个法律搜索专家。"
-    "请根据用户的问题，生成 3 个不同维度的搜索查询语句，以覆盖潜在的法律依据。"
-    "请严格以 JSON 数组格式输出，不要有任何解释。"
-    "输出格式：{'queries': ['查询1', '查询2', '查询3']}。"
-)
+QUERY_EXPANSION_SYSTEM_PROMPT = """
+你是一位精通中国法律的资深律师。请将用户的口语化描述转化为 3-5 个互补的法律专业查询词，以最大化检索召回率。
+要求：
+1. 必须以标准的 JSON 数组格式返回，严禁任何解释：{"queries": ["查询词1", "查询词2", "..."]}。
+2. 查询词应涵盖：核心案由、适用法条关键短语、核心法律关系。
+""".strip()
 
 CHROMA_RECALL_K = 10
 BM25_RECALL_K = 10
 LAW_TOP_K = 3
 CASE_TOP_K = 2
 
-_query_expansion_client: OpenAI | None = None
-_query_expansion_client_lock = threading.Lock()
+_query_expansion_llm: ChatZhipuAI | None = None
+_query_expansion_llm_lock = threading.Lock()
 
 
 def _serialize_reranked_documents(
@@ -101,25 +102,25 @@ def _serialize_reranked_documents(
         return json.dumps(fallback_payload, ensure_ascii=False)
 
 
-def _get_query_expansion_client() -> OpenAI:
-    global _query_expansion_client
+def _get_query_expansion_llm() -> ChatZhipuAI:
+    global _query_expansion_llm
 
-    if _query_expansion_client is None:
-        with _query_expansion_client_lock:
-            if _query_expansion_client is None:
-                _query_expansion_client = OpenAI(
-                    api_key=settings.API_KEY,
-                    base_url=settings.BASE_URL,
-                    timeout=15.0,
+    if _query_expansion_llm is None:
+        with _query_expansion_llm_lock:
+            if _query_expansion_llm is None:
+                _query_expansion_llm = ChatZhipuAI(
+                    model="glm-4",
+                    api_key=settings.ZHIPUAI_API_KEY,
+                    temperature=0.1,
                 )
-    return _query_expansion_client
+    return _query_expansion_llm
 
 
 def _normalize_query_list(original_query: str, queries: list[Any]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
 
-    for item in [original_query, *queries]:
+    for item in queries:
         if not isinstance(item, str):
             continue
         cleaned = " ".join(item.strip().split())
@@ -137,19 +138,14 @@ def _expand_queries(query: str) -> list[str]:
         return [query]
 
     try:
-        client = _get_query_expansion_client()
-        response = client.chat.completions.create(
-            model=settings.LLM_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": QUERY_EXPANSION_SYSTEM_PROMPT},
-                {"role": "user", "content": f"用户问题：{normalized_query}"},
-            ],
-            temperature=0.1,
-            max_tokens=256,
+        response = _get_query_expansion_llm().invoke(
+            [
+                SystemMessage(content=QUERY_EXPANSION_SYSTEM_PROMPT),
+                HumanMessage(content=f"用户提问：{normalized_query}"),
+            ]
         )
-        content = response.choices[0].message.content or ""
-        repaired = repair_json(content)
-        parsed = json.loads(repaired)
+        content = response.content if isinstance(response.content, str) else str(response.content)
+        parsed = json.loads(repair_json(content))
 
         if isinstance(parsed, dict):
             queries = parsed.get("queries", [])
@@ -323,7 +319,7 @@ def search_law_articles(query: str) -> str:
         _get_law_vectorstore(),
         corpus="law",
     )
-    rerank_query = query.strip() or " ".join(expanded_queries)
+    rerank_query = " ".join(expanded_queries).strip() or query.strip()
     return _serialize_reranked_documents(rerank_query, candidates, top_k=LAW_TOP_K)
 
 
@@ -335,7 +331,7 @@ def search_case_text(query: str) -> str:
         _get_case_vectorstore(),
         corpus="case",
     )
-    rerank_query = query.strip() or " ".join(expanded_queries)
+    rerank_query = " ".join(expanded_queries).strip() or query.strip()
     return _serialize_reranked_documents(rerank_query, candidates, top_k=CASE_TOP_K)
 
 
