@@ -8,6 +8,7 @@ from langchain_chroma import Chroma
 from langchain_core.tools import tool
 from neo4j import GraphDatabase
 
+from app.core.bm25_retriever import BM25Retriever
 from app.core.config import settings
 from app.core.reranker import BGEReranker
 from app.database.chroma_utils import resolve_persist_dir
@@ -29,6 +30,7 @@ LIMIT 5
 """
 
 CHROMA_RECALL_K = 10
+BM25_RECALL_K = 10
 LAW_TOP_K = 3
 CASE_TOP_K = 2
 
@@ -48,34 +50,51 @@ def _serialize_documents(results: list[tuple[Any, float]]) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _serialize_reranked_documents(query: str, results: list[tuple[Any, float]], top_k: int) -> str:
-    if not results:
+def _serialize_reranked_documents(
+    query: str,
+    candidates: list[dict[str, Any]],
+    top_k: int,
+) -> str:
+    if not candidates:
         return json.dumps([], ensure_ascii=False)
 
     try:
         reranker = BGEReranker()
         ranked = reranker.rerank_with_scores(
             query=query,
-            documents=[document.page_content for document, _ in results],
+            documents=[candidate["content"] for candidate in candidates],
             top_k=top_k,
         )
         payload = []
         for item in ranked:
-            document, coarse_score = results[item["index"]]
-            metadata = document.metadata or {}
+            candidate = candidates[item["index"]]
+            metadata = candidate.get("metadata") or {}
             payload.append(
                 {
-                    "content": document.page_content,
+                    "content": candidate["content"],
                     "source": metadata.get("source", ""),
                     "metadata": metadata,
                     "score": item["score"],
-                    "coarse_score": coarse_score,
+                    "coarse_score": candidate.get("score"),
+                    "retrieval": candidate.get("retrieval"),
                 }
             )
         return json.dumps(payload, ensure_ascii=False)
     except Exception as exc:
-        logger.warning("Reranker failed, fallback to coarse recall: %s", exc)
-        return _serialize_documents(results[:top_k])
+        logger.warning("Reranker failed, fallback to hybrid recall: %s", exc)
+        fallback_payload = []
+        for candidate in candidates[:top_k]:
+            metadata = candidate.get("metadata") or {}
+            fallback_payload.append(
+                {
+                    "content": candidate["content"],
+                    "source": metadata.get("source", ""),
+                    "metadata": metadata,
+                    "score": candidate.get("score"),
+                    "retrieval": candidate.get("retrieval"),
+                }
+            )
+        return json.dumps(fallback_payload, ensure_ascii=False)
 
 
 def _get_law_vectorstore() -> Chroma:
@@ -97,18 +116,58 @@ def _get_case_vectorstore() -> Chroma:
     )
 
 
+def _collect_dense_candidates(query: str, vectorstore: Chroma) -> list[dict[str, Any]]:
+    results = vectorstore.similarity_search_with_score(query, k=CHROMA_RECALL_K)
+    candidates = []
+    for document, score in results:
+        metadata = document.metadata or {}
+        candidates.append(
+            {
+                "content": document.page_content,
+                "source": metadata.get("source", ""),
+                "metadata": metadata,
+                "score": score,
+                "retrieval": "dense",
+            }
+        )
+    return candidates
+
+
+def _merge_hybrid_candidates(query: str, vectorstore: Chroma, corpus: str) -> list[dict[str, Any]]:
+    dense_candidates = _collect_dense_candidates(query, vectorstore)
+    sparse_candidates = BM25Retriever().search_records(
+        query=query,
+        top_k=BM25_RECALL_K,
+        corpus=corpus,
+    )
+
+    merged_candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for candidate in dense_candidates + sparse_candidates:
+        content = (candidate.get("content") or "").strip()
+        source = (candidate.get("source") or "").strip()
+        key = (content, source)
+        if not content or key in seen:
+            continue
+        seen.add(key)
+        merged_candidates.append(candidate)
+
+    return merged_candidates
+
+
 @tool
 def search_law_articles(query: str) -> str:
     """用于查询法律条文、法规规定、量刑标准等纯法律理论问题。"""
-    results = _get_law_vectorstore().similarity_search_with_score(query, k=CHROMA_RECALL_K)
-    return _serialize_reranked_documents(query, results, top_k=LAW_TOP_K)
+    candidates = _merge_hybrid_candidates(query, _get_law_vectorstore(), corpus="law")
+    return _serialize_reranked_documents(query, candidates, top_k=LAW_TOP_K)
 
 
 @tool
 def search_case_text(query: str) -> str:
     """用于根据案情描述、作案手法等模糊信息查找相似的历史指导案例。"""
-    results = _get_case_vectorstore().similarity_search_with_score(query, k=CHROMA_RECALL_K)
-    return _serialize_reranked_documents(query, results, top_k=CASE_TOP_K)
+    candidates = _merge_hybrid_candidates(query, _get_case_vectorstore(), corpus="case")
+    return _serialize_reranked_documents(query, candidates, top_k=CASE_TOP_K)
 
 
 @tool
