@@ -1,6 +1,28 @@
 import axios from 'axios'
 import { clearAuthSession, getToken } from '../utils/auth.js'
 
+function formatValidationDetail(detail) {
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object') {
+          const path = Array.isArray(item.loc) ? item.loc.join('.') : ''
+          const message = item.msg || 'Validation error'
+          return path ? `${path}: ${message}` : message
+        }
+        return 'Validation error'
+      })
+      .join('\n')
+  }
+
+  if (typeof detail === 'string') {
+    return detail
+  }
+
+  return 'Request validation failed'
+}
+
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000',
   timeout: 60000,
@@ -28,6 +50,12 @@ api.interceptors.response.use(
         window.location.hash = '#/login'
       }
     }
+
+    if (error?.response?.status === 422) {
+      const message = formatValidationDetail(error.response?.data?.detail)
+      window.alert(message)
+    }
+
     return Promise.reject(error)
   }
 )

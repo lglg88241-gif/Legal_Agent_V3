@@ -81,6 +81,16 @@ async function handleSubmit() {
     return
   }
 
+  if (username.length < 2) {
+    ElMessage.warning('用户名至少需要 2 个字符')
+    return
+  }
+
+  if (password.length < 6) {
+    ElMessage.warning('密码至少需要 6 个字符')
+    return
+  }
+
   submitting.value = true
   try {
     const action = mode.value === 'login' ? login : register
@@ -89,9 +99,11 @@ async function handleSubmit() {
     ElMessage.success(mode.value === 'login' ? '登录成功' : '注册成功')
     router.replace(route.query.redirect || '/chat')
   } catch (error) {
-    const message =
-      error?.response?.data?.detail ||
-      (mode.value === 'login' ? '登录失败，请检查用户名或密码' : '注册失败，请稍后重试')
+    const detail = error?.response?.data?.detail
+    const message = Array.isArray(detail)
+      ? detail.map((item) => item?.msg || '请求校验失败').join('；')
+      : detail ||
+        (mode.value === 'login' ? '登录失败，请检查用户名或密码' : '注册失败，请稍后重试')
     ElMessage.error(message)
   } finally {
     submitting.value = false
