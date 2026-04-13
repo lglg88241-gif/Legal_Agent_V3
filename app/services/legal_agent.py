@@ -1663,6 +1663,20 @@ def _safe_extract_amount_v3(text: str) -> float | None:
 
 
 def _safe_extract_months_v3(text: str) -> int | None:
+    relative_span = re.search(
+        r"去年\s*(\d{1,2})\s*月.*?今年\s*(\d{1,2})\s*月(?:底|末)?",
+        text,
+    )
+    if relative_span:
+        try:
+            start_month = int(relative_span.group(1))
+            end_month = int(relative_span.group(2))
+            if 1 <= start_month <= 12 and 1 <= end_month <= 12:
+                months = (12 - start_month + 1) + end_month
+                return months if months > 0 else None
+        except ValueError:
+            return None
+
     worked_match = re.search(r"(?:工作|任职|入职后|用工)\D{0,6}(\d+)\s*个月", text)
     if worked_match:
         try:
@@ -1690,7 +1704,7 @@ def _build_layered_advisor_payload_v3(case_summary: str, question: str, graph_co
     action_lines: list[str] = []
     unknowns: list[str] = []
 
-    has_unsigned_contract = any(token in merged for token in ("未签合同", "没签合同", "未签劳动合同", "没有劳动合同"))
+    has_unsigned_contract = any(token in merged for token in ("未签合同", "没签合同", "没签劳动合同", "未签劳动合同", "没有劳动合同"))
     if has_unsigned_contract:
         calculation_lines.append("只要已经形成实际用工关系，即使没有书面劳动合同，也可以先主张未签书面劳动合同的二倍工资差额。")
         if amount is not None and months is not None:
@@ -1817,6 +1831,7 @@ async def _patched_generate_final_answer_v3(self: LegalGraphAgent, state: AgentS
     case_summary = (state.get("case_summary") or "").strip()
     graph_context = ((state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip())
     layered_payload = _build_layered_advisor_payload_v3(case_summary, state["question"], graph_context)
+    rag_context = retrieved_docs or "无有效检索结果"
     fallback = {
         "answer": layered_payload["answer"],
         "sources": [],
@@ -1853,6 +1868,13 @@ async def _patched_generate_final_answer_v3(self: LegalGraphAgent, state: AgentS
 3. 允许说明哪些部分已经能主张、哪些部分后续要补强，但不能因此停止回答。
 </style_rules>
 
+<rag_binding priority="MAX">
+1. 下面的 `<rag_context>` 是你进行法律定性、金额计算、法条援引、案例说明时唯一允许直接锚定的外部依据。
+2. 只要 `<rag_context>` 中出现了具体法条名称、案例名称或来源文件名，你在相关结论后必须显式穿插这些名称。
+3. 你不得脱离 `<rag_context>` 自行补写新的法条标题、案例名称、裁判文号或来源文件名。
+4. 如果 `<rag_context>` 没有给出足够的法条名称，你仍然可以先按案情做事实分层回答，但不能伪造法律出处。
+</rag_binding>
+
 <context>
 案件摘要：
 {case_summary or "无案件摘要"}
@@ -1860,8 +1882,9 @@ async def _patched_generate_final_answer_v3(self: LegalGraphAgent, state: AgentS
 图谱上下文：
 {graph_context or "无图谱上下文"}
 
-检索材料：
-{retrieved_docs or "无有效检索结果"}
+<rag_context>
+{rag_context}
+</rag_context>
 </context>
 
 <output_contract>
@@ -1869,6 +1892,7 @@ async def _patched_generate_final_answer_v3(self: LegalGraphAgent, state: AgentS
 2. 至少包含 `answer` 和 `sources`。
 3. `answer` 必须覆盖：算账与确权层、高风险执行层、下一步推进。
 4. `sources` 只能从候选来源中选择，不能编造。
+5. 若 `<rag_context>` 中存在法条名、案例名或来源文件名，`answer` 中对应结论后必须显式写出这些名称。
 </output_contract>
 """.strip()
 
@@ -1881,6 +1905,7 @@ async def _patched_generate_final_answer_v3(self: LegalGraphAgent, state: AgentS
                 "content": (
                     f"用户问题：{state['question']}\n\n"
                     f"候选来源：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
+                    f"<rag_context>\n{rag_context}\n</rag_context>\n\n"
                     f"以下是已经完成的基础回答骨架，你只能优化它，不能删掉其中的算账、策略或下一步建议：\n{layered_payload['answer']}"
                 ),
             },
