@@ -17,6 +17,83 @@ from app.services import conversation_store
 
 
 def install_backend_import_stubs() -> None:
+    fake_json_repair = ModuleType("json_repair")
+    fake_json_repair.repair_json = lambda content: content
+    sys.modules["json_repair"] = fake_json_repair
+
+    fake_openai = ModuleType("openai")
+
+    class FakeAsyncOpenAI:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    fake_openai.AsyncOpenAI = FakeAsyncOpenAI
+    sys.modules["openai"] = fake_openai
+
+    fake_langchain_community = ModuleType("langchain_community")
+    fake_langchain_chat_models = ModuleType("langchain_community.chat_models")
+
+    class FakeChatZhipuAI:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def ainvoke(self, *args, **kwargs):
+            return type("Response", (), {"content": "{}"})()
+
+    fake_langchain_chat_models.ChatZhipuAI = FakeChatZhipuAI
+    fake_langchain_community.chat_models = fake_langchain_chat_models
+    sys.modules["langchain_community"] = fake_langchain_community
+    sys.modules["langchain_community.chat_models"] = fake_langchain_chat_models
+
+    fake_langchain_core = ModuleType("langchain_core")
+    fake_langchain_messages = ModuleType("langchain_core.messages")
+
+    class FakeMessage:
+        def __init__(self, content: str = "") -> None:
+            self.content = content
+
+    fake_langchain_messages.HumanMessage = FakeMessage
+    fake_langchain_messages.SystemMessage = FakeMessage
+    fake_langchain_core.messages = fake_langchain_messages
+    sys.modules["langchain_core"] = fake_langchain_core
+    sys.modules["langchain_core.messages"] = fake_langchain_messages
+
+    fake_langgraph = ModuleType("langgraph")
+    fake_langgraph_graph = ModuleType("langgraph.graph")
+
+    class FakeCompiledGraph:
+        async def ainvoke(self, state, config=None):
+            return state
+
+    class FakeStateGraph:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def add_node(self, *args, **kwargs) -> None:
+            return None
+
+        def set_entry_point(self, *args, **kwargs) -> None:
+            return None
+
+        def add_conditional_edges(self, *args, **kwargs) -> None:
+            return None
+
+        def add_edge(self, *args, **kwargs) -> None:
+            return None
+
+        def compile(self):
+            return FakeCompiledGraph()
+
+    fake_langgraph_graph.END = "__END__"
+    fake_langgraph_graph.StateGraph = FakeStateGraph
+    fake_langgraph.graph = fake_langgraph_graph
+    sys.modules["langgraph"] = fake_langgraph
+    sys.modules["langgraph.graph"] = fake_langgraph_graph
+
+    fake_neo4j = ModuleType("neo4j")
+    fake_neo4j.GraphDatabase = type("GraphDatabase", (), {"driver": staticmethod(lambda *args, **kwargs: None)})
+    sys.modules["neo4j"] = fake_neo4j
+
     fake_jwt = ModuleType("jwt")
     fake_jwt.encode = lambda *args, **kwargs: "token"
     fake_jwt.decode = lambda *args, **kwargs: {"sub": "1", "username": "tester"}
@@ -122,3 +199,88 @@ def test_importing_main_does_not_require_legacy_history_or_summary_routes() -> N
     source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
     assert "history_router" not in source
     assert "summary_router" not in source
+
+
+def test_advisor_fallback_uses_case_summary_for_labor_analysis() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.legal_agent", None)
+    from app.services import legal_agent
+
+    answer = legal_agent._build_advisor_fallback(
+        "员工于2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同，后公司准备注销。",
+        "公司没签合同我能要什么赔偿？",
+        "",
+    )
+
+    assert "二倍工资差额" in answer
+    assert "48000" in answer
+    assert "财产保全" in answer
+
+
+def test_advisor_fallback_without_salary_still_gives_operational_guidance() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.legal_agent", None)
+    from app.services import legal_agent
+
+    answer = legal_agent._build_advisor_fallback(
+        "员工已经入职但公司一直没签劳动合同，也没有提供纸质合同。",
+        "没签合同怎么办？",
+        "",
+    )
+
+    assert "二倍工资差额" in answer
+    assert "月工资" in answer
+    assert "考勤记录" in answer
+
+
+def test_graph_prompts_can_be_formatted_without_keyerror() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.graph_extractor", None)
+    from app.services import graph_extractor
+
+    formatted_incremental = graph_extractor.INCREMENTAL_EXTRACTION_PROMPT.format(user_input="补充案情")
+    formatted_gc = graph_extractor.SEMANTIC_GC_PROMPT.format(
+        case_summary="公司更名",
+        current_nodes='["旧公司", "新公司"]',
+        current_graph="[]",
+    )
+    formatted_revision = graph_extractor.BELIEF_REVISION_PROMPT.format(
+        current_graph="[]",
+        user_input="把旧公司改成新公司",
+    )
+    formatted_revision_v2 = graph_extractor.BELIEF_REVISION_PROMPT_V2.format(
+        existing_nodes='["旧公司", "新公司"]',
+        current_graph="[]",
+        user_input="删除旧公司",
+    )
+
+    assert '"actions"' in formatted_incremental
+    assert '"obsolete_nodes"' in formatted_gc
+    assert '"old_target"' in formatted_revision
+    assert '"target_name"' in formatted_revision_v2
+
+
+def test_delete_node_uses_exact_match_only() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.graph_extractor", None)
+    from app.services import graph_extractor
+
+    class FakeResult:
+        def consume(self):
+            return None
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, object]]] = []
+
+        def run(self, query, params):
+            self.calls.append((query, params))
+            return FakeResult()
+
+    session = FakeSession()
+    graph_extractor._delete_node(session, 7, "机器")
+
+    assert len(session.calls) == 2
+    for query, params in session.calls:
+        assert "CONTAINS" not in query
+        assert params["target_name"] == "机器"

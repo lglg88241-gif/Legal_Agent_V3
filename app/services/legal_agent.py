@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from json_repair import repair_json
@@ -1371,6 +1372,207 @@ async def _patched_ask(
     }
 
 
+def _normalize_summary_text(text: str) -> str:
+    return " ".join((text or "").strip().split())
+
+
+def _extract_numeric_amount(text: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元|块|人民币|月薪|工资)", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _extract_month_span(text: str) -> int | None:
+    worked_match = re.search(r"(?:工作|任职|入职后|用工)\D{0,6}(\d+)\s*个?月", text)
+    if worked_match:
+        try:
+            return max(int(worked_match.group(1)), 0)
+        except ValueError:
+            return None
+
+    month_match = re.search(r"(\d+)\s*个月", text)
+    if month_match:
+        try:
+            return max(int(month_match.group(1)), 0)
+        except ValueError:
+            return None
+
+    range_match = re.search(
+        r"(\d{4})[.\-/年](\d{1,2})[.\-/月]?(?:\d{1,2}日?)?.{0,12}?"
+        r"(?:到|至|-|~)"
+        r".{0,12}?"
+        r"(\d{4})[.\-/年](\d{1,2})[.\-/月]?(?:\d{1,2}日?)?",
+        text,
+    )
+    if not range_match:
+        return None
+
+    start_year, start_month, end_year, end_month = map(int, range_match.groups())
+    months = (end_year - start_year) * 12 + (end_month - start_month)
+    return months + 1 if months >= 0 else None
+
+
+def _build_case_fact_lines(case_summary: str, question: str, graph_context: str) -> list[str]:
+    facts: list[str] = []
+    for raw in (case_summary, question, graph_context):
+        clean = _normalize_summary_text(raw)
+        if not clean:
+            continue
+        for part in re.split(r"[；;。！？\n]+", clean):
+            item = part.strip(" ，,")
+            if not item or item in facts:
+                continue
+            facts.append(item)
+    return facts[:8]
+
+
+def _build_practical_suggestions(case_summary: str, question: str) -> list[str]:
+    merged = f"{case_summary} {question}"
+    suggestions: list[str] = []
+    if any(token in merged for token in ("未签合同", "没签合同", "未签劳动合同", "没有劳动合同")):
+        suggestions.append("立即固定入职时间、工资标准、考勤记录、工资流水、聊天记录，作为劳动关系和未签书面合同事实的核心证据。")
+        suggestions.append("如担心对方转移财产、注销公司或抽逃资产，可评估申请财产保全。")
+    if any(token in merged for token in ("拖欠工资", "欠薪", "未发工资", "克扣工资")):
+        suggestions.append("同步整理工资条、银行流水、考勤和催要记录，优先准备劳动仲裁材料。")
+    if any(token in merged for token in ("辞退", "开除", "解除劳动关系", "逼离职", "被迫离职")):
+        suggestions.append("保留解除通知、录音、绩效考核和岗位调整记录，用于判断是否构成违法解除或被迫解除。")
+    if not suggestions:
+        suggestions.append("先把关键时间、金额、主体身份和证据材料整理成时间轴，再推进具体请求。")
+    return suggestions[:3]
+
+
+def _build_rule_analysis(case_summary: str, question: str) -> tuple[list[str], list[str]]:
+    merged = f"{case_summary} {question}"
+    rules: list[str] = []
+    unknowns: list[str] = []
+
+    if any(token in merged for token in ("未签合同", "没签合同", "未签劳动合同", "没有劳动合同")):
+        rules.append("若已实际用工而单位在法定期限内未签书面劳动合同，通常可主张未签书面劳动合同的二倍工资差额。")
+        salary = _extract_numeric_amount(merged)
+        months = _extract_month_span(merged)
+        if salary is not None and months is not None:
+            compensable_months = max(min(months - 1, 11), 0)
+            rules.append(
+                f"按现有事实估算，若月工资约为 {salary:.0f} 元、未签约期间约 {months} 个月，"
+                f"二倍工资差额可先按 {compensable_months} 个月工资、约 {salary * compensable_months:.0f} 元测算。"
+            )
+        else:
+            missing_parts = []
+            if salary is None:
+                missing_parts.append("月工资")
+            if months is None:
+                missing_parts.append("未签合同持续时间")
+            if missing_parts:
+                unknowns.append(f"二倍工资差额的精确金额仍取决于{'、'.join(missing_parts)}。")
+
+    if any(token in merged for token in ("劳动关系", "入职", "考勤", "发工资", "工资流水")):
+        rules.append("即便没有书面劳动合同，只要存在管理、考勤、报酬支付等事实，仍可优先从劳动关系成立角度主张权利。")
+
+    if any(token in merged for token in ("公司变更", "变更主体", "更名", "注销", "股东变更")):
+        rules.append("若用工主体发生更名、分立、并购或资产转移，需要同步核查实际用工主体、工资支付主体和责任承继链条。")
+
+    return rules[:4], unknowns[:3]
+
+
+def _build_advisor_fallback(case_summary: str, question: str, graph_context: str) -> str:
+    facts = _build_case_fact_lines(case_summary, question, graph_context)
+    rules, unknowns = _build_rule_analysis(case_summary, question)
+    suggestions = _build_practical_suggestions(case_summary, question)
+
+    sections: list[str] = []
+    if facts:
+        sections.append("已知事实：\n- " + "\n- ".join(facts))
+    if rules:
+        sections.append("法律分析：\n- " + "\n- ".join(rules))
+    else:
+        sections.append("法律分析：\n- 现有案情已经足以先做基础判断，应围绕劳动关系、合同义务或赔偿责任继续推进。")
+    if unknowns:
+        sections.append("不确定事项：\n- " + "\n- ".join(unknowns))
+    sections.append("实操建议：\n- " + "\n- ".join(suggestions))
+    return "\n\n".join(sections)
+
+
+def _should_use_structured_advisor_fallback(case_summary: str, content: str) -> bool:
+    if case_summary.strip():
+        return True
+    cleaned = (content or "").strip()
+    return ("未找到依据" in cleaned) or ("依据不足" in cleaned)
+
+
+async def _patched_generate_final_answer_v2(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
+    tool_results = state.get("tool_results", [])
+    candidate_sources = self._extract_candidate_sources(tool_results)
+    retrieved_docs = self._build_context_blocks(tool_results)
+    case_summary = (state.get("case_summary") or "").strip()
+    graph_context = ((state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip())
+    fallback_answer = _build_advisor_fallback(case_summary, state["question"], graph_context)
+    fallback = {
+        "answer": fallback_answer,
+        "sources": [],
+    }
+    advisor_system_prompt = f"""
+你是中国大陆法律顾问。
+
+【最高优先级】
+1. case_summary 是当前案件的最高事实基准。只要摘要已经明确事实，就不得退回"依据不足"式空话。
+2. 如果案情出现"未签合同/未签劳动合同/没签合同"，必须主动分析二倍工资差额；若数字足够，就直接给出测算。
+3. 如果案情出现工资拖欠、公司变更、主体变更、财产转移风险，必须主动给出证据固定和财产保全等实操建议。
+4. 输出必须包含"已知事实""法律分析""不确定事项""实操建议"四部分。
+5. 即使检索不完美，也要基于摘要里的确定事实先给出可执行意见。
+
+【当前案件摘要】
+{case_summary or "无案件摘要"}
+
+【图谱上下文】
+{graph_context or "无图谱上下文"}
+
+【检索材料】
+{retrieved_docs or "无有效检索结果"}
+
+【输出要求】
+1. 只返回 JSON。
+2. JSON 至少包含 answer 和 sources。
+3. sources 只能从候选来源中选择，不能编造。
+4. 禁止输出"当前检索依据不足""未找到依据后无法分析"之类拒答措辞。
+""".strip()
+
+    content = await self._chat_model(
+        self.expert_llm,
+        [
+            {"role": "system", "content": advisor_system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"用户问题：{state['question']}\n\n"
+                    f"反思结论：{state.get('reflection_status', 'SUFFICIENT')}\n"
+                    f"证据置信度：{state.get('confidence_score', 0.0)}\n"
+                    f"候选来源：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
+                    f"请在以下事实骨架基础上补全答案，不得删减已知事实：\n{fallback_answer}"
+                ),
+            },
+        ],
+    )
+    parsed = self._safe_json_load(content, fallback)
+
+    answer = parsed.get("answer") or parsed.get("response") or fallback["answer"]
+    if not isinstance(answer, str) or not answer.strip():
+        answer = fallback["answer"]
+    if _should_use_structured_advisor_fallback(case_summary, answer):
+        answer = fallback_answer
+
+    sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
+
+    return {
+        "response": answer.strip(),
+        "sources": sources,
+        "is_final": True,
+    }
+
+
 LegalGraphAgent._route_decision = _patched_route_decision
 LegalGraphAgent._patched_route_decision = _patched_route_decision
 LegalGraphAgent._patched_build_tool_calls_for_intent = _patched_build_tool_calls_for_intent
@@ -1380,7 +1582,7 @@ LegalGraphAgent._patched_build_reflector_user_prompt = _patched_build_reflector_
 LegalGraphAgent.tool_router_node = _patched_tool_router_node
 LegalGraphAgent.fact_updater_node = _patched_fact_updater_node
 LegalGraphAgent.vector_researcher_node = _patched_vector_researcher_node
-LegalGraphAgent._generate_final_answer = _patched_generate_final_answer
+LegalGraphAgent._generate_final_answer = _patched_generate_final_answer_v2
 LegalGraphAgent._generate_reflection = _patched_generate_reflection_v2
 LegalGraphAgent._generate_clarifier_question = _patched_generate_clarifier_question_v2
 LegalGraphAgent.ask = _patched_ask
