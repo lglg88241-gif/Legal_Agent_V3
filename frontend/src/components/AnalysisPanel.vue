@@ -32,27 +32,27 @@
           </el-tag>
         </div>
         <div class="info-row">
-          <span class="label">知识库文档</span>
+          <span class="label">知识文档数</span>
           <span class="value">{{ status.docCount || 0 }}</span>
         </div>
         <div class="info-row">
-          <span class="label">路由模型</span>
+          <span class="label">当前模型</span>
           <span class="value">{{ status.model || '-' }}</span>
         </div>
       </div>
 
       <div class="panel-section">
-        <div class="section-title">组件连通性</div>
+        <div class="section-title">组件状态</div>
         <div v-for="(value, key) in status.components" :key="key" class="info-row">
           <span class="label">{{ componentLabel(key) }}</span>
           <el-tag :type="value === 'connected' ? 'success' : 'info'" size="small">
-            {{ value === 'connected' ? 'connected' : 'loading' }}
+            {{ value === 'connected' ? '已连接' : '加载中' }}
           </el-tag>
         </div>
       </div>
 
       <div class="panel-section">
-        <div class="section-title">检索工具</div>
+        <div class="section-title">可用工具</div>
         <div v-if="status.tools?.length" class="tools-list">
           <el-tag
             v-for="tool in status.tools"
@@ -70,7 +70,7 @@
       <div class="panel-section">
         <div class="section-title">本轮分析</div>
         <div v-if="analysis.actions?.length">
-          <div v-for="(action, i) in analysis.actions" :key="i" class="action-detail">
+          <div v-for="(action, index) in analysis.actions" :key="index" class="action-detail">
             <div class="action-tool">
               <el-tag size="small" effect="dark">{{ action.tool }}</el-tag>
             </div>
@@ -87,19 +87,13 @@
 
       <div class="panel-section">
         <div class="section-title">参考来源</div>
-        <div v-if="analysis.sources?.length" class="sources-list">
-          <el-tag
-            v-for="source in normalizedSources"
-            :key="source"
-            size="small"
-            effect="plain"
-            type="info"
-          >
+        <div v-if="normalizedSources.length" class="sources-list">
+          <el-tag v-for="source in normalizedSources" :key="source" size="small" effect="plain" type="info">
             {{ source }}
           </el-tag>
         </div>
         <div v-else class="info-row">
-          <span class="value muted">当前回答尚未返回来源标注</span>
+          <span class="value muted">当前回答尚未返回来源标签</span>
         </div>
       </div>
 
@@ -112,7 +106,7 @@
           v-model="comment"
           type="textarea"
           :rows="2"
-          placeholder="对本轮回答的建议..."
+          placeholder="请输入你对本轮回答的建议"
           size="small"
         />
         <el-button type="primary" size="small" class="submit-btn" @click="submit">
@@ -125,7 +119,7 @@
 
 <script setup>
 import { computed, ref } from 'vue'
-import { Expand, Fold } from '@element-plus/icons-vue'
+import { Expand, Fold, Share } from '@element-plus/icons-vue'
 import KnowledgeGraphPanel from './KnowledgeGraphPanel.vue'
 
 const props = defineProps({
@@ -172,7 +166,7 @@ function componentLabel(key) {
   const labels = {
     chroma: 'Chroma',
     neo4j: 'Neo4j',
-    llm: '本地 LLM',
+    llm: 'LLM',
     celery: 'Celery',
   }
   return labels[key] || key

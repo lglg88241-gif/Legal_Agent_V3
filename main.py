@@ -10,11 +10,11 @@ from neo4j import GraphDatabase
 from openai import AsyncOpenAI
 from redis import Redis
 
+from app.api.auth import router as auth_router
+from app.api.conversations import router as conversations_router
 from app.api.dialog import router as dialog_router
 from app.api.feedback import router as feedback_router
 from app.api.graph import router as graph_router
-from app.api.history import router as history_router
-from app.api.summary import router as summary_router
 from app.agent.tools import AGENT_TOOLS
 from app.core.config import settings
 
@@ -81,6 +81,9 @@ def sync_warmup_celery() -> None:
 
 
 async def warmup_local_llm() -> None:
+    if settings.LLM_MODE.lower() != "real":
+        return
+
     client = AsyncOpenAI(api_key=settings.API_KEY, base_url=settings.BASE_URL)
     try:
         await client.chat.completions.create(
@@ -172,10 +175,10 @@ app.add_middleware(
 )
 
 app.include_router(dialog_router)
-app.include_router(history_router)
-app.include_router(summary_router)
+app.include_router(conversations_router)
 app.include_router(feedback_router)
 app.include_router(graph_router)
+app.include_router(auth_router)
 
 
 @app.get("/health")

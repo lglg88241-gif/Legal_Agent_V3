@@ -2,8 +2,8 @@
   <div class="graph-panel">
     <div class="graph-meta">
       <div class="meta-block">
-        <span class="meta-label">图谱查询</span>
-        <span class="meta-value">{{ graph.query || '等待问题触发' }}</span>
+        <span class="meta-label">案情图谱</span>
+        <span class="meta-value">{{ graph.query || '等待会话触发图谱生成' }}</span>
       </div>
       <div class="meta-block compact">
         <span class="meta-pill">{{ graph.nodes?.length || 0 }} 节点</span>
@@ -12,7 +12,7 @@
     </div>
 
     <div class="legend">
-      <span v-for="item in legendItems" :key="item.type" class="legend-item">
+      <span v-for="item in legendItems" :key="item.category" class="legend-item">
         <span class="legend-dot" :style="{ background: item.color }"></span>
         {{ item.label }}
       </span>
@@ -21,7 +21,7 @@
     <div class="graph-canvas">
       <div v-if="graph.loading" class="graph-overlay">
         <el-icon class="rotating"><Loading /></el-icon>
-        <span>正在加载 Neo4j 子图...</span>
+        <span>正在加载当前会话的案情图谱...</span>
       </div>
       <div v-else-if="graph.error" class="graph-overlay error">
         <el-icon><Warning /></el-icon>
@@ -29,7 +29,7 @@
       </div>
       <div v-else-if="!layout.nodes.length" class="graph-overlay empty">
         <el-icon><Share /></el-icon>
-        <span>当前问题尚未命中可视化图谱</span>
+        <span>当前会话尚未形成可视化案情图谱</span>
       </div>
 
       <svg
@@ -37,7 +37,7 @@
         class="graph-svg"
         :viewBox="`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`"
         role="img"
-        aria-label="知识图谱"
+        aria-label="动态案情图谱"
       >
         <g v-for="edge in layout.edges" :key="edge.id">
           <line
@@ -61,11 +61,11 @@
           <circle
             :cx="node.x"
             :cy="node.y"
-            :r="selectedNodeId === node.id ? 22 : 18"
-            :fill="colorForType(node.type)"
+            :r="selectedNodeId === node.id ? 28 : 24"
+            :fill="colorForCategory(node.category)"
             :class="['node-circle', { active: selectedNodeId === node.id }]"
           />
-          <text :x="node.x" :y="node.y + 4" class="node-label">
+          <text :x="node.x" :y="node.y + 5" class="node-label">
             {{ shortLabel(node.label) }}
           </text>
         </g>
@@ -75,7 +75,9 @@
     <div v-if="selectedNode" class="node-detail">
       <div class="detail-head">
         <span class="detail-title">{{ selectedNode.label }}</span>
-        <el-tag size="small" effect="plain">{{ selectedNode.type }}</el-tag>
+        <el-tag size="small" effect="plain">
+          {{ selectedNode.category || '未分类' }}
+        </el-tag>
       </div>
       <div class="detail-row">
         <span class="detail-key">标签</span>
@@ -96,17 +98,14 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 
-const VIEW_WIDTH = 320
-const VIEW_HEIGHT = 320
-const CENTER_X = VIEW_WIDTH / 2
-const CENTER_Y = VIEW_HEIGHT / 2
-const ANCHORS = {
-  plaintiff: { x: 82, y: 92 },
-  defendant: { x: 238, y: 92 },
-  cause: { x: 88, y: 232 },
-  judgment: { x: 232, y: 232 },
-  law: { x: CENTER_X, y: 76 },
-  entity: { x: CENTER_X, y: CENTER_Y },
+const VIEW_WIDTH = 520
+const VIEW_HEIGHT = 440
+const CATEGORY_ANCHORS = {
+  主体: { x: 140, y: 120 },
+  客体: { x: 380, y: 120 },
+  事件: { x: 140, y: 320 },
+  后果: { x: 380, y: 320 },
+  未分类: { x: VIEW_WIDTH / 2, y: VIEW_HEIGHT / 2 },
 }
 
 const props = defineProps({
@@ -125,11 +124,10 @@ const props = defineProps({
 const selectedNodeId = ref('')
 
 const legendItems = [
-  { type: 'plaintiff', label: '原告', color: '#2563eb' },
-  { type: 'defendant', label: '被告', color: '#dc2626' },
-  { type: 'cause', label: '案由', color: '#d97706' },
-  { type: 'judgment', label: '判决', color: '#059669' },
-  { type: 'entity', label: '实体', color: '#7c3aed' },
+  { category: '主体', label: '主体', color: '#2563eb' },
+  { category: '客体', label: '客体', color: '#f59e0b' },
+  { category: '事件', label: '事件', color: '#dc2626' },
+  { category: '后果', label: '后果', color: '#16a34a' },
 ]
 
 const layout = computed(() => buildForceLayout(props.graph.nodes || [], props.graph.edges || []))
@@ -142,10 +140,10 @@ const selectedProperties = computed(() => {
   if (!selectedNode.value?.properties) return []
   return Object.entries(selectedNode.value.properties)
     .filter(([, value]) => value !== null && value !== undefined && `${value}`.trim() !== '')
-    .slice(0, 6)
+    .slice(0, 8)
     .map(([key, value]) => ({
       key,
-      value: `${value}`.slice(0, 120),
+      value: `${value}`.slice(0, 160),
     }))
 })
 
@@ -159,19 +157,23 @@ watch(
 
 function shortLabel(value) {
   if (!value) return ''
-  return value.length > 6 ? `${value.slice(0, 6)}…` : value
+  return value.length > 8 ? `${value.slice(0, 8)}...` : value
 }
 
-function colorForType(type) {
+function normalizeCategory(value) {
+  if (typeof value !== 'string') return '未分类'
+  return CATEGORY_ANCHORS[value] ? value : '未分类'
+}
+
+function colorForCategory(category) {
   const palette = {
-    plaintiff: '#2563eb',
-    defendant: '#dc2626',
-    cause: '#d97706',
-    judgment: '#059669',
-    law: '#0f766e',
-    entity: '#7c3aed',
+    主体: '#2563eb',
+    客体: '#f59e0b',
+    事件: '#dc2626',
+    后果: '#16a34a',
+    未分类: '#7c3aed',
   }
-  return palette[type] || palette.entity
+  return palette[normalizeCategory(category)] || palette.未分类
 }
 
 function buildForceLayout(nodes, edges) {
@@ -179,30 +181,33 @@ function buildForceLayout(nodes, edges) {
     return { nodes: [], edges: [] }
   }
 
-  const typeIndexes = {}
   const state = nodes.map((node, index) => {
-    const type = node.type || 'entity'
-    const offset = typeIndexes[type] || 0
-    typeIndexes[type] = offset + 1
-    const anchor = ANCHORS[type] || ANCHORS.entity
+    const category = normalizeCategory(node.category || node.type)
+    const anchor = CATEGORY_ANCHORS[category]
     const angle = (Math.PI * 2 * index) / Math.max(nodes.length, 1)
+    const radius = 40 + (index % 3) * 18
 
     return {
       ...node,
-      x: anchor.x + Math.cos(angle) * 18,
-      y: anchor.y + Math.sin(angle) * 18,
+      category,
+      x: anchor.x + Math.cos(angle) * radius,
+      y: anchor.y + Math.sin(angle) * radius,
       vx: 0,
       vy: 0,
       anchorX: anchor.x,
       anchorY: anchor.y,
-      offset,
     }
   })
 
   const nodeMap = new Map(state.map((node) => [node.id, node]))
   const validEdges = edges.filter((edge) => nodeMap.has(edge.source) && nodeMap.has(edge.target))
+  const REPULSION = 2600
+  const TARGET_DISTANCE = 170
+  const SPRING = 0.02
+  const ANCHOR_FORCE = 0.01
+  const DAMPING = 0.88
 
-  for (let step = 0; step < 140; step += 1) {
+  for (let step = 0; step < 220; step += 1) {
     for (let i = 0; i < state.length; i += 1) {
       for (let j = i + 1; j < state.length; j += 1) {
         const a = state[i]
@@ -210,7 +215,7 @@ function buildForceLayout(nodes, edges) {
         const dx = a.x - b.x
         const dy = a.y - b.y
         const distance = Math.sqrt(dx * dx + dy * dy) || 1
-        const force = 380 / (distance * distance)
+        const force = REPULSION / (distance * distance)
         const fx = (dx / distance) * force
         const fy = (dy / distance) * force
         a.vx += fx
@@ -226,7 +231,7 @@ function buildForceLayout(nodes, edges) {
       const dx = target.x - source.x
       const dy = target.y - source.y
       const distance = Math.sqrt(dx * dx + dy * dy) || 1
-      const force = (distance - 92) * 0.012
+      const force = (distance - TARGET_DISTANCE) * SPRING
       const fx = (dx / distance) * force
       const fy = (dy / distance) * force
       source.vx += fx
@@ -236,12 +241,12 @@ function buildForceLayout(nodes, edges) {
     }
 
     for (const node of state) {
-      node.vx += (node.anchorX - node.x) * 0.018
-      node.vy += (node.anchorY - node.y) * 0.018
-      node.vx *= 0.84
-      node.vy *= 0.84
-      node.x = Math.min(VIEW_WIDTH - 30, Math.max(30, node.x + node.vx))
-      node.y = Math.min(VIEW_HEIGHT - 30, Math.max(30, node.y + node.vy))
+      node.vx += (node.anchorX - node.x) * ANCHOR_FORCE
+      node.vy += (node.anchorY - node.y) * ANCHOR_FORCE
+      node.vx *= DAMPING
+      node.vy *= DAMPING
+      node.x = Math.min(VIEW_WIDTH - 40, Math.max(40, node.x + node.vx))
+      node.y = Math.min(VIEW_HEIGHT - 40, Math.max(40, node.y + node.vy))
     }
   }
 
@@ -257,7 +262,7 @@ function buildForceLayout(nodes, edges) {
         x2: target.x,
         y2: target.y,
         labelX: (source.x + target.x) / 2,
-        labelY: (source.y + target.y) / 2 - 6,
+        labelY: (source.y + target.y) / 2 - 10,
       }
     }),
   }
@@ -334,18 +339,18 @@ function buildForceLayout(nodes, edges) {
 
 .graph-canvas {
   position: relative;
-  min-height: 320px;
+  min-height: 440px;
   border-radius: 16px;
   overflow: hidden;
   background:
-    radial-gradient(circle at top, rgba(59, 130, 246, 0.15), transparent 36%),
+    radial-gradient(circle at top, rgba(59, 130, 246, 0.12), transparent 34%),
     linear-gradient(180deg, #f8fafc 0%, #eef4ff 100%);
   border: 1px solid #dbeafe;
 }
 
 .graph-svg {
   width: 100%;
-  height: 320px;
+  height: 440px;
   display: block;
 }
 
@@ -359,7 +364,7 @@ function buildForceLayout(nodes, edges) {
   gap: 10px;
   font-size: 13px;
   color: #475569;
-  background: rgba(248, 250, 252, 0.9);
+  background: rgba(248, 250, 252, 0.92);
   z-index: 2;
 }
 
@@ -372,14 +377,14 @@ function buildForceLayout(nodes, edges) {
 }
 
 .edge-line {
-  stroke: rgba(71, 85, 105, 0.4);
-  stroke-width: 1.5;
+  stroke: rgba(71, 85, 105, 0.34);
+  stroke-width: 1.4;
 }
 
 .edge-label {
   text-anchor: middle;
-  font-size: 9px;
-  fill: #64748b;
+  font-size: 10px;
+  fill: #475569;
 }
 
 .node-group {
@@ -387,17 +392,19 @@ function buildForceLayout(nodes, edges) {
 }
 
 .node-circle {
-  stroke: rgba(255, 255, 255, 0.9);
-  stroke-width: 2;
+  stroke: rgba(255, 255, 255, 0.95);
+  stroke-width: 2.5;
   transition: transform 0.2s ease, stroke 0.2s ease;
 }
 
 .node-circle.active {
   stroke: #0f172a;
+  stroke-width: 3;
 }
 
 .node-label {
-  font-size: 9px;
+  font-size: 10px;
+  font-weight: 600;
   fill: #ffffff;
   text-anchor: middle;
   pointer-events: none;

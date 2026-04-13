@@ -4,7 +4,7 @@
       <div class="system-banner-main">
         <el-icon v-if="systemStatus.ready" class="banner-icon"><CircleCheckFilled /></el-icon>
         <el-icon v-else class="banner-icon rotating"><Loading /></el-icon>
-        <span>{{ systemStatus.ready ? '系统就绪' : '系统初始化中...' }}</span>
+        <span>{{ systemStatus.ready ? '系统已就绪' : '系统核心组件初始化中...' }}</span>
       </div>
       <div class="system-banner-meta">
         <span>Chroma {{ componentLabel(systemStatus.components.chroma) }}</span>
@@ -19,29 +19,38 @@
     <el-header class="app-header">
       <div class="header-left">
         <el-icon :size="22"><Promotion /></el-icon>
-        <span class="app-title">智能法律咨询系统</span>
+        <span class="app-title">法律智能工作台</span>
       </div>
       <div class="header-right">
-        <el-button text @click="handleSummary" :loading="summaryLoading" :disabled="!systemStatus.ready">
-          <el-icon><Document /></el-icon>对话总结
+        <span class="user-chip">{{ currentUsername }}</span>
+        <el-button
+          text
+          @click="handleSummary"
+          :loading="summaryLoading"
+          :disabled="!systemStatus.ready || !currentConversationId"
+        >
+          <el-icon><Document /></el-icon>总结摘要
         </el-button>
-        <el-button text @click="handleExport">
-          <el-icon><Download /></el-icon>导出对话
+        <el-button text @click="handleExport" :disabled="!currentConversationId">
+          <el-icon><Download /></el-icon>导出
         </el-button>
-        <el-button text type="danger" @click="handleClear">
-          <el-icon><Delete /></el-icon>清空
+        <el-button text type="danger" @click="handleClear" :disabled="!currentConversationId">
+          <el-icon><Delete /></el-icon>清空当前会话
         </el-button>
+        <el-button text type="danger" @click="handleLogout">退出登录</el-button>
       </div>
     </el-header>
 
     <el-container class="main-area">
-      <el-aside width="220px" class="side-panel left-panel">
+      <el-aside width="260px" class="side-panel left-panel">
         <SessionList
-          :sessions="sessions"
-          :current-id="currentSessionId"
-          @create="createSession"
-          @switch="switchSession"
-          @delete="deleteSession"
+          :sessions="conversations"
+          :current-id="currentConversationId"
+          :active-summary="currentConversation?.case_summary || ''"
+          @create="createNewConversation"
+          @switch="switchConversation"
+          @rename="promptRenameConversation"
+          @delete="removeConversation"
         />
       </el-aside>
 
@@ -49,16 +58,24 @@
         <div v-if="!systemStatus.ready" class="init-overlay">
           <div class="init-card">
             <el-icon class="init-icon rotating"><Loading /></el-icon>
-            <div class="init-title">系统初始化中...</div>
+            <div class="init-title">系统核心组件初始化中...</div>
             <div class="init-subtitle">
-              正在预热向量库、Neo4j、本地模型与 Celery，请稍候。
+              正在预热 Chroma、Neo4j、本地模型与 Celery，输入框将在全部组件可用后自动解锁。
             </div>
           </div>
         </div>
 
         <el-scrollbar ref="scrollRef" class="chat-scroll">
           <div class="message-list" ref="messageListRef">
-            <ChatMessage v-for="(message, index) in messages" :key="index" :msg="message" />
+            <div v-if="!messages.length" class="empty-state">
+              <div class="empty-title">发起新的法律咨询</div>
+              <div class="empty-subtitle">
+                从左侧选择历史会话，或创建一个新会话后开始提问。
+              </div>
+            </div>
+
+            <ChatMessage v-for="message in messages" :key="message.id || message.key" :msg="message" />
+
             <div v-if="sending" class="chat-message bot-msg loading-msg">
               <div class="avatar">
                 <el-avatar :size="36" style="background: #67c23a">
@@ -75,20 +92,32 @@
         </el-scrollbar>
 
         <div class="input-area" :class="{ locked: !systemStatus.ready }">
-          <el-input
-            v-model="inputText"
-            type="textarea"
-            :rows="2"
-            :disabled="!systemStatus.ready || sending"
-            :placeholder="systemStatus.ready ? '请输入您的问题，Enter 发送，Shift+Enter 换行' : '系统初始化中，输入框暂时锁定...'"
-            resize="none"
-            @keydown="handleKeydown"
-          />
+          <div class="input-stack">
+            <div class="mode-switch-row">
+              <span class="mode-switch-label">精准案情梳理</span>
+              <el-switch
+                v-model="proactiveGraphMode"
+                :disabled="sending || !currentConversationId"
+                inline-prompt
+                active-text="开"
+                inactive-text="关"
+              />
+            </div>
+            <el-input
+              v-model="inputText"
+              type="textarea"
+              :rows="2"
+              :disabled="!systemStatus.ready || sending || !currentConversationId"
+              :placeholder="inputPlaceholder"
+              resize="none"
+              @keydown="handleKeydown"
+            />
+          </div>
           <el-button
             type="primary"
-            @click="send"
+            @click="() => sendImpl()"
             :loading="sending"
-            :disabled="!systemStatus.ready || !inputText.trim()"
+            :disabled="!systemStatus.ready || !inputText.trim() || !currentConversationId"
           >
             发送
           </el-button>
@@ -114,30 +143,51 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import {
+  CircleCheckFilled,
+  Delete,
+  Document,
+  Download,
+  Loading,
+  Promotion,
+  Service,
+} from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import SessionList from './components/SessionList.vue'
 import {
-  getGraphSubgraph,
-  getSummary,
+  clearConversationMessages,
+  createConversation,
+  deleteConversation,
+  getConversationGraph,
+  getConversationMessages,
+  getConversationSummary,
+  getConversations,
   getSystemStatus,
-  resetDialog,
   sendMessage,
   submitFeedback,
+  updateConversationTitle,
 } from './api/index.js'
+import { clearAuthSession, getStoredUser } from './utils/auth.js'
 
+const router = useRouter()
+
+const conversations = ref([])
+const currentConversationId = ref(null)
+const currentSessionId = ref('')
 const messages = ref([])
 const inputText = ref('')
+const proactiveGraphMode = ref(true)
 const sending = ref(false)
 const summaryLoading = ref(false)
-const sessions = ref([])
-const currentSessionId = ref('')
 const scrollRef = ref(null)
 const messageListRef = ref(null)
-const turnIndex = ref(0)
 const statusTimer = ref(null)
+const graphRefreshTimer = ref(null)
+const graphRefreshStopTimer = ref(null)
 const graphSidebarCollapsed = ref(false)
 const latestGraphRequestId = ref(0)
 
@@ -168,29 +218,560 @@ const currentGraph = reactive({
   error: '',
 })
 
-onMounted(() => {
-  loadSessions()
+const currentUsername = computed(() => getStoredUser()?.username || '已登录用户')
+const currentConversation = computed(() =>
+  conversations.value.find((item) => item.id === currentConversationId.value) || null
+)
+
+const inputPlaceholder = computed(() => {
+  if (!systemStatus.ready) return '系统初始化中，输入框暂时锁定。'
+  if (!currentConversationId.value) return '请先创建或选择一个会话。'
+  return '请输入法律问题，Enter 发送，Shift + Enter 换行。'
+})
+
+onMounted(async () => {
   startSystemStatusPolling()
+  await initializeConversations()
 })
 
 onUnmounted(() => {
   stopSystemStatusPolling()
+  stopGraphRefreshPolling()
 })
 
 function componentLabel(value) {
-  return value === 'connected' ? 'connected' : 'loading'
+  return value === 'connected' ? '已连接' : '加载中'
 }
 
-function startSystemStatusPolling() {
-  refreshSystemStatus()
-  if (statusTimer.value) clearInterval(statusTimer.value)
-  statusTimer.value = setInterval(refreshSystemStatus, 1000)
+function sortConversations(list) {
+  return [...list].sort((left, right) => {
+    const leftTime = new Date(left.updated_at || left.created_at || 0).getTime()
+    const rightTime = new Date(right.updated_at || right.created_at || 0).getTime()
+    return rightTime - leftTime
+  })
 }
 
-function stopSystemStatusPolling() {
-  if (statusTimer.value) {
-    clearInterval(statusTimer.value)
-    statusTimer.value = null
+function setConversations(list) {
+  conversations.value = sortConversations(list)
+}
+
+function upsertConversationLocal(conversation) {
+  if (!conversation) return
+  const next = [...conversations.value]
+  const index = next.findIndex((item) => item.id === conversation.id)
+  if (index >= 0) next[index] = { ...next[index], ...conversation }
+  else next.push(conversation)
+  setConversations(next)
+}
+
+function removeConversationLocal(conversationId) {
+  setConversations(conversations.value.filter((item) => item.id !== conversationId))
+}
+
+function touchConversationLocal(conversationId, patch = {}) {
+  const target = conversations.value.find((item) => item.id === conversationId)
+  if (!target) return
+  upsertConversationLocal({
+    ...target,
+    ...patch,
+    updated_at: new Date().toISOString(),
+  })
+}
+
+function resetAnalysis() {
+  currentAnalysis.actions = []
+  currentAnalysis.sources = []
+}
+
+function resetGraph() {
+  currentGraph.query = ''
+  currentGraph.nodes = []
+  currentGraph.edges = []
+  currentGraph.tokens = []
+  currentGraph.generatedAt = ''
+  currentGraph.loading = false
+  currentGraph.error = ''
+}
+
+function stopGraphRefreshPolling() {
+  if (graphRefreshTimer.value) {
+    clearInterval(graphRefreshTimer.value)
+    graphRefreshTimer.value = null
+  }
+  if (graphRefreshStopTimer.value) {
+    clearTimeout(graphRefreshStopTimer.value)
+    graphRefreshStopTimer.value = null
+  }
+}
+
+function buildMessageViewModel(message, index = 0) {
+  const metadata = message.metadata || {}
+  return {
+    id: message.id || `${message.role}-${index}`,
+    key: `${message.id || 'message'}-${index}`,
+    role: message.role === 'assistant' ? 'assistant' : 'user',
+    content: message.content || '',
+    time: formatTime(message.created_at),
+    sources: metadata.sources || [],
+    agentActions: metadata.agent_actions || [],
+    pending: false,
+  }
+}
+
+function syncCurrentAnalysisFromMessages() {
+  resetAnalysis()
+  const latestAssistant = [...messages.value].reverse().find((item) => item.role !== 'user')
+  if (!latestAssistant) return
+  currentAnalysis.actions = latestAssistant.agentActions || []
+  currentAnalysis.sources = latestAssistant.sources || []
+}
+
+function applyConversationPayload(payload) {
+  const conversation = payload?.conversation
+  const backendMessages = Array.isArray(payload?.messages) ? payload.messages : []
+
+  if (conversation) {
+    upsertConversationLocal(conversation)
+    currentConversationId.value = conversation.id
+    currentSessionId.value = conversation.session_id || ''
+  }
+
+  messages.value = backendMessages.map((message, index) => buildMessageViewModel(message, index))
+  syncCurrentAnalysisFromMessages()
+  scrollBottom()
+}
+
+async function initializeConversations() {
+  try {
+    await refreshConversationList()
+    if (!conversations.value.length) {
+      await createNewConversation({ silent: true })
+      return
+    }
+
+    await switchConversation(conversations.value[0].id)
+  } catch (error) {
+    console.error('Failed to initialize conversations:', error)
+    ElMessage.error('加载会话列表失败。')
+  }
+}
+
+async function refreshConversationList(preferredConversationId = null) {
+  const { data } = await getConversations()
+  const nextList = Array.isArray(data.conversations) ? data.conversations : []
+  setConversations(nextList)
+
+  const activeId = preferredConversationId || currentConversationId.value
+  const active = conversations.value.find((item) => item.id === activeId)
+  if (active) {
+    currentConversationId.value = active.id
+    currentSessionId.value = active.session_id || ''
+  }
+}
+
+async function createNewConversation(options = {}) {
+  try {
+    const { data } = await createConversation({})
+    const conversation = data.conversation
+    upsertConversationLocal(conversation)
+    await switchConversation(conversation.id)
+    if (!options.silent) {
+      ElMessage.success('已创建新会话。')
+    }
+  } catch (error) {
+    console.error('Failed to create conversation:', error)
+    ElMessage.error('创建会话失败。')
+  }
+}
+
+async function switchConversation(conversationId) {
+  if (!conversationId) return
+  stopGraphRefreshPolling()
+  try {
+    stopGraphRefreshPolling()
+    resetAnalysis()
+    resetGraph()
+    const { data } = await getConversationMessages(conversationId)
+    applyConversationPayload(data)
+    await fetchConversationGraph(conversationId)
+  } catch (error) {
+    console.error('Failed to load conversation messages:', error)
+    ElMessage.error('加载会话消息失败。')
+  }
+}
+
+async function promptRenameConversation(session) {
+  if (!session?.id) return
+
+  try {
+    const { value } = await ElMessageBox.prompt('请输入新的会话标题', '重命名会话', {
+      confirmButtonText: '确认',
+      cancelButtonText: '取消',
+      inputValue: session.title || '',
+      inputPattern: /\S+/,
+      inputErrorMessage: '标题不能为空',
+    })
+
+    const title = value.trim()
+    const { data } = await updateConversationTitle(session.id, title)
+    upsertConversationLocal(data.conversation)
+    if (currentConversationId.value === session.id) {
+      currentSessionId.value = data.conversation.session_id || currentSessionId.value
+    }
+    ElMessage.success('会话标题已更新。')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    console.error('Failed to rename conversation:', error)
+    ElMessage.error('更新会话标题失败。')
+  }
+}
+
+async function removeConversation(conversationId) {
+  if (!conversationId) return
+
+  ElMessageBox.confirm('确定删除该会话及其全部消息吗？', '删除确认', { type: 'warning' })
+    .then(async () => {
+      try {
+        await deleteConversation(conversationId)
+        removeConversationLocal(conversationId)
+
+        if (conversationId === currentConversationId.value) {
+          const nextConversation = conversations.value[0]
+          if (nextConversation) {
+            await switchConversation(nextConversation.id)
+          } else {
+            currentConversationId.value = null
+            currentSessionId.value = ''
+            messages.value = []
+            await createNewConversation({ silent: true })
+          }
+        }
+
+        ElMessage.success('会话已删除。')
+      } catch (error) {
+        console.error('Failed to delete conversation:', error)
+        ElMessage.error('删除会话失败。')
+      }
+    })
+    .catch(() => {})
+}
+
+async function fetchConversationGraph(conversationId, query = '', options = {}) {
+  if (!conversationId) {
+    resetGraph()
+    return
+  }
+
+  const requestId = ++latestGraphRequestId.value
+  const preserveData = Boolean(options.preserveData)
+  currentGraph.query = query || currentConversation.value?.title || `会话 ${conversationId} 案情图谱`
+  if (!preserveData) {
+    currentGraph.nodes = []
+    currentGraph.edges = []
+    currentGraph.tokens = []
+    currentGraph.generatedAt = ''
+  }
+  currentGraph.loading = !options.silent
+  currentGraph.error = ''
+
+  try {
+    const { data } = await getConversationGraph(conversationId)
+    if (requestId !== latestGraphRequestId.value) return
+    currentGraph.query = data.query || query || currentGraph.query
+    currentGraph.nodes = data.nodes || []
+    currentGraph.edges = data.edges || []
+    currentGraph.tokens = data.tokens || []
+    currentGraph.generatedAt = data.generated_at || ''
+  } catch (error) {
+    if (requestId !== latestGraphRequestId.value) return
+    currentGraph.error = error?.response?.data?.detail || '图谱加载失败。'
+  } finally {
+    if (requestId === latestGraphRequestId.value && !options.silent) {
+      currentGraph.loading = false
+    }
+  }
+}
+
+async function ensureConversationTitle(userText) {
+  if (!currentConversation.value) return
+  if ((currentConversation.value.title || '').trim()) return
+
+  const title = userText.slice(0, 15).trim()
+  if (!title) return
+
+  touchConversationLocal(currentConversation.value.id, { title })
+  try {
+    const { data } = await updateConversationTitle(currentConversation.value.id, title)
+    upsertConversationLocal(data.conversation)
+  } catch (error) {
+    console.error('Failed to set first message title:', error)
+  }
+}
+
+function startGraphRefreshPolling(conversationId, previousNodeCount, query = '') {
+  stopGraphRefreshPolling()
+  if (!conversationId) return
+
+  graphRefreshTimer.value = setInterval(async () => {
+    try {
+      await fetchConversationGraph(conversationId, query, { preserveData: true, silent: true })
+      if ((currentGraph.nodes?.length || 0) !== previousNodeCount) {
+        stopGraphRefreshPolling()
+      }
+    } catch (error) {
+      console.error('Graph refresh polling failed:', error)
+      stopGraphRefreshPolling()
+    }
+  }, 3000)
+
+  graphRefreshStopTimer.value = setTimeout(() => {
+    stopGraphRefreshPolling()
+  }, 15000)
+}
+
+function updatePendingMessage(tempId, patch = {}) {
+  const target = messages.value.find((item) => item.id === tempId)
+  if (!target) return
+  Object.assign(target, patch)
+}
+
+function removeMessageById(messageId) {
+  messages.value = messages.value.filter((item) => item.id !== messageId)
+}
+
+async function createCaseForResend() {
+  const { data } = await createConversation({})
+  const conversation = data.conversation
+  upsertConversationLocal(conversation)
+  await switchConversation(conversation.id)
+  ElMessage.success('已为新法律问题建立独立卷宗。')
+  return conversation
+}
+
+async function resolveCaseBoundarySuggestion(message) {
+  try {
+    await ElMessageBox.confirm(
+      message || '发现您似乎开启了一个新的法律问题，是否新建独立卷宗？',
+      '检测到新案件',
+      {
+        confirmButtonText: '是，新建卷宗',
+        cancelButtonText: '否，继续在当前补充',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      }
+    )
+    return 'new_case'
+  } catch (error) {
+    if (error === 'cancel') {
+      return 'stay_current'
+    }
+    if (error === 'close') {
+      return 'cancelled'
+    }
+    throw error
+  }
+}
+
+async function sendImpl(textOverride = null, options = {}) {
+  if (!systemStatus.ready) {
+    ElMessage.warning('系统仍在初始化，请稍后。')
+    return
+  }
+
+  const baseConversationId = options.conversationId || currentConversationId.value
+  if (!baseConversationId) {
+    ElMessage.warning('请先新建或选择一份卷宗。')
+    return
+  }
+
+  const finalStr = (typeof textOverride === 'string' ? textOverride : inputText.value) || ''
+  const text = finalStr.trim()
+  if (!text || sending.value) return
+
+  const forceCurrentCase = Boolean(options.forceCurrentCase)
+  const tempKey = `temp-user-${Date.now()}`
+  const nowIso = new Date().toISOString()
+  const previousNodeCount = currentGraph.nodes?.length || 0
+
+  messages.value.push({
+    id: tempKey,
+    key: tempKey,
+    role: 'user',
+    content: text,
+    time: formatTime(nowIso),
+    sources: [],
+    agentActions: [],
+    pending: true,
+  })
+
+  inputText.value = ''
+  sending.value = true
+  graphSidebarCollapsed.value = false
+  touchConversationLocal(baseConversationId)
+  currentGraph.loading = true
+  currentGraph.error = ''
+  currentGraph.query = text
+  scrollBottom()
+
+  try {
+    const initRes = await sendMessage(text, baseConversationId, {
+      forceCurrentCase,
+      isPreciseMode: proactiveGraphMode.value,
+      proactiveGraphMode: proactiveGraphMode.value,
+    })
+    const initData = initRes?.data || {}
+
+    if (initData.action === 'suggest_new_case') {
+      removeMessageById(tempKey)
+      const nextAction = await resolveCaseBoundarySuggestion(initData.message)
+      sending.value = false
+      currentGraph.loading = false
+
+      if (nextAction === 'new_case') {
+        const newConversation = await createCaseForResend()
+        if (newConversation?.id) {
+          await sendImpl(text, { conversationId: newConversation.id, forceCurrentCase: false })
+        }
+        return
+      }
+
+      if (nextAction === 'cancelled') {
+        return
+      }
+
+      await sendImpl(text, { conversationId: baseConversationId, forceCurrentCase: true })
+      return
+    }
+
+    const data = initData.task_id ? (await initRes).data : initData
+    updatePendingMessage(tempKey, { pending: false })
+
+    messages.value.push({
+      id: `assistant-${Date.now()}`,
+      key: `assistant-${Date.now()}`,
+      role: 'assistant',
+      content: data.response || '未返回有效内容。',
+      time: formatTime(new Date().toISOString()),
+      sources: data.sources || [],
+      agentActions: data.agent_actions || [],
+      pending: false,
+    })
+
+    currentAnalysis.actions = data.agent_actions || []
+    currentAnalysis.sources = data.sources || []
+    void ensureConversationTitle(text)
+    await refreshConversationList(baseConversationId)
+    await fetchConversationGraph(baseConversationId, text)
+    startGraphRefreshPolling(baseConversationId, previousNodeCount, text)
+  } catch (error) {
+    console.error('Failed to send message:', error)
+    updatePendingMessage(tempKey, { pending: false })
+    messages.value.push({
+      id: `assistant-error-${Date.now()}`,
+      key: `assistant-error-${Date.now()}`,
+      role: 'assistant',
+      content: `请求失败：${error.message || '未知错误'}`,
+      time: formatTime(new Date().toISOString()),
+      sources: [],
+      agentActions: [],
+      pending: false,
+    })
+  } finally {
+    sending.value = false
+    currentGraph.loading = false
+    scrollBottom()
+  }
+}
+
+function handleKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    void sendImpl()
+  }
+}
+
+async function handleSummary() {
+  if (!currentConversationId.value) return
+  stopGraphRefreshPolling()
+
+  summaryLoading.value = true
+  try {
+    const { data } = await getConversationSummary(currentConversationId.value)
+    messages.value.push({
+      id: `summary-${Date.now()}`,
+      key: `summary-${Date.now()}`,
+      role: 'assistant',
+      content: `会话摘要：\n${data.summary}`,
+      time: formatTime(new Date().toISOString()),
+      sources: [],
+      agentActions: [],
+      pending: false,
+    })
+    scrollBottom()
+    ElMessage.success('摘要生成完成。')
+  } catch (error) {
+    console.error('Failed to summarize conversation:', error)
+    ElMessage.error('生成摘要失败。')
+  } finally {
+    summaryLoading.value = false
+  }
+}
+
+function handleExport() {
+  if (!currentConversationId.value) return
+
+  const payload = {
+    conversation_id: currentConversationId.value,
+    session_id: currentSessionId.value,
+    messages: messages.value,
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `会话记录_${currentConversationId.value}.json`
+  link.click()
+  URL.revokeObjectURL(link.href)
+  ElMessage.success('会话已导出。')
+}
+
+function handleLogout() {
+  clearAuthSession()
+  ElMessage.success('已退出登录。')
+  router.replace('/login')
+}
+
+function handleClear() {
+  if (!currentConversationId.value) return
+
+  ElMessageBox.confirm('确定清空当前会话的全部消息吗？', '清空确认', { type: 'warning' })
+    .then(async () => {
+      try {
+        await clearConversationMessages(currentConversationId.value)
+        messages.value = []
+        resetAnalysis()
+        resetGraph()
+        ElMessage.success('当前会话已清空。')
+      } catch (error) {
+        console.error('Failed to clear conversation:', error)
+        ElMessage.error('清空会话失败。')
+      }
+    })
+    .catch(() => {})
+}
+
+async function handleFeedback({ rating, comment }) {
+  try {
+    await submitFeedback({
+      session_id: currentSessionId.value,
+      turn_index: messages.value.filter((message) => message.role === 'user').length,
+      rating,
+      comment,
+      feedback_type: 'general',
+    })
+    ElMessage.success('反馈已提交。')
+  } catch (error) {
+    console.error('Failed to submit feedback:', error)
+    ElMessage.error('提交反馈失败。')
   }
 }
 
@@ -214,251 +795,30 @@ async function refreshSystemStatus() {
     if (systemStatus.ready) {
       stopSystemStatusPolling()
     }
-  } catch {
+  } catch (error) {
+    console.error('Failed to fetch system status:', error)
     systemStatus.status = 'loading'
     systemStatus.ready = false
     systemStatus.healthy = false
   }
 }
 
-function genId() {
-  return `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+function startSystemStatusPolling() {
+  void refreshSystemStatus()
+  if (statusTimer.value) clearInterval(statusTimer.value)
+  statusTimer.value = setInterval(refreshSystemStatus, 1000)
 }
 
-function loadSessions() {
-  const stored = localStorage.getItem('vue_sessions')
-  if (stored) {
-    sessions.value = JSON.parse(stored)
-    if (sessions.value.length && !currentSessionId.value) {
-      switchSession(sessions.value[0].id)
-    }
-  } else {
-    createSession()
+function stopSystemStatusPolling() {
+  if (statusTimer.value) {
+    clearInterval(statusTimer.value)
+    statusTimer.value = null
   }
 }
 
-function saveSessions() {
-  localStorage.setItem('vue_sessions', JSON.stringify(sessions.value))
-}
-
-function createSession() {
-  const timestamp = Date.now()
-  const session = {
-    id: genId(),
-    name: `会话 ${new Date(timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
-    lastActive: timestamp,
-  }
-  sessions.value.unshift(session)
-  saveSessions()
-  switchSession(session.id)
-}
-
-function switchSession(id) {
-  if (id === currentSessionId.value) return
-  currentSessionId.value = id
-  messages.value = []
-  turnIndex.value = 0
-  resetAnalysis()
-  resetGraph()
-
-  const stored = localStorage.getItem(`chat_${id}`)
-  if (stored) {
-    messages.value = JSON.parse(stored)
-    turnIndex.value = messages.value.filter((message) => message.role === 'user').length
-  }
-
-  if (!messages.value.length) pushWelcome()
-  scrollBottom()
-}
-
-function deleteSession(id) {
-  ElMessageBox.confirm('确定删除此会话吗？', '提示', { type: 'warning' })
-    .then(() => {
-      sessions.value = sessions.value.filter((session) => session.id !== id)
-      localStorage.removeItem(`chat_${id}`)
-      saveSessions()
-
-      if (id === currentSessionId.value) {
-        if (sessions.value.length) switchSession(sessions.value[0].id)
-        else createSession()
-      }
-
-      ElMessage.success('已删除')
-    })
-    .catch(() => {})
-}
-
-function pushWelcome() {
-  messages.value.push({
-    role: 'bot',
-    content:
-      '您好，我是智能法律咨询助手，可以为您提供法条检索、案例查询和综合法律分析建议。系统完成初始化后即可开始提问。',
-    time: now(),
-  })
-}
-
-function now() {
-  return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
-}
-
-function resetAnalysis() {
-  currentAnalysis.actions = []
-  currentAnalysis.sources = []
-}
-
-function resetGraph() {
-  currentGraph.query = ''
-  currentGraph.nodes = []
-  currentGraph.edges = []
-  currentGraph.tokens = []
-  currentGraph.generatedAt = ''
-  currentGraph.loading = false
-  currentGraph.error = ''
-}
-
-async function fetchGraph(query) {
-  const requestId = ++latestGraphRequestId.value
-  currentGraph.query = query
-  currentGraph.nodes = []
-  currentGraph.edges = []
-  currentGraph.tokens = []
-  currentGraph.generatedAt = ''
-  currentGraph.loading = true
-  currentGraph.error = ''
-
-  try {
-    const { data } = await getGraphSubgraph(query)
-    if (requestId !== latestGraphRequestId.value) return
-    currentGraph.query = data.query || query
-    currentGraph.nodes = data.nodes || []
-    currentGraph.edges = data.edges || []
-    currentGraph.tokens = data.tokens || []
-    currentGraph.generatedAt = data.generated_at || ''
-  } catch (error) {
-    if (requestId !== latestGraphRequestId.value) return
-    currentGraph.error = error?.response?.data?.detail || '图谱接口调用失败'
-  } finally {
-    if (requestId === latestGraphRequestId.value) {
-      currentGraph.loading = false
-    }
-  }
-}
-
-async function send() {
-  if (!systemStatus.ready) {
-    ElMessage.warning('系统仍在初始化，请稍候。')
-    return
-  }
-
-  const text = inputText.value.trim()
-  if (!text || sending.value) return
-
-  messages.value.push({ role: 'user', content: text, time: now() })
-  inputText.value = ''
-  sending.value = true
-  graphSidebarCollapsed.value = false
-  scrollBottom()
-  void fetchGraph(text)
-
-  try {
-    const { data } = await sendMessage(text, currentSessionId.value)
-    const botMessage = {
-      role: 'bot',
-      content: data.response,
-      time: now(),
-      sources: data.sources || [],
-      agentActions: data.agent_actions || [],
-    }
-    messages.value.push(botMessage)
-    turnIndex.value += 1
-    currentAnalysis.actions = data.agent_actions || []
-    currentAnalysis.sources = data.sources || []
-
-    const session = sessions.value.find((item) => item.id === currentSessionId.value)
-    if (session) {
-      session.lastActive = Date.now()
-      saveSessions()
-    }
-
-    localStorage.setItem(`chat_${currentSessionId.value}`, JSON.stringify(messages.value))
-  } catch (error) {
-    messages.value.push({
-      role: 'bot',
-      content: `抱歉，请求失败，请检查后端服务是否启动。\n错误信息：${error.message || '未知错误'}`,
-      time: now(),
-    })
-  } finally {
-    sending.value = false
-    scrollBottom()
-  }
-}
-
-function handleKeydown(event) {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault()
-    send()
-  }
-}
-
-async function handleSummary() {
-  summaryLoading.value = true
-  try {
-    const { data } = await getSummary(currentSessionId.value)
-    messages.value.push({ role: 'bot', content: `对话总结：\n${data.summary}`, time: now() })
-    scrollBottom()
-    ElMessage.success('总结已生成')
-  } catch {
-    ElMessage.error('生成总结失败')
-  } finally {
-    summaryLoading.value = false
-  }
-}
-
-function handleExport() {
-  const blob = new Blob(
-    [JSON.stringify({ session_id: currentSessionId.value, messages: messages.value }, null, 2)],
-    { type: 'application/json' }
-  )
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(blob)
-  link.download = `对话记录_${new Date().toISOString().slice(0, 10)}.json`
-  link.click()
-  URL.revokeObjectURL(link.href)
-  ElMessage.success('已导出')
-}
-
-function handleClear() {
-  ElMessageBox.confirm('确定清空当前对话吗？', '提示', { type: 'warning' })
-    .then(async () => {
-      messages.value = []
-      localStorage.removeItem(`chat_${currentSessionId.value}`)
-      turnIndex.value = 0
-      resetAnalysis()
-      resetGraph()
-      try {
-        await resetDialog(currentSessionId.value)
-      } catch {
-        // Ignore reset errors for local cleanup.
-      }
-      pushWelcome()
-      ElMessage.success('已清空')
-    })
-    .catch(() => {})
-}
-
-async function handleFeedback({ rating, comment }) {
-  try {
-    await submitFeedback({
-      session_id: currentSessionId.value,
-      turn_index: turnIndex.value,
-      rating,
-      comment,
-      feedback_type: 'general',
-    })
-    ElMessage.success('感谢您的反馈')
-  } catch {
-    ElMessage.error('提交失败')
-  }
+function formatTime(value) {
+  if (!value) return ''
+  return new Date(value).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
 }
 
 function scrollBottom() {
@@ -564,7 +924,20 @@ body,
 
 .header-right {
   display: flex;
+  align-items: center;
   gap: 4px;
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .main-area {
@@ -609,6 +982,52 @@ body,
   margin: 0 auto;
 }
 
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 260px;
+  text-align: center;
+  color: #6b7280;
+}
+
+.empty-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #1f2937;
+  line-height: 1.4;
+}
+
+.empty-title {
+  font-size: 0;
+}
+
+.empty-title::after {
+  content: '新建卷宗';
+  font-size: 18px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.empty-subtitle {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 420px;
+}
+
+.empty-subtitle {
+  font-size: 0;
+}
+
+.empty-subtitle::after {
+  content: '从左侧选择我的案件卷宗，或先新建一份独立卷宗后开始法律咨询。';
+  font-size: 13px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
 .input-area {
   display: flex;
   gap: 12px;
@@ -624,6 +1043,26 @@ body,
 
 .input-area .el-textarea {
   flex: 1;
+}
+
+.input-stack {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mode-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mode-switch-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
 }
 
 .input-area .el-button {

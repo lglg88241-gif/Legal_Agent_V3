@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import logging
@@ -295,7 +296,18 @@ def ingest_graph(graph_records: list[dict[str, Any]]) -> tuple[int, int, int]:
     return success_count, llm_failures, graph_failures
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Ingest PDF case files into Chroma and Neo4j.")
+    parser.add_argument(
+        "--skip-graph",
+        action="store_true",
+        help="Skip GLM/Neo4j graph extraction and only rebuild Chroma case vectors.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     persist_dir = resolve_persist_dir(settings.CHROMA_PERSIST_DIR)
     prepare_persist_dir(persist_dir)
 
@@ -303,7 +315,12 @@ def main() -> None:
     embeddings = init_embeddings()
     ingest_vectors(persist_dir, vector_documents, embeddings)
 
-    graph_success, llm_failures, graph_failures = ingest_graph(graph_records)
+    if args.skip_graph:
+        graph_success, llm_failures, graph_failures = 0, 0, 0
+        logger.info("Skip-graph mode enabled. Graph extraction was skipped by CLI flag.")
+    else:
+        graph_success, llm_failures, graph_failures = ingest_graph(graph_records)
+
     logger.info(
         "Processed %s PDF files, stored %s vector chunks into %s/%s, graph upserts=%s, llm_or_json_failures=%s, graph_failures=%s",
         pdf_count,
