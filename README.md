@@ -88,4 +88,63 @@
 - 带上 `有没有案例`、`有没有指导案例`
 - 带上 `法院怎么判`、`判决结果是什么`
 - 尽量不要只问非常抽象的短句，例如 `劳动关系怎么认定`
-- 如果首轮没有命中，就把问题补充成“事实 + 法律问题 + 想看案例”
+- 如果首轮没有命中，就把问题补充成”事实 + 法律问题 + 想看案例”
+
+---
+
+## 架构重构记录：高内存崩溃与 Redis 连环故障排查
+
+### 故障根因分析
+
+本项目在 Windows 本地环境下运行时，曾出现以下连环崩溃：
+
+```
+内存溢出（OOM）
+  → Redis bgsave 失败
+  → MISCONF Redis is configured to save RDB snapshots, but is currently not able to persist on disk
+  → Celery Worker ResponseError 连环崩溃
+  → 整个异步任务队列瘫痪
+```
+
+**三个独立的根因叠加触发了这次崩溃：**
+
+#### 根因 1：ML 模型在进程启动时同步加载（最大内存元凶）
+
+`ChromaManager` 原先使用 `__new__` 单例 + `_init_db()` 的模式，在模块被 **import 时立即初始化** HuggingFaceEmbeddings（约 500 MB）。Celery Worker 启动时同样触发了这个 import，加上 `BGEReranker` 的 CrossEncoder（约 800 MB），导致每个 Worker 进程在处理任何任务之前就已持有约 1.3 GB 的模型权重。Windows 上 Celery 使用 `spawn` 方式创建进程，**每个并发 worker 进程都独立持有一份完整模型副本**，内存随并发数线性放大。
+
+**修复方案**：将 `ChromaManager` 改造为延迟初始化（lazy init）。`__new__` 只注册实例，实际的模型加载推迟到首次 **属性访问** 时，并通过双重检查加锁（Double-Checked Locking）保证线程安全。Celery Worker 现在可以完成启动、注册任务并连接 broker，而不需要预先占用任何 ML 模型内存。
+
+#### 根因 2：`celery_app.py` 中多次独立调用 `asyncio.run()`
+
+原先每个 Celery 任务内调用了 4 次 `asyncio.run()`（分别用于加载对话历史、加载摘要、加载图谱内存、调用 agent），每次调用都会**创建并销毁一个完整的事件循环**。高并发时这造成了大量线程池竞争，也是内存额外开销的来源之一。
+
+**修复方案**：将多个独立的 IO 操作合并到 `_run_task_async()` 单一协程中，只调用一次 `asyncio.run()`，全程共享同一事件循环。
+
+#### 根因 3：Redis 未配置 `stop-writes-on-bgsave-error no`
+
+Redis 默认在 bgsave 失败（通常是内存不足）后会**拒绝所有写操作**（MISCONF 错误），这是一种过于激进的自我保护机制。Celery 需要向 Redis 写入任务状态，一旦被拒绝，整个任务队列就会崩溃。
+
+**修复方案（两层防护）**：
+1. **运行时配置**：执行 `redis-cli CONFIG SET save “”` 和 `redis-cli CONFIG SET stop-writes-on-bgsave-error no`，解除 bgsave 触发条件和写入锁定。
+2. **代码层降级**：重写 `AsyncRedisSaver`（`app/memory/redis_mgr.py`），在 `aget_tuple` 和 `aput` 方法中用 `try/except` 捕获所有 Redis 异常，**静默降级为无状态模式**，而非将异常向上传播导致任务失败。
+
+### 重构决策汇总
+
+| 模块 | 变更内容 | 目的 |
+|------|----------|------|
+| `app/database/chroma_mgr.py` | `__new__` 单例改为延迟初始化，属性用 `_ensure_initialized()` 惰性触发 | 消除 Worker 启动时的模型预加载内存峰值 |
+| `app/celery_app.py` | 合并多次 `asyncio.run()` 为单一协程；新增 `worker_concurrency=2`、`task_soft_time_limit` 等保护参数 | 降低内存放大倍数，防止无限并发吃光内存 |
+| `app/memory/redis_mgr.py` | 所有 Redis 操作包裹 `try/except`，失败时 WARNING 降级而非抛出异常 | 解除 Redis MISCONF 对 Celery 任务链的致命阻塞 |
+| `start.md` | 新增 Redis 防护配置步骤、Celery 推荐启动命令和内存占用参考表 | 提供可操作的运维 SOP |
+
+### 给未来开发者的避坑指南
+
+1. **永远不要在模块顶层实例化 ML 模型**。将实际加载推迟到首次调用，否则每个 `import` 该模块的进程（包括 Celery Worker、测试进程）都会静默地吃掉几百 MB 内存。
+
+2. **在 Windows/spawn 模式下，Celery 并发数 ≠ 线程数，而是进程内存的放大器**。并发 4 个 worker、每个持有 1.3 GB 模型 = 5.2 GB，在 8 GB 机器上必然 OOM。使用 `--concurrency 2` 启动，或考虑将模型移出 Worker 进程，改用专用推理服务（vLLM、TorchServe）提供 API。
+
+3. **Redis 的 `stop-writes-on-bgsave-error yes`（默认值）是生产级数据库的保护措施，不适合本地开发环境**。本地开发时请始终执行 `CONFIG SET save “”` 和 `CONFIG SET stop-writes-on-bgsave-error no`。
+
+4. **不要在 Celery 同步任务函数中多次调用 `asyncio.run()`**。每次调用都新建事件循环，非常低效。将所有异步 IO 聚合到一个协程，只在任务入口处调用一次 `asyncio.run()`。
+
+5. **任何使用 Redis 作为 checkpoint/状态存储的中间层都应该做降级处理**。Redis 是易受系统内存影响的组件，业务逻辑不应直接依赖其写入成功。

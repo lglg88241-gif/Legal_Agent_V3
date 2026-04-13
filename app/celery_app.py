@@ -36,6 +36,21 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="Asia/Shanghai",
     enable_utc=True,
+    # --- 内存与并发保护 ---
+    # 线程模式下限制并发数，防止多任务同时加载 ML 模型撑爆内存
+    worker_concurrency=2,
+    # 每个 worker 子进程处理完 N 个任务后自动回收，防止内存泄漏累积
+    worker_max_tasks_per_child=50,
+    # 任务软/硬超时（秒），防止卡死的任务永久占用内存
+    task_soft_time_limit=120,
+    task_time_limit=180,
+    # 结果后端写入失败时不抛出异常（Redis MISCONF 降级保护）
+    task_ignore_result=False,
+    result_backend_transport_options={
+        "retry_policy": {
+            "timeout": 5.0,
+        }
+    },
 )
 
 
@@ -53,93 +68,61 @@ def _create_celery_session_factory() -> tuple[Any, async_sessionmaker[AsyncSessi
     return celery_engine, session_factory
 
 
-async def load_chat_history(
-    conversation_id: int,
-    limit: int = 6,
-) -> str:
-    celery_engine, session_factory = _create_celery_session_factory()
+async def _run_task_async(conversation_id: int) -> dict[str, Any]:
+    """
+    将原本分散的多个 asyncio.run() 调用合并到单一协程中统一执行。
 
+    原来的实现在每个 asyncio.run() 之间都会销毁并重建事件循环，
+    高并发时会造成大量线程池资源竞争和不必要的开销。
+    合并后全程共享同一个事件循环，IO 并发效率更高。
+    """
+    celery_engine, session_factory = _create_celery_session_factory()
     try:
         await ensure_storage_schema(bind_engine=celery_engine)
         async with session_factory() as db:
             messages = await list_recent_conversation_messages(
                 db,
                 conversation_id=conversation_id,
-                limit=limit,
+                limit=6,
             )
-    finally:
-        await celery_engine.dispose()
-
-    lines = []
-    for message in messages:
-        role = "User" if message.role == "user" else "Assistant"
-        content = " ".join((message.content or "").strip().split())
-        if not content:
-            continue
-        lines.append(f"{role}: {content}")
-    return "\n".join(lines)
-
-
-async def load_latest_user_input(conversation_id: int, limit: int = 12) -> str:
-    celery_engine, session_factory = _create_celery_session_factory()
-
-    try:
-        await ensure_storage_schema(bind_engine=celery_engine)
-        async with session_factory() as db:
-            messages = await list_recent_conversation_messages(
-                db,
-                conversation_id=conversation_id,
-                limit=limit,
-            )
-    finally:
-        await celery_engine.dispose()
-
-    for message in reversed(messages):
-        if message.role == "user":
+        lines = []
+        for message in messages:
+            role = "User" if message.role == "user" else "Assistant"
             content = " ".join((message.content or "").strip().split())
             if content:
-                return content
-    return ""
+                lines.append(f"{role}: {content}")
+        chat_history = "\n".join(lines)
 
-
-async def load_graph_memory(conversation_id: int) -> str:
-    return await format_graph_memory(conversation_id=conversation_id)
-
-
-async def load_case_summary(conversation_id: int) -> str:
-    celery_engine, session_factory = _create_celery_session_factory()
-
-    try:
         await ensure_storage_schema(bind_engine=celery_engine)
         async with session_factory() as db:
-            return await load_conversation_case_summary(db, conversation_id)
-    finally:
-        await celery_engine.dispose()
-
-
-async def persist_assistant_message(
-    conversation_id: int,
-    content: str,
-    metadata: dict[str, Any],
-) -> None:
-    celery_engine, session_factory = _create_celery_session_factory()
-
-    try:
-        await ensure_storage_schema(bind_engine=celery_engine)
-        async with session_factory() as db:
-            await store_message(
+            messages_12 = await list_recent_conversation_messages(
                 db,
                 conversation_id=conversation_id,
-                role="assistant",
-                content=content,
-                metadata=metadata,
+                limit=12,
             )
-            await db.commit()
+        latest_user_input = ""
+        for message in reversed(messages_12):
+            if message.role == "user":
+                content = " ".join((message.content or "").strip().split())
+                if content:
+                    latest_user_input = content
+                    break
+
+        async with session_factory() as db:
+            case_summary = await load_conversation_case_summary(db, conversation_id)
+
+        graph_memory = await format_graph_memory(conversation_id=conversation_id)
+        return {
+            "chat_history": chat_history,
+            "latest_user_input": latest_user_input,
+            "case_summary": case_summary,
+            "graph_memory": graph_memory,
+        }
     finally:
         await celery_engine.dispose()
 
 
-async def persist_dialog_turn(
+async def _persist_dialog_turn_async(
     user_id: int,
     conversation_id: int,
     user_content: str,
@@ -148,14 +131,12 @@ async def persist_dialog_turn(
     case_summary: str = "",
 ) -> None:
     celery_engine, session_factory = _create_celery_session_factory()
-
     try:
         await ensure_storage_schema(bind_engine=celery_engine)
         async with session_factory() as db:
             conversation = await get_conversation_for_user(db, user_id, conversation_id)
             if conversation is None:
                 return
-
             await store_message(
                 db,
                 conversation_id=conversation_id,
@@ -164,10 +145,8 @@ async def persist_dialog_turn(
                 metadata={},
             )
             await maybe_update_conversation_title(db, conversation, user_content)
-
             if case_summary.strip():
                 await update_conversation_case_summary(db, conversation, case_summary)
-
             await store_message(
                 db,
                 conversation_id=conversation_id,
@@ -183,15 +162,34 @@ async def persist_dialog_turn(
 @celery_app.task(name="update_graph_task")
 def update_graph_task(conversation_id: int):
     try:
-        case_summary = asyncio.run(load_case_summary(conversation_id=conversation_id))
-        latest_user_input = asyncio.run(load_latest_user_input(conversation_id=conversation_id, limit=12))
-        update_result = asyncio.run(
-            refresh_case_graph(
+        async def _run():
+            celery_engine, session_factory = _create_celery_session_factory()
+            try:
+                await ensure_storage_schema(bind_engine=celery_engine)
+                async with session_factory() as db:
+                    case_summary = await load_conversation_case_summary(db, conversation_id)
+                async with session_factory() as db:
+                    messages = await list_recent_conversation_messages(
+                        db, conversation_id=conversation_id, limit=12
+                    )
+            finally:
+                await celery_engine.dispose()
+
+            latest_user_input = ""
+            for message in reversed(messages):
+                if message.role == "user":
+                    content = " ".join((message.content or "").strip().split())
+                    if content:
+                        latest_user_input = content
+                        break
+
+            return await refresh_case_graph(
                 conversation_id=conversation_id,
                 user_input=latest_user_input,
                 case_summary=case_summary,
             )
-        )
+
+        update_result = asyncio.run(_run())
         logger.info(
             "Graph update task completed | conversation_id=%s actions_applied=%s deleted_count=%s",
             conversation_id,
@@ -225,9 +223,12 @@ def ask_agent_task(
     start_time = time.time()
 
     try:
-        chat_history = asyncio.run(load_chat_history(conversation_id=conversation_id, limit=6))
-        case_summary = asyncio.run(load_case_summary(conversation_id=conversation_id))
-        graph_memory = asyncio.run(load_graph_memory(conversation_id=conversation_id))
+        # 所有 IO 合并到单一事件循环，避免多次 asyncio.run() 的开销
+        context = asyncio.run(_run_task_async(conversation_id))
+        chat_history = context["chat_history"]
+        case_summary = context["case_summary"]
+        graph_memory = context["graph_memory"]
+
         answer = asyncio.run(
             legal_agent.ask(
                 user_id,
@@ -240,11 +241,13 @@ def ask_agent_task(
                 conversation_id=conversation_id,
             )
         )
+
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
         response_sources = answer.get("sources", []) if isinstance(answer, dict) else []
         route_intent = answer.get("route_intent", "GENERAL_CONSULT") if isinstance(answer, dict) else "GENERAL_CONSULT"
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
+
         if route_intent == "GREETING":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Greeting route selected"},
@@ -263,6 +266,7 @@ def ask_agent_task(
                 {"tool": "retrieval_tools", "result_summary": "Retrieval pipeline completed"},
                 {"tool": "legal_advisor", "result_summary": "Final legal response generated"},
             ]
+
         result = {
             "status": "success",
             "user_id": user_id,
@@ -281,7 +285,7 @@ def ask_agent_task(
 
         if route_intent != "GREETING":
             asyncio.run(
-                persist_dialog_turn(
+                _persist_dialog_turn_async(
                     user_id=user_id,
                     conversation_id=conversation_id,
                     user_content=question,
@@ -301,7 +305,9 @@ def ask_agent_task(
 
         if route_intent == "CASE_UPDATE":
             update_graph_task.delay(conversation_id)
+
         return result
+
     except Exception as exc:
         logger.exception("ask_agent_task failed")
         return {
