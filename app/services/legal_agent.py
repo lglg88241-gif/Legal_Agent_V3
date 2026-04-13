@@ -1652,6 +1652,256 @@ async def _patched_generate_final_answer_v2(self: LegalGraphAgent, state: AgentS
     }
 
 
+def _safe_extract_amount_v3(text: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:元|块|人民币|月薪|工资)", text)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _safe_extract_months_v3(text: str) -> int | None:
+    worked_match = re.search(r"(?:工作|任职|入职后|用工)\D{0,6}(\d+)\s*个月", text)
+    if worked_match:
+        try:
+            return max(int(worked_match.group(1)), 0)
+        except ValueError:
+            return None
+
+    month_match = re.search(r"(\d+)\s*个月", text)
+    if month_match:
+        try:
+            return max(int(month_match.group(1)), 0)
+        except ValueError:
+            return None
+    return None
+
+
+def _build_layered_advisor_payload_v3(case_summary: str, question: str, graph_context: str) -> dict[str, Any]:
+    merged = " ".join(part for part in [case_summary, question, graph_context] if part).strip()
+    facts = _build_case_fact_lines(case_summary, question, graph_context)
+    amount = _safe_extract_amount_v3(merged)
+    months = _safe_extract_months_v3(merged)
+
+    calculation_lines: list[str] = []
+    strategy_lines: list[str] = []
+    action_lines: list[str] = []
+    unknowns: list[str] = []
+
+    has_unsigned_contract = any(token in merged for token in ("未签合同", "没签合同", "未签劳动合同", "没有劳动合同"))
+    if has_unsigned_contract:
+        calculation_lines.append("只要已经形成实际用工关系，即使没有书面劳动合同，也可以先主张未签书面劳动合同的二倍工资差额。")
+        if amount is not None and months is not None:
+            compensable_months = max(min(months - 1, 11), 0)
+            total = amount * compensable_months
+            calculation_lines.append(
+                f"按现有信息，计算公式可以先写为：月工资 {amount:.0f} 元 × 可主张月数 {compensable_months} = 二倍工资差额约 {total:.0f} 元。"
+            )
+        else:
+            if amount is None:
+                unknowns.append("月工资标准")
+            if months is None:
+                unknowns.append("未签合同持续月数")
+
+    if any(token in merged for token in ("劳动关系", "入职", "考勤", "工资流水", "发工资")):
+        calculation_lines.append("现有事实已经足以先从劳动关系成立、工资支付事实和未签约责任三个层面同时主张权利。")
+
+    if any(token in merged for token in ("查封", "保全", "资产", "新公司", "人格混同", "关联公司", "主体变更", "更名", "注销")):
+        strategy_lines.append("如果目标是查封新公司或关联主体，现阶段不要先卡在“证据够不够”这个问题上，而是先按人格混同、责任承继、实际用工主体三个方向布置材料。")
+        strategy_lines.append("下一步应优先准备：工商档案、股东和法定代表人信息、工资发放账户、社保公积金缴纳主体、办公地点、业务连续性、聊天记录和财务往来材料。")
+
+    if not strategy_lines:
+        strategy_lines.append("高风险诉求可以先拆成两步走：先固定债权和责任主体，再根据对方资产和主体结构决定是否申请保全、追加被申请人或单独起诉。")
+
+    if has_unsigned_contract:
+        action_lines.append("先把入职时间、工资标准、考勤记录、工资流水、聊天记录整理成时间轴，这些足以支撑第一轮仲裁请求。")
+    if any(token in merged for token in ("拖欠工资", "欠薪", "未发工资", "克扣工资")):
+        action_lines.append("欠薪部分建议同步准备工资条、银行流水、催要记录和考勤，便于把工资、经济补偿或赔偿一并主张。")
+    if any(token in merged for token in ("辞退", "开除", "解除劳动关系", "逼离职", "被迫离职")):
+        action_lines.append("如果还涉及辞退或被迫离职，解除通知、谈话录音、岗位调整记录和绩效材料要单独归档。")
+    if any(token in merged for token in ("新公司", "注销", "关联公司", "查封", "保全")):
+        action_lines.append("如果担心对方转移资产，可在仲裁或起诉前同步梳理保全财产线索，而不是等全部证据齐全后再行动。")
+    if not action_lines:
+        action_lines.append("先把可用证据按“身份关系、金额、时间、对方主体”四类归档，后续维权路径就能快速落地。")
+
+    needs_core_followup = False
+    if has_unsigned_contract and (amount is None or months is None):
+        needs_core_followup = True
+    elif not (case_summary or "").strip():
+        needs_core_followup = True
+
+    if unknowns:
+        sandwich_followup = (
+            "你现在已经提供了有法律价值的关键事实，这些信息足以先帮你判断维权方向。"
+            "按目前情况看，权利主张是有空间的，不需要因为材料还没凑齐就停在原地。"
+            f"为了把金额和请求做得更准，我还需要你补 1 到 2 个核心信息：{'、'.join(unknowns[:2])}。"
+        )
+    else:
+        sandwich_followup = (
+            "你现有的信息已经能支持初步维权判断了。"
+            "按现在的案情，主张路径已经比较清楚。"
+            "如果你愿意，我接下来更建议直接帮你整理仲裁请求清单、证据目录，或者起草一份劳动仲裁申请书草稿。"
+        )
+
+    constructive_next_step = (
+        "目前账目和维权方向已经基本清楚。接下来你可以选择先去劳动监察投诉，或者直接申请劳动仲裁。"
+        "如果你愿意，我下一步可以直接帮你起草《劳动仲裁申请书》草稿，或者把证据目录整理成可提交版本。"
+    )
+
+    answer_parts: list[str] = []
+    if facts:
+        answer_parts.append("已知事实：\n- " + "\n- ".join(facts))
+    if calculation_lines:
+        answer_parts.append("算账与确权层：\n- " + "\n- ".join(calculation_lines))
+    else:
+        answer_parts.append("算账与确权层：\n- 现有信息虽然还不完整，但已经足以先明确可主张的权利方向，不需要整体停住。")
+    answer_parts.append("高风险执行层：\n- " + "\n- ".join(strategy_lines))
+    answer_parts.append("下一步落地动作：\n- " + "\n- ".join(action_lines))
+    if needs_core_followup:
+        answer_parts.append("柔性追问：\n- " + sandwich_followup)
+    else:
+        answer_parts.append("建设性推进：\n- " + constructive_next_step)
+
+    return {
+        "answer": "\n\n".join(answer_parts),
+        "needs_core_followup": needs_core_followup,
+        "followup": sandwich_followup,
+        "constructive_next_step": constructive_next_step,
+        "unknowns": unknowns[:2],
+    }
+
+
+async def _patched_generate_reflection_v3(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
+    payload = _build_layered_advisor_payload_v3(
+        (state.get("case_summary") or "").strip(),
+        state["question"],
+        (state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip(),
+    )
+    if payload["needs_core_followup"]:
+        return {
+            "reflection_status": "NEED_USER_INFO",
+            "confidence_score": 0.62,
+            "reflection_analysis": "可以先回答，但若要把金额或请求精确落表，还需要补充极少量核心字段。",
+            "missing_info": payload["unknowns"],
+            "clarification_questions": [payload["followup"]],
+            "graph_focus": (state.get("case_summary") or "").strip() or state.get("current_query", state["question"]),
+        }
+
+    return {
+        "reflection_status": "SUFFICIENT",
+        "confidence_score": 0.84,
+        "reflection_analysis": "核心条件已经足够，应直接输出分层答案，并进入执行导向的下一步建议。",
+        "missing_info": [],
+        "clarification_questions": [payload["constructive_next_step"]],
+        "graph_focus": (state.get("case_summary") or "").strip() or state.get("current_query", state["question"]),
+    }
+
+
+async def _patched_generate_clarifier_question_v3(self: LegalGraphAgent, state: AgentState) -> str:
+    payload = _build_layered_advisor_payload_v3(
+        (state.get("case_summary") or "").strip(),
+        state["question"],
+        (state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip(),
+    )
+    if payload["needs_core_followup"]:
+        return payload["followup"]
+    return payload["constructive_next_step"]
+
+
+async def _patched_generate_final_answer_v3(self: LegalGraphAgent, state: AgentState) -> dict[str, Any]:
+    tool_results = state.get("tool_results", [])
+    candidate_sources = self._extract_candidate_sources(tool_results)
+    retrieved_docs = self._build_context_blocks(tool_results)
+    case_summary = (state.get("case_summary") or "").strip()
+    graph_context = ((state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip())
+    layered_payload = _build_layered_advisor_payload_v3(case_summary, state["question"], graph_context)
+    fallback = {
+        "answer": layered_payload["answer"],
+        "sources": [],
+    }
+    advisor_system_prompt = f"""
+你是高情商、高落地性的中国大陆专业法律 Agent。
+
+<global_rules>
+1. 绝对禁止全局拒答。无论条件多匮乏，都必须先尽最大努力回答，再决定是否继续推进。
+2. `case_summary` 是最高事实基准。只要摘要里已经有工资、时长、未签合同、主体变更等基础数据，就必须先算账、确权或输出策略。
+3. 严禁因为缺少高阶证据就停止基础计算、维权分析或执行建议。
+</global_rules>
+
+<layered_reasoning>
+1. 先做 `算账与确权层`：能算就直接给公式、口径、预估金额。
+2. 再做 `高风险执行层`：对于查封资产、跨主体追责、人格混同等诉求，直接给策略和材料清单，不要先索要证据才回答。
+3. 最后做 `推进层`：
+   - 若核心字段真不够，才进入柔性追问，而且必须使用三明治沟通法。
+   - 若基础账目和维权路径已清楚，就停止问事实，改成建设性提问，推动进入投诉、仲裁、起诉或文书起草阶段。
+</layered_reasoning>
+
+<adaptive_questioning>
+场景A：必须追问时，必须按三段式输出：
+1. 肯定并赋能：说明用户现有信息为什么有价值。
+2. 阶段性结论：先给利好或初步判断。
+3. 柔性目标追问：只追问 1 到 2 个最关键字段，并说明这是为了帮他把金额或请求做精确。
+
+场景B：核心条件已充足时，不再索要事实，改问是否需要我继续起草仲裁申请书、证据目录、投诉话术或请求清单。
+</adaptive_questioning>
+
+<style_rules>
+1. 输出必须温暖、专业、具体，不能像冷冰冰地查户口。
+2. 不允许出现“依据不足所以无法分析”“请先把证据补齐再说”这类退缩表达。
+3. 允许说明哪些部分已经能主张、哪些部分后续要补强，但不能因此停止回答。
+</style_rules>
+
+<context>
+案件摘要：
+{case_summary or "无案件摘要"}
+
+图谱上下文：
+{graph_context or "无图谱上下文"}
+
+检索材料：
+{retrieved_docs or "无有效检索结果"}
+</context>
+
+<output_contract>
+1. 只返回 JSON。
+2. 至少包含 `answer` 和 `sources`。
+3. `answer` 必须覆盖：算账与确权层、高风险执行层、下一步推进。
+4. `sources` 只能从候选来源中选择，不能编造。
+</output_contract>
+""".strip()
+
+    content = await self._chat_model(
+        self.expert_llm,
+        [
+            {"role": "system", "content": advisor_system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    f"用户问题：{state['question']}\n\n"
+                    f"候选来源：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
+                    f"以下是已经完成的基础回答骨架，你只能优化它，不能删掉其中的算账、策略或下一步建议：\n{layered_payload['answer']}"
+                ),
+            },
+        ],
+    )
+    parsed = self._safe_json_load(content, fallback)
+
+    answer = parsed.get("answer") or parsed.get("response") or fallback["answer"]
+    if not isinstance(answer, str) or not answer.strip():
+        answer = fallback["answer"]
+    if ("未找到依据" in answer) or ("依据不足" in answer):
+        answer = fallback["answer"]
+
+    sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
+    return {
+        "response": answer.strip(),
+        "sources": sources,
+        "is_final": True,
+    }
+
+
 LegalGraphAgent._route_decision = _patched_route_decision
 LegalGraphAgent._patched_route_decision = _patched_route_decision
 LegalGraphAgent._patched_build_tool_calls_for_intent = _patched_build_tool_calls_for_intent
@@ -1661,9 +1911,9 @@ LegalGraphAgent._patched_build_reflector_user_prompt = _patched_build_reflector_
 LegalGraphAgent.tool_router_node = _patched_tool_router_node
 LegalGraphAgent.fact_updater_node = _patched_fact_updater_node
 LegalGraphAgent.vector_researcher_node = _patched_vector_researcher_node
-LegalGraphAgent._generate_final_answer = _patched_generate_final_answer_v2
-LegalGraphAgent._generate_reflection = _patched_generate_reflection_v2
-LegalGraphAgent._generate_clarifier_question = _patched_generate_clarifier_question_v2
+LegalGraphAgent._generate_final_answer = _patched_generate_final_answer_v3
+LegalGraphAgent._generate_reflection = _patched_generate_reflection_v3
+LegalGraphAgent._generate_clarifier_question = _patched_generate_clarifier_question_v3
 LegalGraphAgent.ask = _patched_ask
 
 legal_agent = LegalGraphAgent()

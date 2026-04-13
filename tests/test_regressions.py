@@ -324,3 +324,58 @@ def test_case_continuity_keeps_short_followup_on_case_update_route() -> None:
 
     assert decision["route_intent"] == "CASE_UPDATE"
     assert decision["tool_calls"]
+
+
+def test_layered_advisor_payload_calculates_before_asking_for_more() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.legal_agent", None)
+    from app.services import legal_agent
+
+    payload = legal_agent._build_layered_advisor_payload_v3(
+        "员工2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同。",
+        "现在能赔多少？",
+        "",
+    )
+
+    assert "二倍工资差额" in payload["answer"]
+    assert "48000" in payload["answer"]
+    assert payload["needs_core_followup"] is False
+    assert "劳动仲裁申请书" in payload["constructive_next_step"]
+
+
+def test_layered_advisor_payload_outputs_enforcement_strategy_without_refusing() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.legal_agent", None)
+    from app.services import legal_agent
+
+    payload = legal_agent._build_layered_advisor_payload_v3(
+        "原公司拖欠工资后注销，老板又用新公司继续安排原团队工作。",
+        "我能不能查封新公司资产并一起追责？",
+        "",
+    )
+
+    assert "人格混同" in payload["answer"]
+    assert "材料" in payload["answer"]
+    assert "依据不足" not in payload["answer"]
+
+
+def test_clarifier_uses_sandwich_style_when_core_fields_missing() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.legal_agent", None)
+    from app.services import legal_agent
+
+    agent = legal_agent.LegalGraphAgent()
+    question = asyncio.run(
+        agent._generate_clarifier_question(
+            {
+                "question": "没签合同怎么办？",
+                "case_summary": "员工已经入职，公司一直没有签劳动合同。",
+                "graph_context": "",
+                "graph_memory": "",
+            }
+        )
+    )
+
+    assert "有法律价值" in question
+    assert "足以先帮你判断" in question
+    assert "为了把金额和请求做得更准" in question
