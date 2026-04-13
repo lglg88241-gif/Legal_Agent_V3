@@ -16,6 +16,7 @@ class AgentState(TypedDict, total=False):
     conversation_id: int
     session_id: str
     question: str
+    is_precise_mode: bool
     proactive_graph_mode: bool
     chat_history: str
     case_summary: str

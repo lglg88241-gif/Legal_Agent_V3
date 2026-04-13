@@ -1002,6 +1002,59 @@ def _patched_is_general_consult(self: LegalGraphAgent, question: str, case_summa
     return any(token in text for token in consult_tokens)
 
 
+def _question_looks_like_brief_followup(question: str) -> bool:
+    text = " ".join((question or "").strip().split())
+    if not text:
+        return False
+
+    brief_followup_tokens = [
+        "怎么办",
+        "怎么维权",
+        "怎么处理",
+        "怎么赔",
+        "赔多少",
+        "怎么告",
+        "怎么仲裁",
+        "接下来呢",
+        "然后呢",
+    ]
+    if any(token in text for token in brief_followup_tokens):
+        return True
+
+    condensed = "".join(text.split())
+    return len(condensed) <= 8 and any(token in condensed for token in ["怎么办", "怎么赔", "怎么告", "维权"])
+
+
+def _history_has_case_continuity(chat_history: str, case_summary: str) -> bool:
+    if (case_summary or "").strip():
+        return True
+
+    history = " ".join((chat_history or "").strip().split())
+    if not history:
+        return False
+
+    case_markers = [
+        "公司",
+        "老板",
+        "工资",
+        "赔偿",
+        "劳动合同",
+        "仲裁",
+        "原告",
+        "被告",
+        "法院",
+        "工伤",
+        "交通事故",
+        "入职",
+        "离职",
+        "解除劳动关系",
+        "金额",
+        "对方",
+    ]
+    matched = sum(1 for marker in case_markers if marker in history)
+    return matched >= 2
+
+
 def _patched_build_tool_calls_for_intent(
     self: LegalGraphAgent,
     route_intent: str,
@@ -1029,10 +1082,29 @@ async def _patched_route_decision(
     question: str,
     chat_history: str = "",
     case_summary: str = "",
+    is_precise_mode: bool = False,
 ) -> dict[str, Any]:
     history_text = (chat_history or "").strip() or "无历史对话"
+    has_case_summary = bool((case_summary or "").strip())
     summary_text = (case_summary or "").strip() or "无案情摘要"
     cleaned_question = " ".join((question or "").strip().split())
+
+    if is_precise_mode:
+        retrieval_query = summary_text if has_case_summary else cleaned_question
+        return {
+            "route_intent": "CASE_UPDATE",
+            "tool_calls": self._patched_build_tool_calls_for_intent("CASE_UPDATE", retrieval_query),
+        }
+
+    if _history_has_case_continuity(chat_history, case_summary) and (
+        self._patched_is_case_update(cleaned_question, chat_history=chat_history, case_summary=case_summary)
+        or _question_looks_like_brief_followup(cleaned_question)
+    ):
+        retrieval_query = summary_text if has_case_summary else cleaned_question
+        return {
+            "route_intent": "CASE_UPDATE",
+            "tool_calls": self._patched_build_tool_calls_for_intent("CASE_UPDATE", retrieval_query),
+        }
 
     if self._looks_like_chitchat(cleaned_question, chat_history=chat_history) and not self._patched_is_case_update(
         cleaned_question, chat_history=chat_history, case_summary=case_summary
@@ -1071,7 +1143,7 @@ async def _patched_route_decision(
         route_intent = fallback_intent
 
     retrieval_query = cleaned_question
-    if route_intent == "CASE_UPDATE" and summary_text != "无案情摘要":
+    if route_intent == "CASE_UPDATE" and has_case_summary:
         retrieval_query = summary_text
 
     return {
@@ -1121,7 +1193,12 @@ async def _patched_tool_router_node(self: LegalGraphAgent, state: AgentState) ->
     current_query = state.get("current_query") or state["question"]
     chat_history = state.get("chat_history", "")
     case_summary = state.get("case_summary", "")
-    decision = await self._patched_route_decision(current_query, chat_history=chat_history, case_summary=case_summary)
+    decision = await self._patched_route_decision(
+        current_query,
+        chat_history=chat_history,
+        case_summary=case_summary,
+        is_precise_mode=bool(state.get("is_precise_mode", False)),
+    )
     return {
         "current_query": current_query,
         "routed_query": current_query,
@@ -1323,6 +1400,7 @@ async def _patched_ask(
     chat_history: str = "",
     case_summary: str = "",
     graph_memory: str = "",
+    is_precise_mode: bool = False,
     proactive_graph_mode: bool = True,
     conversation_id: int | None = None,
 ) -> dict[str, Any]:
@@ -1331,6 +1409,7 @@ async def _patched_ask(
         "conversation_id": int(conversation_id) if conversation_id is not None else 0,
         "session_id": session_id,
         "question": question,
+        "is_precise_mode": bool(is_precise_mode),
         "proactive_graph_mode": bool(proactive_graph_mode),
         "chat_history": chat_history,
         "case_summary": case_summary,

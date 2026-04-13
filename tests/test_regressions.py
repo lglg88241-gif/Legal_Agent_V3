@@ -284,3 +284,43 @@ def test_delete_node_uses_exact_match_only() -> None:
     for query, params in session.calls:
         assert "CONTAINS" not in query
         assert params["target_name"] == "机器"
+
+
+def test_precise_mode_forces_case_update_route() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.legal_agent", None)
+    from app.services import legal_agent
+
+    agent = legal_agent.LegalGraphAgent()
+
+    decision = asyncio.run(
+        agent._patched_route_decision(
+            "怎么维权",
+            chat_history="",
+            case_summary="",
+            is_precise_mode=True,
+        )
+    )
+
+    assert decision["route_intent"] == "CASE_UPDATE"
+    assert decision["tool_calls"]
+
+
+def test_case_continuity_keeps_short_followup_on_case_update_route() -> None:
+    install_backend_import_stubs()
+    sys.modules.pop("app.services.legal_agent", None)
+    from app.services import legal_agent
+
+    agent = legal_agent.LegalGraphAgent()
+
+    decision = asyncio.run(
+        agent._patched_route_decision(
+            "怎么办",
+            chat_history="User: 公司一直没签劳动合同 Assistant: 你可以主张劳动关系和赔偿",
+            case_summary="员工已入职，公司未签劳动合同，现咨询维权路径。",
+            is_precise_mode=False,
+        )
+    )
+
+    assert decision["route_intent"] == "CASE_UPDATE"
+    assert decision["tool_calls"]

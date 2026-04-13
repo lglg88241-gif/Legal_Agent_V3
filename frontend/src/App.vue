@@ -616,6 +616,7 @@ async function sendImpl(textOverride = null, options = {}) {
   try {
     const initRes = await sendMessage(text, baseConversationId, {
       forceCurrentCase,
+      isPreciseMode: proactiveGraphMode.value,
       proactiveGraphMode: proactiveGraphMode.value,
     })
     const initData = initRes?.data || {}

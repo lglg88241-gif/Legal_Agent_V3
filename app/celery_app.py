@@ -218,6 +218,7 @@ def ask_agent_task(
     conversation_id: int,
     session_id: str,
     question: str,
+    is_precise_mode: bool = False,
     proactive_graph_mode: bool = True,
 ):
     start_time = time.time()
@@ -237,6 +238,7 @@ def ask_agent_task(
                 chat_history=chat_history,
                 case_summary=case_summary,
                 graph_memory=graph_memory,
+                is_precise_mode=is_precise_mode,
                 proactive_graph_mode=proactive_graph_mode,
                 conversation_id=conversation_id,
             )
