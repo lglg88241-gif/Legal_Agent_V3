@@ -28,13 +28,13 @@ class CaseState(BaseModel):
     graph_context: str = ""
 
     # --- Extracted numeric fields ---
-    monthly_salary: float | None = Field(default=None, description="月工资/月薪 (元)")
-    work_months: int | None = Field(default=None, description="工作月数")
-    compensable_months: int = Field(default=0, description="可主张二倍工资月数 (max 11)")
-    double_salary_gap: float = Field(default=0.0, description="二倍工资差额 (元)")
-    owed_wages: float = Field(default=0.0, description="拖欠工资 (元)")
-    deposit: float = Field(default=0.0, description="押金/保证金 (元)")
-    claim_total: float = Field(default=0.0, description="可主张总额 (元)")
+    monthly_salary: float | None = Field(default=None, ge=0, description="月工资/月薪 (元)")
+    work_months: int | None = Field(default=None, ge=0, description="工作月数")
+    compensable_months: int = Field(default=0, ge=0, description="可主张二倍工资月数 (max 11)")
+    double_salary_gap: float = Field(default=0.0, ge=0, description="二倍工资差额 (元)")
+    owed_wages: float = Field(default=0.0, ge=0, description="拖欠工资 (元)")
+    deposit: float = Field(default=0.0, ge=0, description="押金/保证金 (元)")
+    claim_total: float = Field(default=0.0, ge=0, description="可主张总额 (元)")
 
     # --- Semantic flags ---
     has_unsigned_contract: bool = False

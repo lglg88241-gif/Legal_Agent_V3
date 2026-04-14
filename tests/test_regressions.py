@@ -202,35 +202,37 @@ def test_importing_main_does_not_require_legacy_history_or_summary_routes() -> N
 
 
 def test_advisor_fallback_uses_case_summary_for_labor_analysis() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    answer = legal_agent._build_advisor_fallback(
-        "员工于2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同，后公司准备注销。",
-        "公司没签合同我能要什么赔偿？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "员工于2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同，后公司准备注销。",
+            "公司没签合同我能要什么赔偿？",
+            "",
+        )
     )
 
-    assert "二倍工资差额" in answer
-    assert "48000" in answer
-    assert "财产保全" in answer
+    assert "二倍工资差额" in result.answer
+    assert "48000" in result.answer
+    assert "财产保全" in result.answer
 
 
 def test_advisor_fallback_without_salary_still_gives_operational_guidance() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    answer = legal_agent._build_advisor_fallback(
-        "员工已经入职但公司一直没签劳动合同，也没有提供纸质合同。",
-        "没签合同怎么办？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "员工已经入职但公司一直没签劳动合同，也没有提供纸质合同。",
+            "没签合同怎么办？",
+            "",
+        )
     )
 
-    assert "二倍工资差额" in answer
-    assert "月工资" in answer
-    assert "考勤记录" in answer
+    assert "二倍工资差额" in result.answer
+    assert "月工资" in result.answer
+    assert "考勤记录" in result.answer
 
 
 def test_graph_prompts_can_be_formatted_without_keyerror() -> None:
@@ -327,36 +329,38 @@ def test_case_continuity_keeps_short_followup_on_case_update_route() -> None:
 
 
 def test_layered_advisor_payload_calculates_before_asking_for_more() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    payload = legal_agent._build_layered_advisor_payload_v3(
-        "员工2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同。",
-        "现在能赔多少？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "员工2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同。",
+            "现在能赔多少？",
+            "",
+        )
     )
 
-    assert "二倍工资差额" in payload["answer"]
-    assert "48000" in payload["answer"]
-    assert payload["needs_core_followup"] is False
-    assert "劳动仲裁申请书" in payload["constructive_next_step"]
+    assert "二倍工资差额" in result.answer
+    assert "48000" in result.answer
+    assert result.needs_core_followup is False
+    assert "劳动仲裁申请书" in result.constructive_next_step
 
 
 def test_layered_advisor_payload_outputs_enforcement_strategy_without_refusing() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    payload = legal_agent._build_layered_advisor_payload_v3(
-        "原公司拖欠工资后注销，老板又用新公司继续安排原团队工作。",
-        "我能不能查封新公司资产并一起追责？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "原公司拖欠工资后注销，老板又用新公司继续安排原团队工作。",
+            "我能不能查封新公司资产并一起追责？",
+            "",
+        )
     )
 
-    assert "人格混同" in payload["answer"]
-    assert "材料" in payload["answer"]
-    assert "依据不足" not in payload["answer"]
+    assert "人格混同" in result.answer
+    assert "材料" in result.answer
+    assert "依据不足" not in result.answer
 
 
 def test_clarifier_uses_sandwich_style_when_core_fields_missing() -> None:

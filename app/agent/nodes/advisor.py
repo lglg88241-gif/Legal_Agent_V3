@@ -1,9 +1,8 @@
 """
 Advisor node: layered legal analysis with LLM polishing.
 
-The deterministic calculation pipeline (_build_layered_advisor_payload_v3)
-lives in legal_agent.py and will be migrated to app/logic/calculators.py
-in a later surgery. This module only contains the LLM interaction wrapper.
+The deterministic calculation pipeline lives in app/logic/calculators.py.
+This module contains only the LLM interaction wrapper.
 """
 from __future__ import annotations
 
@@ -12,23 +11,24 @@ import logging
 from typing import Any
 
 from app.agent.graph import AgentState
+from app.schemas.case_state import CaseState
+from app.logic.calculators import build_claim_payload
 
 logger = logging.getLogger(__name__)
 
 
 async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
-    # Import here to avoid circular imports at module level
-    from app.services.legal_agent import _build_layered_advisor_payload_v3
-
     tool_results = state.get("tool_results", [])
     candidate_sources = self._extract_candidate_sources(tool_results)
     retrieved_docs = self._build_context_blocks(tool_results)
     case_summary = (state.get("case_summary") or "").strip()
     graph_context = ((state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip())
-    layered_payload = _build_layered_advisor_payload_v3(case_summary, state["question"], graph_context)
+    layered_payload = build_claim_payload(
+        CaseState.from_text(case_summary, state["question"], graph_context)
+    )
     rag_context = retrieved_docs or "无有效检索结果"
     fallback = {
-        "answer": layered_payload["answer"],
+        "answer": layered_payload.answer,
         "sources": [],
     }
     advisor_system_prompt = f"""
@@ -101,7 +101,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
                     f"用户问题：{state['question']}\n\n"
                     f"候选来源：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
                     f"<rag_context>\n{rag_context}\n</rag_context>\n\n"
-                    f"以下是已经完成的基础回答骨架，你只能优化它，不能删掉其中的算账、策略或下一步建议：\n{layered_payload['answer']}"
+                    f"以下是已经完成的基础回答骨架，你只能优化它，不能删掉其中的算账、策略或下一步建议：\n{layered_payload.answer}"
                 ),
             },
         ],

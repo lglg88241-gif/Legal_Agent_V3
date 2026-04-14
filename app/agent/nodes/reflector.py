@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Any
 
 from app.agent.graph import AgentState
+from app.schemas.case_state import CaseState
+from app.logic.calculators import build_claim_payload
 
 
 def proactive_graph_mode_enabled(self, state: AgentState) -> bool:
@@ -43,21 +45,20 @@ def build_reflector_user_prompt(
 
 
 async def generate_reflection_v3(self, state: AgentState) -> dict[str, Any]:
-    # Import here to avoid circular imports at module level
-    from app.services.legal_agent import _build_layered_advisor_payload_v3
-
-    payload = _build_layered_advisor_payload_v3(
-        (state.get("case_summary") or "").strip(),
-        state["question"],
-        (state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip(),
+    payload = build_claim_payload(
+        CaseState.from_text(
+            (state.get("case_summary") or "").strip(),
+            state["question"],
+            (state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip(),
+        )
     )
-    if payload["needs_core_followup"]:
+    if payload.needs_core_followup:
         return {
             "reflection_status": "NEED_USER_INFO",
             "confidence_score": 0.62,
             "reflection_analysis": "可以先回答，但若要把金额或请求精确落表，还需要补充极少量核心字段。",
-            "missing_info": payload["unknowns"],
-            "clarification_questions": [payload["followup"]],
+            "missing_info": payload.unknowns,
+            "clarification_questions": [payload.followup],
             "graph_focus": (state.get("case_summary") or "").strip() or state.get("current_query", state["question"]),
         }
 
@@ -66,6 +67,6 @@ async def generate_reflection_v3(self, state: AgentState) -> dict[str, Any]:
         "confidence_score": 0.84,
         "reflection_analysis": "核心条件已经足够，应直接输出分层答案，并进入执行导向的下一步建议。",
         "missing_info": [],
-        "clarification_questions": [payload["constructive_next_step"]],
+        "clarification_questions": [payload.constructive_next_step],
         "graph_focus": (state.get("case_summary") or "").strip() or state.get("current_query", state["question"]),
     }

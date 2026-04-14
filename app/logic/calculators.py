@@ -90,9 +90,9 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     """
     Build the full layered answer from a CaseState.
 
-    This is the pure-Python replacement for
-    ``legal_agent._build_layered_advisor_payload_v3``.
-    It produces identical output given identical CaseState inputs.
+    This is the authoritative pure-Python replacement for the legacy
+    module-level functions in legal_agent.py (Surgery 5).
+    It produces structured PayloadResult output consumed by all nodes.
     """
     merged = _merged_text(cs)
     facts = _split_fact_lines(cs.case_summary, cs.question, cs.graph_context)
@@ -192,7 +192,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
         )
     if _has_any(merged, _ASSET_TOKENS):
         action_lines.append(
-            "如果担心对方转移资产，可在仲裁或起诉前同步梳理保全财产线索，"
+            "如果担心对方转移资产，可在仲裁或起诉前同步申请财产保全，"
             "而不是等全部证据齐全后再行动。"
         )
     if not action_lines:

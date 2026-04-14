@@ -107,6 +107,7 @@
 | Surgery #3 | `app/agent/prompts/advisor.py`、`extractor.py` | Prompt 统一管理。消除 `graph_extractor.py` 中同一 prompt 被定义三次的问题；所有 prompt 常量集中至 `app/agent/prompts/` 包。 |
 | Surgery #4a | `app/services/legal_agent.py` 瘦身 | 物理删除全部 V1 和 V2 废弃逻辑（528 行死代码），包括被 monkey-patch 覆盖的旧版 router/reflector/advisor/clarifier 及中间过渡版本。文件从 1903 行缩减至 1375 行。 |
 | Surgery #4b | `app/agent/nodes/` 节点拆分 | 将 `legal_agent.py` 中剩余的内联节点函数物理迁移至独立模块（advisor、clarifier、fact_updater、reflector、researcher、router、_llm）。文件净减少 803 行（1375 → ~572 行），V1/V2 历史兼容层已彻底清除。`legal_agent.py` 降级为薄壳编排器，仅保留 LangGraph StateGraph 组装逻辑。 |
+| Surgery #5 | Pydantic 全面接管，字典时代终结 | 将所有节点（advisor、clarifier、reflector）从 `_build_layered_advisor_payload_v3` 切换到 `build_claim_payload(CaseState.from_text(...))`，消除 dict 下标访问风险。`CaseState` 数值字段全部加 `ge=0` 边界约束，在数据契约层拒绝非法负值。物理删除 `legal_agent.py` 剩余 340 行 legacy 函数，文件从 571 行缩减至 229 行，仅保留 `LegalGraphAgent` 类。新增 `tests/test_case_state_hardening.py` 7 项防御测试（负值拒绝、零工资、空输入、属性访问语义、validator 一致性）。全量 75 项测试全绿（1.59s）。 |
 
 ### 当前模块结构
 
@@ -127,12 +128,12 @@ app/
 │       ├── advisor.py         # 法律 Agent 流水线 prompt 常量（8 个）
 │       └── extractor.py       # 图谱抽取流水线 prompt 常量（5 个，已去重）
 ├── schemas/
-│   └── case_state.py          # CaseState Pydantic 模型
+│   └── case_state.py          # CaseState Pydantic 模型（Surgery 5 强化：ge=0 约束）
 ├── logic/
-│   ├── calculators.py         # 确定性计算管线 + PayloadResult 模型
+│   ├── calculators.py         # 确定性计算管线 + PayloadResult（Surgery 5 后：唯一权威入口）
 │   └── __init__.py
 └── services/
-    ├── legal_agent.py         # 薄壳编排器（Surgery 4b 后，仅保留 StateGraph 组装）
+    ├── legal_agent.py         # 薄壳编排器（Surgery 5 后：229 行，仅含 LegalGraphAgent 类）
     ├── graph_extractor.py     # Neo4j 图谱 CRUD（已去重 prompt）
     └── ...
 ```
@@ -152,7 +153,7 @@ app/
 
 ### 测试基线
 
-68 项测试覆盖：提取器精度（7）、Payload 构建（14）、回归守卫（3）、CaseState 模型（11）、新计算管线（18）、既有回归（15）。全部为确定性断言，不依赖 LLM 调用。
+75 项测试覆盖：提取器精度（7）、Payload 构建（14）、回归守卫（3）、CaseState 模型（11）、新计算管线（18）、既有回归（15）、**Pydantic 防御硬化（7，Surgery 5 新增）**。全部为确定性断言，不依赖 LLM 调用。全量运行耗时 1.59s。
 
 ---
 

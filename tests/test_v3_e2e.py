@@ -30,13 +30,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from tests.test_regressions import install_backend_import_stubs
-
-install_backend_import_stubs()
-
-# Force fresh import after stubs are in place
-sys.modules.pop("app.services.legal_agent", None)
-from app.services import legal_agent
+from app.schemas.case_state import CaseState, _extract_salary, _extract_months, _extract_owed_wages, _extract_deposit
+from app.logic.calculators import PayloadResult, build_claim_payload
 
 
 # ---------------------------------------------------------------------------
@@ -60,31 +55,31 @@ class TestExtractors:
 
     def test_salary_extraction_with_prefix_pattern(self) -> None:
         """月薪8000 (number AFTER unit) must be extracted."""
-        assert legal_agent._safe_extract_amount_v3("月薪8000") == 8000.0
+        assert _extract_salary("月薪8000") == 8000.0
 
     def test_salary_extraction_with_suffix_pattern(self) -> None:
         """8000元工资 (number BEFORE unit) must be extracted."""
-        assert legal_agent._safe_extract_amount_v3("8000元工资") == 8000.0
+        assert _extract_salary("8000元工资") == 8000.0
 
     def test_salary_extraction_with_yuan(self) -> None:
         """月薪8000元 must be extracted."""
-        assert legal_agent._safe_extract_amount_v3("月薪8000元") == 8000.0
+        assert _extract_salary("月薪8000元") == 8000.0
 
     def test_salary_extraction_from_case(self) -> None:
         """Full case text must yield 8000."""
-        assert legal_agent._safe_extract_amount_v3(CASE_SUMMARY) == 8000.0
+        assert _extract_salary(CASE_SUMMARY) == 8000.0
 
     def test_month_span_relative_time(self) -> None:
         """去年9月 to 今年3月 = 7 months."""
-        assert legal_agent._safe_extract_months_v3(CASE_SUMMARY) == 7
+        assert _extract_months(CASE_SUMMARY) == 7
 
     def test_owed_wages_two_months(self) -> None:
         """拖欠两月工资 with salary 8000 = 16000."""
-        assert legal_agent._safe_extract_owed_wages(CASE_SUMMARY, 8000.0) == 16000.0
+        assert _extract_owed_wages(CASE_SUMMARY, 8000.0) == 16000.0
 
     def test_deposit_ten_thousand(self) -> None:
         """1万押金 = 10000."""
-        assert legal_agent._safe_extract_deposit(CASE_SUMMARY) == 10000.0
+        assert _extract_deposit(CASE_SUMMARY) == 10000.0
 
 
 # ===================================================================
@@ -94,10 +89,9 @@ class TestExtractors:
 class TestPayloadBuilder:
 
     def setup_method(self) -> None:
-        self.payload = legal_agent._build_layered_advisor_payload_v3(
-            CASE_SUMMARY, QUESTION, GRAPH_CONTEXT,
-        )
-        self.answer = self.payload["answer"]
+        cs = CaseState.from_text(CASE_SUMMARY, QUESTION, GRAPH_CONTEXT)
+        self.result = build_claim_payload(cs)
+        self.answer = self.result.answer
 
     # --- Numeric precision ---
 
@@ -154,14 +148,14 @@ class TestPayloadBuilder:
 
     def test_does_not_aggressively_demand_new_entity_info(self) -> None:
         """Must NOT coldly demand new legal entity details."""
-        assert self.payload["needs_core_followup"] is False, (
+        assert self.result.needs_core_followup is False, (
             "With salary, months, owed wages, and deposit all known, "
             "the system should NOT request more core fields."
         )
 
     def test_proposes_constructive_next_step(self) -> None:
         """When all core fields present, propose drafting documents."""
-        next_step = self.payload.get("constructive_next_step", "")
+        next_step = self.result.constructive_next_step
         has_draft = any(
             keyword in next_step
             for keyword in ("仲裁申请书", "证据目录", "请求清单")
@@ -192,45 +186,42 @@ class TestPayloadBuilder:
 
 class TestExistingRegressions:
     """
-    Re-verify the two critical regressions from test_regressions.py
-    to confirm the source edits didn't break them.
+    Re-verify the two critical regressions to confirm the source
+    edits didn't break them.
     """
 
     def test_advisor_fallback_48000_labor(self) -> None:
-        answer = legal_agent._build_advisor_fallback(
-            "员工于2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同，后公司准备注销。",
-            "公司没签合同我能要什么赔偿？",
-            "",
+        result = build_claim_payload(
+            CaseState.from_text(
+                "员工于2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同，后公司准备注销。",
+                "公司没签合同我能要什么赔偿？",
+                "",
+            )
         )
-        assert "二倍工资差额" in answer
-        assert "48000" in answer
+        assert "二倍工资差额" in result.answer
+        assert "48000" in result.answer
 
     def test_relative_time_span_months(self) -> None:
-        months = legal_agent._safe_extract_months_v3("去年9月进厂，干到今年3月底")
+        months = _extract_months("去年9月进厂，干到今年3月底")
         assert months == 7
 
     def test_layered_payload_12000_salary(self) -> None:
-        payload = legal_agent._build_layered_advisor_payload_v3(
-            "员工2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同。",
-            "现在能赔多少？",
-            "",
+        result = build_claim_payload(
+            CaseState.from_text(
+                "员工2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同。",
+                "现在能赔多少？",
+                "",
+            )
         )
-        assert "48000" in payload["answer"]
-        assert payload["needs_core_followup"] is False
+        assert "48000" in result.answer
+        assert result.needs_core_followup is False
 
 
 # ===================================================================
-# 4. CaseState Pydantic model — must match legacy extractors exactly
+# 4. CaseState Pydantic model
 # ===================================================================
-
-from app.schemas.case_state import CaseState
-
 
 class TestCaseState:
-    """
-    Verify that CaseState.from_text produces identical numbers
-    to the legacy _safe_extract_* functions in legal_agent.py.
-    """
 
     def setup_method(self) -> None:
         self.state = CaseState.from_text(
@@ -273,36 +264,25 @@ class TestCaseState:
         assert s.double_salary_gap == 0.0
         assert s.claim_total == 0.0
 
-    def test_matches_legacy_extractor_salary(self) -> None:
-        legacy = legal_agent._safe_extract_amount_v3(CASE_SUMMARY)
-        assert self.state.monthly_salary == legacy
+    def test_salary_extractor_self_consistent(self) -> None:
+        """Extractor function and CaseState.from_text must agree."""
+        assert self.state.monthly_salary == _extract_salary(CASE_SUMMARY)
 
-    def test_matches_legacy_extractor_months(self) -> None:
-        legacy = legal_agent._safe_extract_months_v3(CASE_SUMMARY)
-        assert self.state.work_months == legacy
+    def test_months_extractor_self_consistent(self) -> None:
+        assert self.state.work_months == _extract_months(CASE_SUMMARY)
 
 
 # ===================================================================
-# 5. Calculators — new pure-Python pipeline must match legacy output
+# 5. Calculators — pure-Python pipeline assertions
 # ===================================================================
-
-from app.logic.calculators import PayloadResult, build_claim_payload
-
 
 class TestCalculators:
-    """
-    Verify that build_claim_payload(CaseState) produces output
-    identical to the legacy _build_layered_advisor_payload_v3.
-    """
 
     def setup_method(self) -> None:
         self.cs = CaseState.from_text(CASE_SUMMARY, QUESTION, GRAPH_CONTEXT)
         self.result = build_claim_payload(self.cs)
-        self.legacy = legal_agent._build_layered_advisor_payload_v3(
-            CASE_SUMMARY, QUESTION, GRAPH_CONTEXT,
-        )
 
-    # --- Numeric parity with legacy ---
+    # --- Numeric precision ---
 
     def test_answer_contains_48000(self) -> None:
         assert "48000" in self.result.answer
@@ -316,13 +296,13 @@ class TestCalculators:
     def test_answer_contains_74000(self) -> None:
         assert "74000" in self.result.answer
 
-    # --- Structural parity with legacy ---
+    # --- Structural parity ---
 
-    def test_needs_followup_matches_legacy(self) -> None:
-        assert self.result.needs_core_followup == self.legacy["needs_core_followup"]
+    def test_needs_followup_false_when_all_fields_known(self) -> None:
+        assert self.result.needs_core_followup is False
 
-    def test_unknowns_match_legacy(self) -> None:
-        assert self.result.unknowns == self.legacy["unknowns"]
+    def test_unknowns_empty_when_all_fields_known(self) -> None:
+        assert self.result.unknowns == []
 
     # --- Legal concept coverage ---
 
