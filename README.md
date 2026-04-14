@@ -92,6 +92,61 @@
 
 ---
 
+## 架构重构记录：去屎山化工程（2026-04）
+
+### 重构总览
+
+本轮重构的目标是将 1944 行的巨型单体文件 `legal_agent.py` 拆解为职责清晰、可独立测试的模块群。采用严格的 TDD 工作流：每一刀手术前锁定基线快照测试（68 项），全绿后方可推进下一步。
+
+### 已完成的手术
+
+| 手术 | 交付物 | 说明 |
+|------|--------|------|
+| Surgery #1 | `app/schemas/case_state.py` | Pydantic 强类型域模型 `CaseState`，替代裸 dict 传递案件量化事实。通过 `model_validator` 自动计算派生字段（可主张月数、二倍工资差额、总索赔额）。 |
+| Surgery #2 | `app/logic/calculators.py` | 纯 Python 确定性计算管线 `build_claim_payload(CaseState) → PayloadResult`。LLM 仅负责润色，不得覆写此处产出的数字。 |
+| Surgery #3 | `app/agent/prompts/advisor.py`、`extractor.py` | Prompt 统一管理。消除 `graph_extractor.py` 中同一 prompt 被定义三次的问题；所有 prompt 常量集中至 `app/agent/prompts/` 包。 |
+| Surgery #4a | `app/services/legal_agent.py` 瘦身 | 物理删除全部 V1 和 V2 废弃逻辑（528 行死代码），包括被 monkey-patch 覆盖的旧版 router/reflector/advisor/clarifier 及中间过渡版本。文件从 1903 行缩减至 1375 行。 |
+
+### 当前模块结构
+
+```
+app/
+├── agent/
+│   ├── graph.py              # LangGraph StateGraph 定义与路由条件
+│   ├── tools.py              # RAG 工具（ChromaDB + BM25 + BGE Reranker）
+│   └── prompts/
+│       ├── advisor.py         # 法律 Agent 流水线 prompt 常量（8 个）
+│       └── extractor.py       # 图谱抽取流水线 prompt 常量（5 个，已去重）
+├── schemas/
+│   └── case_state.py          # CaseState Pydantic 模型
+├── logic/
+│   ├── calculators.py         # 确定性计算管线 + PayloadResult 模型
+│   └── __init__.py
+└── services/
+    ├── legal_agent.py         # V3 生产逻辑（瘦身后，待进一步领域拆分）
+    ├── graph_extractor.py     # Neo4j 图谱 CRUD（已去重 prompt）
+    └── ...
+```
+
+### 数据流
+
+```
+用户输入
+  → tool_router_node（三轨路由：GREETING / GENERAL_CONSULT / CASE_UPDATE）
+  → fact_updater_node（增量合并案卷摘要）
+  → vector_researcher_node（RAG 检索 + 图谱加载）
+  → reflector_node → CaseState.from_text() + build_claim_payload()
+      ├─ SUFFICIENT → legal_advisor_node（V3 分层回答 + LLM 润色）
+      ├─ NEED_USER_INFO → clarifier_node（三明治柔性追问）
+      └─ NEED_DEEP_GRAPH → neo4j_specialist_node → reflector（循环）
+```
+
+### 测试基线
+
+68 项测试覆盖：提取器精度（7）、Payload 构建（14）、回归守卫（3）、CaseState 模型（11）、新计算管线（18）、既有回归（15）。全部为确定性断言，不依赖 LLM 调用。
+
+---
+
 ## 架构重构记录：高内存崩溃与 Redis 连环故障排查
 
 ### 故障根因分析
