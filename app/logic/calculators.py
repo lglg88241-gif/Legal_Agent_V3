@@ -96,6 +96,11 @@ _CONTEXT_WINDOW = 30
 # Pattern for extracting numbers in a string.
 _NUM_RE = re.compile(r"\d+(?:[,，]\d{3})*(?:\.\d+)?")
 
+# Overclaim tolerance: only flag when user's claim exceeds legal limit by
+# more than this factor.  1.01 = 1 % buffer absorbs minor rounding in
+# the user's mental arithmetic without swamping genuine overclaims.
+_OVERCLAIM_TOLERANCE = 1.01
+
 
 def _strip_number_separators(raw: str) -> str:
     """Remove Chinese/Western thousand separators before parsing."""
@@ -147,8 +152,8 @@ def _detect_overclaim(cs: CaseState) -> list[CorrectionNotice]:
             cs.question, _DOUBLE_SALARY_CONTEXT_TOKENS
         )
         for user_val in candidate_numbers:
-            # Tolerance: 1% to absorb float rounding in user's mental math.
-            if user_val > cs.double_salary_gap * 1.01:
+            # Tolerance: _OVERCLAIM_TOLERANCE to absorb float rounding in user's mental math.
+            if user_val > cs.double_salary_gap * _OVERCLAIM_TOLERANCE:
                 discrepancy = round(user_val - cs.double_salary_gap, 2)
                 explanation = (
                     f"您提到的 {user_val:.0f} 元与法定计算有出入。"
@@ -268,7 +273,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
                     f"月工资 {cs.monthly_salary:.0f} 元"
                     f" × 可主张月数 {cs.compensable_months}"
                 ),
-                result=cs.double_salary_gap,
+                result=round(cs.double_salary_gap, 2),
                 cap_rule=(
                     f"首月不计入，法定上限 11 个月"
                     f"（实际工作 {cs.work_months} 个月，可主张 {cs.compensable_months} 个月）"
@@ -287,7 +292,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
         steps.append(CalculationStep(
             item="拖欠工资",
             formula=f"欠薪金额 {cs.owed_wages:.0f} 元",
-            result=cs.owed_wages,
+            result=round(cs.owed_wages, 2),
             cap_rule=None,
             legal_basis="《劳动合同法》关于工资支付的规定",
         ))
@@ -303,7 +308,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
         steps.append(CalculationStep(
             item="押金退还",
             formula=f"押金/保证金 {cs.deposit:.0f} 元",
-            result=cs.deposit,
+            result=round(cs.deposit, 2),
             cap_rule=None,
             legal_basis="《劳动合同法》第九条（禁止收取押金）",
         ))
@@ -425,7 +430,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     # --- Build trace ---
     trace = CalculationTrace(
         steps=steps,
-        total=cs.claim_total,
+        total=round(cs.claim_total, 2),
         correction_notices=_detect_overclaim(cs),
     )
 

@@ -62,7 +62,15 @@ class CaseState(BaseModel):
         question: str = "",
         graph_context: str = "",
     ) -> "CaseState":
-        """Build a CaseState by running all extractors on merged text."""
+        """Build a CaseState by running all extractors on merged text.
+
+        None inputs are silently coerced to empty strings so callers
+        that pass state.get(key) directly (which may return None) are
+        safe without additional guards on the call site.
+        """
+        case_summary = case_summary or ""
+        question = question or ""
+        graph_context = graph_context or ""
         merged = " ".join(
             part for part in [case_summary, question, graph_context] if part
         ).strip()

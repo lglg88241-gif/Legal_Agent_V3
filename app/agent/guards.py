@@ -41,6 +41,18 @@ _ARTICLE_PATTERN = re.compile(r"第\s*\d+\s*条")
 # Pattern for extracting all integers / floats from a string.
 _NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 
+# Surgery 8: exempt patterns ─────────────────────────────────────────────────
+# Case-number pattern: (YYYY) + non-whitespace body (digits, Chinese chars,
+# alphanumeric) + 号.  Examples:
+#   (2024)京0105民初12345号   (2023)粤03劳仲案56789号
+# The body intentionally allows digits so court codes like "0105" are covered.
+_CASE_NUMBER_PATTERN = re.compile(
+    r"\(\d{4}\)\S{1,30}号"
+)
+
+# Year pattern: bare four-digit year followed by 年
+_YEAR_PATTERN = re.compile(r"(\d{4})年")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
@@ -58,6 +70,10 @@ def detect_number_discrepancy(llm_answer: str, payload: PayloadResult) -> bool:
     If the payload itself contains no significant numbers (e.g. claim_total
     == 0, no calculations performed), always returns False — there is
     nothing to contradict.
+
+    Surgery 8: numbers inside case-number spans and year tokens in the
+    LLM answer are exempted so RAG-cited case numbers are never mistaken
+    for fabricated monetary amounts.
     """
     payload_numbers = _extract_significant_numbers(payload.answer)
     # Surgery 7: also whitelist numbers from correction notices
@@ -69,7 +85,9 @@ def detect_number_discrepancy(llm_answer: str, payload: PayloadResult) -> bool:
         return False
 
     llm_numbers = _extract_significant_numbers(llm_answer)
-    fabricated = llm_numbers - all_authoritative
+    # Surgery 8: remove numbers that appear in exempt contexts
+    exempt = _extract_exempt_numbers(llm_answer)
+    fabricated = llm_numbers - all_authoritative - exempt
     return bool(fabricated)
 
 
@@ -101,6 +119,9 @@ def sanitize_llm_answer(
        Rationale: a wrong number anywhere poisons the whole response.
        Surgery 7: correction_notice numbers are whitelisted — verbatim
        reproductions of the Python-generated correction text are allowed.
+       Surgery 8: case-number spans and year tokens in the LLM answer are
+       exempted so RAG-cited case numbers are never misidentified as
+       fabricated monetary amounts.
     2. Phantom article citations → strip only the fabricated "第N条" tokens,
        preserving the surrounding prose and the law name.
        Rationale: removing one citation is surgical; the rest of the answer
@@ -116,7 +137,9 @@ def sanitize_llm_answer(
 
     llm_numbers = _extract_significant_numbers(llm_answer)
     if payload_numbers:  # Only enforce when payload has authoritative numbers.
-        fabricated_numbers = llm_numbers - allowed_numbers
+        # Surgery 8: subtract numbers that live inside case-number / year spans.
+        exempt = _extract_exempt_numbers(llm_answer)
+        fabricated_numbers = llm_numbers - allowed_numbers - exempt
         if fabricated_numbers:
             return payload.answer
 
@@ -189,3 +212,44 @@ def _extract_article_citations(text: str) -> set[str]:
         normalised = re.sub(r"\s+", "", match.group())
         citations.add(normalised)
     return citations
+
+
+def _extract_exempt_numbers(text: str) -> set[str]:
+    """
+    Extract numbers that should be exempted from hallucination detection
+    because they appear in well-known non-monetary contexts:
+
+    1. Case numbers: (2024)京0105民初12345号 — every digit token inside
+       the matched span (e.g. 2024, 105, 12345) is exempt.
+    2. Years: 2024年 — the four-digit year is exempt.
+
+    Returns a set of normalised number strings (same format as
+    _extract_significant_numbers) so callers can subtract them from the
+    fabricated-numbers set.
+
+    Surgery 8: resolves P1-B where RAG-cited case numbers were mistakenly
+    treated as hallucinated monetary amounts.
+    """
+    exempt: set[str] = set()
+
+    # 1. Case-number spans
+    for m in _CASE_NUMBER_PATTERN.finditer(text):
+        for raw in re.findall(r"\d+", m.group()):
+            try:
+                val = float(raw)
+                if val >= _SIGNIFICANT_NUMBER_THRESHOLD:
+                    exempt.add(str(int(val)) if val == int(val) else raw)
+            except ValueError:
+                pass
+
+    # 2. Year tokens (e.g. 2024年)
+    for m in _YEAR_PATTERN.finditer(text):
+        raw = m.group(1)
+        try:
+            val = float(raw)
+            if val >= _SIGNIFICANT_NUMBER_THRESHOLD:
+                exempt.add(str(int(val)) if val == int(val) else raw)
+        except ValueError:
+            pass
+
+    return exempt
