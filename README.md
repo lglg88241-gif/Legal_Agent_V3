@@ -110,6 +110,7 @@
 | Surgery #5 | Pydantic 全面接管，字典时代终结 | 将所有节点（advisor、clarifier、reflector）从 `_build_layered_advisor_payload_v3` 切换到 `build_claim_payload(CaseState.from_text(...))`，消除 dict 下标访问风险。`CaseState` 数值字段全部加 `ge=0` 边界约束，在数据契约层拒绝非法负值。物理删除 `legal_agent.py` 剩余 340 行 legacy 函数，文件从 571 行缩减至 229 行，仅保留 `LegalGraphAgent` 类。新增 `tests/test_case_state_hardening.py` 7 项防御测试（负值拒绝、零工资、空输入、属性访问语义、validator 一致性）。全量 75 项测试全绿（1.59s）。 |
 | Surgery #6 | LLM 幻觉三层防护——数字锁、引用锁、角色降级 | 根本原因：LLM 在「精校」环节私自重算数字或脑补《劳动合同法》第82条等未经 RAG 验证的条文编号。防护方案：① 将 LLM 角色从"法律专家"降级为"文本精校员"；② `<number_lock>` 块禁止任何数字改写，优先级最高；③ `<citation_lock>` 块严禁在 RAG 之外补写"第N条"；④ 后生成守卫 `sanitize_llm_answer()`：发现陌生显著数字（≥1000）→ 整体回退到确定性骨架；发现幻觉条文编号 → 外科式删除。新增 `tests/test_advisor_hallucination_defense.py` 15 项纯确定性测试（T1 数字异常检测×7，T2 幻觉条文检测×5，T3 集成×3）。全量 90 项测试全绿。 |
 | Surgery #7 | CalculationTrace 白盒数据契约 + VERBATIM 超额纠错注入 | 根本原因："惩罚恐惧"——用户问"我能要144000元吗"，后端计算结果为132000，LLM 持有 `<number_lock>` 却不知道为何差12000，选择回避该话题。解决方案：Python 预生成完整 `CorrectionNotice`（含"首月不计入"、可主张月数、双方数字、仲裁驳回风险警告），通过 `<correction_notice priority="VERBATIM">` 块强制 LLM 原样转述——"精校员只需复读，无需推理"。同步增强：① 超额检测上下文感知：仅在30字符关键词窗口内的数字（"双倍工资"/"赔偿"/"能要"等）才触发纠错，排除案号等无关大数；② `correction_notices` 为列表，支持多项超额并发；③ `<citation_demotion_guard>` 阻止 LLM 在 RAG 未收录时自行补写法律条文编号；④ 守卫白名单扩展：`_extract_notice_numbers()` 将纠错文本中的数字加入允许集，防止"忠实复述纠错内容"被误判为幻觉。新增 `tests/test_calculation_trace.py` 17 项零 LLM 测试（T1 轨迹结构×6，T2 超额检测×6，T3 Prompt 注入+Guard×5）。全量 107 项测试全绿（0.84s）。 |
+| Surgery #8 | 守卫健壮性增强 + 工厂方法防御 + 浮点精度标准化 | 第一轮架构审计（35项边界爆破测试）暴露三类缺陷：① **P1-A**：`from_text(None)` 抛出 `ValidationError`——工厂方法未在入口做 None coerce，改为 `case_summary = case_summary or ""`；② **P1-B**：守卫误杀案号/年份数字——RAG 检索到 `(2024)京0105民初12345号` 时，12345 被误判为幻觉触发全量回退。修复：新增 `_CASE_NUMBER_PATTERN`（`\(\d{4}\)\S{1,30}号`）和 `_YEAR_PATTERN`（`\d{4}年`）豁免正则，`_extract_exempt_numbers()` 从 fabricated-numbers 集合中减去这些数字；③ **P2-B/C**：`CalculationStep.result` 存在 `80666.63000000001` 尾数、容差 `1.01` 为 magic number——所有金额字段在 `build_claim_payload()` 中 `round(x, 2)`，提取 `_OVERCLAIM_TOLERANCE = 1.01` 命名常量。新增 3 项豁免机制测试（标准案号豁免、年份豁免、非豁免大数字仍检测）。**全量 145 项测试全绿（0.65s）**。 |
 
 ### 当前模块结构
 
@@ -161,6 +162,8 @@ app/
 **Surgery 6 新增**：`tests/test_advisor_hallucination_defense.py` 15 项守卫测试（数字异常检测×7、幻觉条文检测×5、端到端集成×3），累计 **90 项全绿**。
 
 **Surgery 7 新增**：`tests/test_calculation_trace.py` 17 项零 LLM 测试（轨迹结构×6、超额检测×6、Prompt 注入+Guard×5），累计 **107 项全绿（0.84s）**。所有测试均为纯确定性断言：零 LLM 调用、零 IO、零网络。
+
+**Surgery 8（架构审计修复）新增**：`tests/test_audit_casestate_boundary.py`（14项边界测试）、`tests/test_audit_guard_adversarial.py`（15项对抗测试，含3项豁免机制验证）、`tests/test_audit_overclaim_detection.py`（8项超额场景测试），累计 **145 项全绿（0.65s）**。
 
 ---
 
