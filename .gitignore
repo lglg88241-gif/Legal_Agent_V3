@@ -12,3 +12,4 @@ __pycache__/
 chroma_data/
 runtime_chroma_data/
 *.pkl
+e2e_tests/results/

@@ -165,6 +165,56 @@ app/
 
 **Surgery 8（架构审计修复）新增**：`tests/test_audit_casestate_boundary.py`（14项边界测试）、`tests/test_audit_guard_adversarial.py`（15项对抗测试，含3项豁免机制验证）、`tests/test_audit_overclaim_detection.py`（8项超额场景测试），累计 **145 项全绿（0.65s）**。
 
+### 端到端测试套件（e2e_tests/）
+
+首轮完整端到端测试于 2026-04-14 运行完成（总耗时 1006 秒，模型：Qwen1.5-1.8B-Chat-AWQ，知识库：法条 2177 + 案例 853 = 3030 篇）。
+
+#### 基准测试结果（32 轮，100% 成功）
+
+| 指标 | 值 |
+|---|---|
+| API 成功率 | 32/32 = **100%** |
+| 标准问题案例命中率（8题） | 8/8 = **100%** |
+| 关键词命中率 | 96.9% |
+| 平均端到端延迟 | 22,296 ms |
+| P95 延迟 | 32,681 ms |
+| 最大延迟 | 70,633 ms |
+| 平均置信度 | 0.43 |
+| 5 套剧本通过率 | 27/28 轮（96.4%） |
+
+#### 对抗测试结果（11 次攻击）
+
+**PASS 3 / WARN 3 / FAIL 5，防御率 27.3%**
+
+| 失守项 | 根因 |
+|---|---|
+| 超范围问题无拦截（美国劳动法、股市预测、编程任务） | 路由器关键词匹配无境外/非法律感知，模型尺寸（1.8B）不足以主动拒绝 |
+| 幻觉法条穿透（《劳动者权益保护法》第88条、《劳动合同法》第999条） | Surgery #6 事后剥离守卫无法拦截前向幻觉（LLM 在生成阶段就用训练记忆填充） |
+| 天文数字诱导（999999元）未纠正 | `_detect_overclaim` 上下文窗口外的数字不触发纠错，LLM 进入"高额赔偿分步策略" |
+
+#### 测试文件结构
+
+```
+e2e_tests/
+├── api_client.py           # LegalAgentClient：二阶段轮询、自动处理 needs_confirmation
+├── dialogue_scenarios.py   # 5 套多轮剧本 + README 8 个标准问题（含 expect_keywords）
+├── e2e_benchmark.py        # 基准测试：标准问题 + 剧本，输出 JSON + Markdown 报告
+├── adversarial_dialogue.py # 对抗测试：数字幻觉/虚假法条/超范围/Prompt注入，PASS/WARN/FAIL 评分
+├── run_all.py              # 一键主入口：健康检查 → 注册 → 基准 → 对抗 → 总报告
+└── results/                # 测试产物（.gitignore 豁免，不入库）
+    ├── benchmark_results.json
+    ├── benchmark_report.md
+    ├── adversarial_results.json
+    └── final_report.md
+```
+
+运行方式（需先启动后端服务 + Redis 解锁）：
+```bash
+redis-cli CONFIG SET save ""
+redis-cli CONFIG SET stop-writes-on-bgsave-error no
+D:/Dev/python310/python.exe -X utf8 e2e_tests/run_all.py
+```
+
 ---
 
 ## 架构重构记录：高内存崩溃与 Redis 连环故障排查
