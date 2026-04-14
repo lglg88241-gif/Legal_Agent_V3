@@ -106,6 +106,7 @@
 | Surgery #2 | `app/logic/calculators.py` | 纯 Python 确定性计算管线 `build_claim_payload(CaseState) → PayloadResult`。LLM 仅负责润色，不得覆写此处产出的数字。 |
 | Surgery #3 | `app/agent/prompts/advisor.py`、`extractor.py` | Prompt 统一管理。消除 `graph_extractor.py` 中同一 prompt 被定义三次的问题；所有 prompt 常量集中至 `app/agent/prompts/` 包。 |
 | Surgery #4a | `app/services/legal_agent.py` 瘦身 | 物理删除全部 V1 和 V2 废弃逻辑（528 行死代码），包括被 monkey-patch 覆盖的旧版 router/reflector/advisor/clarifier 及中间过渡版本。文件从 1903 行缩减至 1375 行。 |
+| Surgery #4b | `app/agent/nodes/` 节点拆分 | 将 `legal_agent.py` 中剩余的内联节点函数物理迁移至独立模块（advisor、clarifier、fact_updater、reflector、researcher、router、_llm）。文件净减少 803 行（1375 → ~572 行），V1/V2 历史兼容层已彻底清除。`legal_agent.py` 降级为薄壳编排器，仅保留 LangGraph StateGraph 组装逻辑。 |
 
 ### 当前模块结构
 
@@ -114,6 +115,14 @@ app/
 ├── agent/
 │   ├── graph.py              # LangGraph StateGraph 定义与路由条件
 │   ├── tools.py              # RAG 工具（ChromaDB + BM25 + BGE Reranker）
+│   ├── nodes/                # 节点函数独立模块（Surgery 4b 新增）
+│   │   ├── _llm.py            # LLM 客户端工厂（共享单例）
+│   │   ├── advisor.py         # legal_advisor_node
+│   │   ├── clarifier.py       # clarifier_node
+│   │   ├── fact_updater.py    # fact_updater_node
+│   │   ├── reflector.py       # reflector_node
+│   │   ├── researcher.py      # vector_researcher_node
+│   │   └── router.py          # tool_router_node
 │   └── prompts/
 │       ├── advisor.py         # 法律 Agent 流水线 prompt 常量（8 个）
 │       └── extractor.py       # 图谱抽取流水线 prompt 常量（5 个，已去重）
@@ -123,7 +132,7 @@ app/
 │   ├── calculators.py         # 确定性计算管线 + PayloadResult 模型
 │   └── __init__.py
 └── services/
-    ├── legal_agent.py         # V3 生产逻辑（瘦身后，待进一步领域拆分）
+    ├── legal_agent.py         # 薄壳编排器（Surgery 4b 后，仅保留 StateGraph 组装）
     ├── graph_extractor.py     # Neo4j 图谱 CRUD（已去重 prompt）
     └── ...
 ```

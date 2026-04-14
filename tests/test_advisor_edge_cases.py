@@ -28,7 +28,8 @@ def test_relative_time_span_is_converted_to_months() -> None:
 
 
 def test_advisor_prompt_contains_strong_rag_binding() -> None:
-    source = (PROJECT_ROOT / "app" / "services" / "legal_agent.py").read_text(encoding="utf-8")
+    # The advisor prompt now lives in app/agent/nodes/advisor.py
+    source = (PROJECT_ROOT / "app" / "agent" / "nodes" / "advisor.py").read_text(encoding="utf-8")
     assert '<rag_binding priority="MAX">' in source
     assert "<rag_context>" in source
     assert "唯一允许直接锚定的外部依据" in source
