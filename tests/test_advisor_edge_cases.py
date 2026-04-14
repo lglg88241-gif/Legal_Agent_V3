@@ -29,9 +29,28 @@ def test_relative_time_span_is_converted_to_months() -> None:
 
 
 def test_advisor_prompt_contains_strong_rag_binding() -> None:
-    # The advisor prompt now lives in app/agent/nodes/advisor.py
+    """
+    Verify the three-pillar hallucination prevention constraints are present
+    in advisor.py after the Surgery 6 prompt rewrite.
+
+    Checks:
+    - <number_lock> block exists (number fabrication prevention)
+    - <citation_lock> block exists (phantom article citation prevention)
+    - <rag_context> placeholder exists (RAG anchoring)
+    - Role demotion: LLM identified as text editor, not autonomous lawyer
+    - Few-shot examples present
+    """
     source = (PROJECT_ROOT / "app" / "agent" / "nodes" / "advisor.py").read_text(encoding="utf-8")
-    assert '<rag_binding priority="MAX">' in source
+    # Number lock — core defence against math hallucination
+    assert "<number_lock>" in source
+    assert "严禁" in source
+    # Citation lock — core defence against phantom article citations
+    assert "<citation_lock>" in source
+    assert "第X条" in source
+    # RAG anchoring still present
     assert "<rag_context>" in source
-    assert "唯一允许直接锚定的外部依据" in source
-    assert "必须显式穿插这些名称" in source
+    assert "<rag_binding>" in source
+    # Role demotion: LLM is a text editor, not an autonomous lawyer
+    assert "精校员" in source or "text editor" in source.lower()
+    # Few-shot examples to demonstrate correct vs wrong behaviour
+    assert "<examples>" in source
