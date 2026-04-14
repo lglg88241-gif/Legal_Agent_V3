@@ -29,6 +29,10 @@ TOOLS_INTENT = "TOOLS"
 GREETING_RESPONSE = (
     "你好，我在。你可以直接告诉我你的法律问题，比如劳动纠纷、工伤认定、赔偿标准、合同争议或是否有类似案例。"
 )
+OUT_OF_SCOPE_RESPONSE = (
+    "抱歉，我是专注于中国法律领域的智能助手，暂时无法回答该类问题。"
+    "如果您有中国法律相关的疑问，例如劳动争议、合同纠纷、刑事案件等，我很乐意为您提供帮助。"
+)
 
 
 async def chat_model(self, llm, messages: list[dict[str, str]]) -> str:

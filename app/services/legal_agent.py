@@ -6,7 +6,7 @@ implementations from ``app.agent.nodes.*``. The class itself contains
 only LLM initialization, thin node wrappers, and the ``ask()`` entry point.
 
 All business logic lives in the domain node modules:
-  - app.agent.nodes.router      — triple-track routing
+  - app.agent.nodes.router      — four-track routing
   - app.agent.nodes.fact_updater — case summary merging
   - app.agent.nodes.researcher   — RAG retrieval + graph memory
   - app.agent.nodes.reflector    — evidence sufficiency analysis
@@ -27,6 +27,7 @@ from app.core.config import settings
 # --- Import node implementations ---
 from app.agent.nodes._llm import (
     GREETING_RESPONSE,
+    OUT_OF_SCOPE_RESPONSE,
     GRAPH_TOOL,
     chat_model,
     safe_json_load,
@@ -49,6 +50,7 @@ from app.agent.nodes.router import (
     is_case_update,
     is_general_consult,
     build_tool_calls_for_intent,
+    detect_out_of_scope_reason,
     route_decision,
     tool_router_node,
 )
@@ -103,6 +105,7 @@ class LegalGraphAgent:
     _fallback_route_decision = fallback_route_decision
     _dedupe_tool_calls = dedupe_tool_calls
     _enforce_composite_routes = enforce_composite_routes
+    _detect_out_of_scope_reason = detect_out_of_scope_reason
     _patched_is_case_update = is_case_update
     _patched_is_general_consult = is_general_consult
     _patched_build_tool_calls_for_intent = build_tool_calls_for_intent
@@ -127,6 +130,13 @@ class LegalGraphAgent:
     async def greeting_node(self, state: AgentState) -> AgentState:
         return {
             "response": GREETING_RESPONSE,
+            "sources": [],
+            "is_final": True,
+        }
+
+    async def out_of_scope_node(self, state: AgentState) -> AgentState:
+        return {
+            "response": OUT_OF_SCOPE_RESPONSE,
             "sources": [],
             "is_final": True,
         }

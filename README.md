@@ -110,7 +110,7 @@
 | Surgery #5 | Pydantic 全面接管，字典时代终结 | 将所有节点（advisor、clarifier、reflector）从 `_build_layered_advisor_payload_v3` 切换到 `build_claim_payload(CaseState.from_text(...))`，消除 dict 下标访问风险。`CaseState` 数值字段全部加 `ge=0` 边界约束，在数据契约层拒绝非法负值。物理删除 `legal_agent.py` 剩余 340 行 legacy 函数，文件从 571 行缩减至 229 行，仅保留 `LegalGraphAgent` 类。新增 `tests/test_case_state_hardening.py` 7 项防御测试（负值拒绝、零工资、空输入、属性访问语义、validator 一致性）。全量 75 项测试全绿（1.59s）。 |
 | Surgery #6 | LLM 幻觉三层防护——数字锁、引用锁、角色降级 | 根本原因：LLM 在「精校」环节私自重算数字或脑补《劳动合同法》第82条等未经 RAG 验证的条文编号。防护方案：① 将 LLM 角色从"法律专家"降级为"文本精校员"；② `<number_lock>` 块禁止任何数字改写，优先级最高；③ `<citation_lock>` 块严禁在 RAG 之外补写"第N条"；④ 后生成守卫 `sanitize_llm_answer()`：发现陌生显著数字（≥1000）→ 整体回退到确定性骨架；发现幻觉条文编号 → 外科式删除。新增 `tests/test_advisor_hallucination_defense.py` 15 项纯确定性测试（T1 数字异常检测×7，T2 幻觉条文检测×5，T3 集成×3）。全量 90 项测试全绿。 |
 | Surgery #7 | CalculationTrace 白盒数据契约 + VERBATIM 超额纠错注入 | 根本原因："惩罚恐惧"——用户问"我能要144000元吗"，后端计算结果为132000，LLM 持有 `<number_lock>` 却不知道为何差12000，选择回避该话题。解决方案：Python 预生成完整 `CorrectionNotice`（含"首月不计入"、可主张月数、双方数字、仲裁驳回风险警告），通过 `<correction_notice priority="VERBATIM">` 块强制 LLM 原样转述——"精校员只需复读，无需推理"。同步增强：① 超额检测上下文感知：仅在30字符关键词窗口内的数字（"双倍工资"/"赔偿"/"能要"等）才触发纠错，排除案号等无关大数；② `correction_notices` 为列表，支持多项超额并发；③ `<citation_demotion_guard>` 阻止 LLM 在 RAG 未收录时自行补写法律条文编号；④ 守卫白名单扩展：`_extract_notice_numbers()` 将纠错文本中的数字加入允许集，防止"忠实复述纠错内容"被误判为幻觉。新增 `tests/test_calculation_trace.py` 17 项零 LLM 测试（T1 轨迹结构×6，T2 超额检测×6，T3 Prompt 注入+Guard×5）。全量 107 项测试全绿（0.84s）。 |
-| Surgery #8 | 守卫健壮性增强 + 工厂方法防御 + 浮点精度标准化 | 第一轮架构审计（35项边界爆破测试）暴露三类缺陷：① **P1-A**：`from_text(None)` 抛出 `ValidationError`——工厂方法未在入口做 None coerce，改为 `case_summary = case_summary or ""`；② **P1-B**：守卫误杀案号/年份数字——RAG 检索到 `(2024)京0105民初12345号` 时，12345 被误判为幻觉触发全量回退。修复：新增 `_CASE_NUMBER_PATTERN`（`\(\d{4}\)\S{1,30}号`）和 `_YEAR_PATTERN`（`\d{4}年`）豁免正则，`_extract_exempt_numbers()` 从 fabricated-numbers 集合中减去这些数字；③ **P2-B/C**：`CalculationStep.result` 存在 `80666.63000000001` 尾数、容差 `1.01` 为 magic number——所有金额字段在 `build_claim_payload()` 中 `round(x, 2)`，提取 `_OVERCLAIM_TOLERANCE = 1.01` 命名常量。新增 3 项豁免机制测试（标准案号豁免、年份豁免、非豁免大数字仍检测）。**全量 145 项测试全绿（0.65s）**。 |
+| Surgery #8 | 超范围拦截 + 未验证金额防御 + 未收录法条前向防御 | 端到端对抗测试暴露三类失守：① **P0-1**：境外法律与非法律问题未在路由层拦截，系统误入标准法律回答链路；② **P0-2**：用户抛出天文数字时，若计算所需事实尚未齐备，LLM 会围绕未验证金额展开策略推演；③ **P1**：用户主动引用不存在的法律/条文时，LLM 可能用训练记忆或相近法条“代答”。修复方案：① `router.py` 升级为四轨路由，新增确定性 `OUT_OF_SCOPE` 守卫，命中境外法律/非法律请求时直接返回固定拒答话术，不进入 RAG/Agent 流水线；② `advisor.py` 新增 `<amount_guard>` 与 `<amount_verification_notice priority="VERBATIM">`，当用户金额未被 `CalculationTrace` 或纠错通知验证时，强制转向“补充工资/工时等事实再计算”；③ 新增 `<statute_guard>` 与 `<statute_verification_notice priority="VERBATIM">`，用户引用的法律/条文若未被 RAG 检索到，必须明确说明知识库未收录并建议通过国家法律法规数据库等官方渠道核验，严禁凭训练记忆补答。新增 `tests/test_audit_e2e_defense.py` 14 项零 LLM 防御测试（超范围拦截×10、未验证金额防御×2、未收录法条防御×2）。**全量 159 项测试全绿（1.26s）**。 |
 
 ### 当前模块结构
 
@@ -127,7 +127,7 @@ app/
 │   │   ├── fact_updater.py    # fact_updater_node
 │   │   ├── reflector.py       # reflector_node
 │   │   ├── researcher.py      # vector_researcher_node
-│   │   └── router.py          # tool_router_node
+│   │   └── router.py          # tool_router_node（四轨路由 + OUT_OF_SCOPE 守卫）
 │   └── prompts/
 │       ├── advisor.py         # 法律 Agent 流水线 prompt 常量（8 个）
 │       └── extractor.py       # 图谱抽取流水线 prompt 常量（5 个，已去重）
@@ -146,13 +146,14 @@ app/
 
 ```
 用户输入
-  → tool_router_node（三轨路由：GREETING / GENERAL_CONSULT / CASE_UPDATE）
-  → fact_updater_node（增量合并案卷摘要）
-  → vector_researcher_node（RAG 检索 + 图谱加载）
-  → reflector_node → CaseState.from_text() + build_claim_payload()
-      ├─ SUFFICIENT → legal_advisor_node（V3 分层回答 + LLM 润色）
-      ├─ NEED_USER_INFO → clarifier_node（三明治柔性追问）
-      └─ NEED_DEEP_GRAPH → neo4j_specialist_node → reflector（循环）
+  → tool_router_node（四轨路由：GREETING / OUT_OF_SCOPE / GENERAL_CONSULT / CASE_UPDATE）
+      ├─ GREETING → greeting_node
+      ├─ OUT_OF_SCOPE → out_of_scope_node（固定拒答，不进入 RAG / Agent 流水线）
+      ├─ GENERAL_CONSULT → vector_researcher_node（RAG 检索 + 图谱加载）→ legal_advisor_node
+      └─ CASE_UPDATE → fact_updater_node（增量合并案卷摘要）→ vector_researcher_node → reflector_node
+          ├─ SUFFICIENT → legal_advisor_node（V3 分层回答 + LLM 润色）
+          ├─ NEED_USER_INFO → clarifier_node（三明治柔性追问）
+          └─ NEED_DEEP_GRAPH → neo4j_specialist_node → reflector（循环）
 ```
 
 ### 测试基线
@@ -163,7 +164,7 @@ app/
 
 **Surgery 7 新增**：`tests/test_calculation_trace.py` 17 项零 LLM 测试（轨迹结构×6、超额检测×6、Prompt 注入+Guard×5），累计 **107 项全绿（0.84s）**。所有测试均为纯确定性断言：零 LLM 调用、零 IO、零网络。
 
-**Surgery 8（架构审计修复）新增**：`tests/test_audit_casestate_boundary.py`（14项边界测试）、`tests/test_audit_guard_adversarial.py`（15项对抗测试，含3项豁免机制验证）、`tests/test_audit_overclaim_detection.py`（8项超额场景测试），累计 **145 项全绿（0.65s）**。
+**Surgery 8（对抗防御修复）新增**：`tests/test_audit_e2e_defense.py` 14 项零 LLM 测试（超范围拦截×10、未验证金额防御×2、未收录法条前向防御×2），累计 **159 项全绿（1.26s）**。所有新增测试均为纯确定性断言：零 LLM、零 IO、零网络。
 
 ### 端到端测试套件（e2e_tests/）
 

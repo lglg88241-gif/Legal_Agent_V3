@@ -1,5 +1,5 @@
 """
-Triple-track router: GREETING / GENERAL_CONSULT / CASE_UPDATE.
+Four-track router: GREETING / GENERAL_CONSULT / CASE_UPDATE / OUT_OF_SCOPE.
 
 Contains all intent detection, heuristic routing, and LLM-based
 routing logic. Pure-Python functions are deterministic; the LLM
@@ -22,6 +22,130 @@ from app.agent.nodes._llm import (
 from app.agent.prompts.advisor import TRIPLE_TRACK_ROUTER_PROMPT_V2
 
 logger = logging.getLogger(__name__)
+
+OUT_OF_SCOPE_INTENT = "OUT_OF_SCOPE"
+
+_SCOPE_GUARD_WINDOW = 4
+_FOREIGN_JURISDICTION_KEYWORDS = (
+    "美国",
+    "英国",
+    "日本",
+    "韩国",
+    "德国",
+    "法国",
+    "欧盟",
+    "欧洲",
+    "澳大利亚",
+    "加拿大",
+    "新加坡",
+    "加州",
+    "纽约",
+    "美国联邦",
+    "联邦法院",
+    "联邦法",
+)
+_FOREIGN_LAW_KEYWORDS = (
+    "法律",
+    "法规",
+    "劳动法",
+    "劳动合同法",
+    "法院",
+    "法案",
+    "判例",
+    "判决",
+    "司法解释",
+    "条例",
+    "仲裁",
+    "法条",
+    "交通法规",
+)
+_NON_LEGAL_PATTERNS = (
+    "帮我写代码",
+    "写一段代码",
+    "写个脚本",
+    "python代码",
+    "java代码",
+    "javascript代码",
+    "帮我写python",
+    "帮我写java",
+    "编程",
+    "明天股票会涨吗",
+    "股票会涨吗",
+    "推荐股票",
+    "基金会涨吗",
+    "推荐基金",
+    "帮我翻译",
+    "翻译一段",
+    "翻译成英文",
+    "翻译成中文",
+    "今天天气",
+    "明天天气",
+    "天气怎么样",
+    "会下雨吗",
+    "帮我写作文",
+    "帮我做作业",
+    "菜谱",
+    "减肥计划",
+)
+
+
+def _normalize_question(text: str) -> str:
+    return "".join((text or "").lower().strip().split())
+
+
+def _iter_keyword_positions(text: str, keyword: str) -> list[tuple[int, int]]:
+    positions: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        index = text.find(keyword, start)
+        if index < 0:
+            return positions
+        positions.append((index, index + len(keyword)))
+        start = index + len(keyword)
+
+
+def _keywords_are_nearby(
+    text: str,
+    anchors: tuple[str, ...],
+    targets: tuple[str, ...],
+    window: int = _SCOPE_GUARD_WINDOW,
+) -> bool:
+    for anchor in anchors:
+        for anchor_start, anchor_end in _iter_keyword_positions(text, anchor):
+            for target in targets:
+                for target_start, target_end in _iter_keyword_positions(text, target):
+                    gap = max(target_start - anchor_end, anchor_start - target_end, 0)
+                    if gap <= window:
+                        return True
+    return False
+
+
+def looks_like_foreign_law_query(question: str) -> bool:
+    cleaned = _normalize_question(question)
+    if not cleaned:
+        return False
+    if not any(keyword in cleaned for keyword in _FOREIGN_JURISDICTION_KEYWORDS):
+        return False
+    return _keywords_are_nearby(
+        cleaned,
+        _FOREIGN_JURISDICTION_KEYWORDS,
+        _FOREIGN_LAW_KEYWORDS,
+    )
+
+
+def looks_like_non_legal_request(question: str) -> bool:
+    cleaned = _normalize_question(question)
+    if not cleaned:
+        return False
+    return any(pattern in cleaned for pattern in _NON_LEGAL_PATTERNS)
+
+
+def detect_out_of_scope_reason(question: str) -> str | None:
+    if looks_like_foreign_law_query(question):
+        return "FOREIGN_LAW"
+    if looks_like_non_legal_request(question):
+        return "NON_LEGAL"
+    return None
 
 
 # ======================================================================
@@ -98,17 +222,21 @@ def detect_intents(self, question: str, chat_history: str = "") -> dict[str, boo
     has_case_intent = any(keyword in question for keyword in case_keywords)
     has_graph_intent = any(keyword in question for keyword in graph_keywords) or "case" in lowered
     is_chitchat = self._looks_like_chitchat(question, chat_history=chat_history)
+    is_out_of_scope = detect_out_of_scope_reason(question) is not None
     return {
         "has_law_intent": has_law_intent,
         "has_case_intent": has_case_intent,
         "has_graph_intent": has_graph_intent,
         "is_composite": has_law_intent and has_case_intent,
         "is_chitchat": is_chitchat,
+        "is_out_of_scope": is_out_of_scope,
     }
 
 
 def fallback_route_decision(self, question: str, chat_history: str = "") -> dict[str, Any]:
     intents = self._detect_intents(question, chat_history=chat_history)
+    if intents["is_out_of_scope"]:
+        return {"route_intent": OUT_OF_SCOPE_INTENT, "tool_calls": []}
     if intents["is_chitchat"]:
         return {"route_intent": CHITCHAT_INTENT, "tool_calls": []}
     routes: list[dict[str, Any]] = []
@@ -222,7 +350,7 @@ def history_has_case_continuity(chat_history: str, case_summary: str) -> bool:
 
 def build_tool_calls_for_intent(self, route_intent: str, query: str) -> list[dict[str, Any]]:
     cleaned_query = " ".join((query or "").strip().split())
-    if not cleaned_query or route_intent == "GREETING":
+    if not cleaned_query or route_intent in {"GREETING", OUT_OF_SCOPE_INTENT}:
         return []
     if route_intent == "CASE_UPDATE":
         routes = [
@@ -237,7 +365,7 @@ def build_tool_calls_for_intent(self, route_intent: str, query: str) -> list[dic
 
 
 # ======================================================================
-# LLM-enhanced triple-track router
+# LLM-enhanced four-track router
 # ======================================================================
 
 async def route_decision(
@@ -251,6 +379,9 @@ async def route_decision(
     has_case_summary = bool((case_summary or "").strip())
     summary_text = (case_summary or "").strip() or "无案情摘要"
     cleaned_question = " ".join((question or "").strip().split())
+
+    if detect_out_of_scope_reason(cleaned_question):
+        return {"route_intent": OUT_OF_SCOPE_INTENT, "tool_calls": []}
 
     if is_precise_mode:
         retrieval_query = summary_text if has_case_summary else cleaned_question
@@ -297,7 +428,7 @@ async def route_decision(
         )
         parsed = self._safe_json_load(content, {"route_intent": fallback_intent})
         route_intent = str(parsed.get("route_intent", fallback_intent)).upper()
-        if route_intent not in {"GREETING", "GENERAL_CONSULT", "CASE_UPDATE"}:
+        if route_intent not in {"GREETING", "GENERAL_CONSULT", "CASE_UPDATE", OUT_OF_SCOPE_INTENT}:
             route_intent = fallback_intent
     except Exception as exc:
         logger.warning("Triple-track routing failed, fallback to heuristic route: %s", exc)

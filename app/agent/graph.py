@@ -43,6 +43,8 @@ def route_after_tool_router(state: AgentState) -> str:
     route_intent = str(state.get("route_intent", "GENERAL_CONSULT")).upper()
     if route_intent == "GREETING":
         return "greeting"
+    if route_intent == "OUT_OF_SCOPE":
+        return "out_of_scope"
     if route_intent == "CASE_UPDATE":
         return "fact_updater"
     return "vector_researcher"
@@ -76,6 +78,7 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
     graph = StateGraph(AgentState)
     graph.add_node("tool_router", agent.tool_router_node)
     graph.add_node("greeting", agent.greeting_node)
+    graph.add_node("out_of_scope", agent.out_of_scope_node)
     graph.add_node("fact_updater", agent.fact_updater_node)
     graph.add_node("vector_researcher", agent.vector_researcher_node)
     graph.add_node("reflector", agent.reflector_node)
@@ -89,11 +92,13 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
         route_after_tool_router,
         {
             "greeting": "greeting",
+            "out_of_scope": "out_of_scope",
             "fact_updater": "fact_updater",
             "vector_researcher": "vector_researcher",
         },
     )
     graph.add_edge("greeting", END)
+    graph.add_edge("out_of_scope", END)
     graph.add_edge("fact_updater", "vector_researcher")
     graph.add_conditional_edges(
         "vector_researcher",

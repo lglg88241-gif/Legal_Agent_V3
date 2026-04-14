@@ -255,6 +255,11 @@ def ask_agent_task(
                 {"tool": "tool_router", "result_summary": "Greeting route selected"},
                 {"tool": "greeting", "result_summary": "Fast greeting response generated"},
             ]
+        elif route_intent == "OUT_OF_SCOPE":
+            agent_actions = [
+                {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},
+                {"tool": "out_of_scope", "result_summary": "Fixed out-of-scope response generated"},
+            ]
         elif route_intent == "CASE_UPDATE":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Case update route selected"},
