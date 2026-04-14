@@ -6,47 +6,87 @@ This module contains only the LLM interaction wrapper and the post-generation
 hallucination guard (sanitize_llm_answer).
 
 Architecture contract:
-  - build_claim_payload() produces the authoritative answer skeleton.
+  - build_claim_payload() produces the authoritative answer skeleton + trace.
   - The LLM's only job is to improve readability (role: text editor, not lawyer).
+  - build_advisor_system_prompt() is extracted as a pure function for testability.
   - sanitize_llm_answer() acts as a last-mile firewall:
       * Any fabricated significant number → full revert to payload skeleton.
       * Any phantom "第N条" citation absent from RAG → surgical strip.
+
+Surgery 7: VERBATIM correction_notice block injected when overclaim detected.
 """
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from app.agent.graph import AgentState
+if TYPE_CHECKING:
+    from app.agent.graph import AgentState
+
 from app.schemas.case_state import CaseState
-from app.logic.calculators import build_claim_payload
+from app.logic.calculators import PayloadResult, build_claim_payload
 from app.agent.guards import sanitize_llm_answer
 
 logger = logging.getLogger(__name__)
 
 
-async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
-    tool_results = state.get("tool_results", [])
-    candidate_sources = self._extract_candidate_sources(tool_results)
-    retrieved_docs = self._build_context_blocks(tool_results)
-    case_summary = (state.get("case_summary") or "").strip()
-    graph_context = (
-        (state.get("graph_context") or "").strip()
-        or (state.get("graph_memory") or "").strip()
-    )
-    layered_payload = build_claim_payload(
-        CaseState.from_text(case_summary, state["question"], graph_context)
-    )
-    rag_context = retrieved_docs or "无有效检索结果"
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt builder (pure function — testable without LLM)
+# ─────────────────────────────────────────────────────────────────────────────
 
-    # ── Prompt: three-pillar hallucination prevention ──────────────────────
-    advisor_system_prompt = f"""
+def build_advisor_system_prompt(
+    case_summary: str,
+    graph_context: str,
+    rag_context: str,
+    payload: PayloadResult,
+) -> str:
+    """
+    Build the full advisor system prompt.
+
+    Extracted as a pure function so tests can assert on prompt content
+    without invoking any LLM or async machinery.
+
+    Surgery 7 additions:
+    - <correction_notice priority="VERBATIM"> block when overclaim detected.
+    - Legal-basis citation demotion guard (step.legal_basis with article
+      numbers must be verified against rag_context before LLM uses them).
+    """
+    # --- VERBATIM correction block (Surgery 7) ---
+    correction_block = ""
+    if payload.trace.correction_notices:
+        notice_texts = "\n".join(
+            f"【{n.item}纠错】{n.explanation}"
+            for n in payload.trace.correction_notices
+        )
+        correction_block = f"""
+
+<correction_notice priority="VERBATIM">
+以下纠错说明由后端程序依据法定规则生成，数字经过精确计算，内容权威可靠。
+你必须在回答的「算账与确权层」中原样转述以下内容，不得修改、删减、重新表述或重新计算：
+{notice_texts}
+转述后，继续完成其余层次的分析。
+</correction_notice>"""
+
+    # --- Legal basis citation demotion guard (Surgery 7) ---
+    legal_basis_block = ""
+    step_bases = [s.legal_basis for s in payload.trace.steps if s.legal_basis]
+    if step_bases:
+        legal_basis_block = """
+
+<citation_demotion_guard>
+计算轨迹中包含法律依据名称（如《劳动合同法》相关规定）。
+规则：法律依据名称你可以直接使用；但如果你想补充具体条文编号（如"第82条"），
+必须先确认该编号已在 <rag_context> 中原文出现。
+若未出现，只写法律名称，不写条文编号。
+</citation_demotion_guard>"""
+
+    prompt = f"""
 你是一名法律文本精校员（Legal Text Editor）。你的唯一职责是：
 将下方已计算完毕的「骨架文本」改写得更温暖、更具说服力、更贴近真实律师的表达风格。
 
 你不负责计算。你不负责引用法条。你不负责补充法律知识。
-
+{correction_block}
 <number_lock>
 【数字锁定 — 最高优先级，任何其他规则均不得推翻此条】
 骨架文本中的所有数字（元、月数、总额）是经过程序精确计算后写入的权威值。
@@ -68,7 +108,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
 若你想引用某部法律，只写法律名称（如《劳动合同法》），不写条文编号。
 原因：条文编号必须由检索系统提供，你的训练记忆不足以保证准确性。
 </citation_lock>
-
+{legal_basis_block}
 <editor_role>
 你被允许做的事：
 1. 调整语气——让文本更温暖、更有信心、更像真正的律师在说话。
@@ -92,7 +132,8 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
 <output_contract>
 1. 只返回 JSON，格式：{{"answer": "...", "sources": [...]}}
 2. answer：对骨架文本的精校版本，必须保留四层结构和全部数字。
-3. sources：只能从候选来源中选择，不能编造。
+3. 若存在 <correction_notice>，其内容必须出现在 answer 的「算账与确权层」中。
+4. sources：只能从候选来源中选择，不能编造。
 </output_contract>
 
 <context>
@@ -115,6 +156,31 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
 错误原因：① 脑补了"第82条"（RAG 无此编号）；② 添加了乘法公式推导过程。
 </examples>
 """.strip()
+
+    return prompt
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Node function
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
+    tool_results = state.get("tool_results", [])
+    candidate_sources = self._extract_candidate_sources(tool_results)
+    retrieved_docs = self._build_context_blocks(tool_results)
+    case_summary = (state.get("case_summary") or "").strip()
+    graph_context = (
+        (state.get("graph_context") or "").strip()
+        or (state.get("graph_memory") or "").strip()
+    )
+    layered_payload = build_claim_payload(
+        CaseState.from_text(case_summary, state["question"], graph_context)
+    )
+    rag_context = retrieved_docs or "无有效检索结果"
+
+    advisor_system_prompt = build_advisor_system_prompt(
+        case_summary, graph_context, rag_context, layered_payload
+    )
 
     fallback = {"answer": layered_payload.answer, "sources": []}
 
@@ -145,7 +211,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
     if ("未找到依据" in raw_answer) or ("依据不足" in raw_answer):
         raw_answer = fallback["answer"]
 
-    # ── Post-generation hallucination guard ───────────────────────────────
+    # ── Post-generation hallucination guard (Surgery 6+7) ─────────────────
     answer = sanitize_llm_answer(raw_answer, layered_payload, rag_context)
 
     sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)

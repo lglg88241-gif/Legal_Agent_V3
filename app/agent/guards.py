@@ -15,6 +15,10 @@ Two categories of hallucination are intercepted:
 2. Phantom article citations — the LLM invents article numbers
    ("第82条") that are absent from both the RAG context and the
    authoritative payload skeleton. Only the law name may be preserved.
+
+Surgery 7: allowed-number whitelist extended to include numbers from
+CalculationTrace.correction_notices, so verbatim-reproduced correction
+text (user_claimed, legal_limit) is never mistakenly flagged.
 """
 from __future__ import annotations
 
@@ -45,7 +49,7 @@ _NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 def detect_number_discrepancy(llm_answer: str, payload: PayloadResult) -> bool:
     """
     Return True if the LLM answer contains a significant number that is
-    NOT present in the authoritative payload text.
+    NOT present in the authoritative payload text OR correction notices.
 
     Significant means >= _SIGNIFICANT_NUMBER_THRESHOLD (1000).  Small
     numbers (months, counts, percentages) are ignored because they appear
@@ -56,13 +60,16 @@ def detect_number_discrepancy(llm_answer: str, payload: PayloadResult) -> bool:
     nothing to contradict.
     """
     payload_numbers = _extract_significant_numbers(payload.answer)
+    # Surgery 7: also whitelist numbers from correction notices
+    notice_numbers = _extract_notice_numbers(payload)
+    all_authoritative = payload_numbers | notice_numbers
+
     if not payload_numbers:
         # No authoritative numbers to protect — nothing to flag.
         return False
 
     llm_numbers = _extract_significant_numbers(llm_answer)
-    # Any significant number in LLM output that is absent from payload is suspect.
-    fabricated = llm_numbers - payload_numbers
+    fabricated = llm_numbers - all_authoritative
     return bool(fabricated)
 
 
@@ -92,6 +99,8 @@ def sanitize_llm_answer(
     Strategy:
     1. Number discrepancy → revert entirely to payload.answer (hard reset).
        Rationale: a wrong number anywhere poisons the whole response.
+       Surgery 7: correction_notice numbers are whitelisted — verbatim
+       reproductions of the Python-generated correction text are allowed.
     2. Phantom article citations → strip only the fabricated "第N条" tokens,
        preserving the surrounding prose and the law name.
        Rationale: removing one citation is surgical; the rest of the answer
@@ -99,11 +108,11 @@ def sanitize_llm_answer(
 
     Returns the (possibly modified) answer string.
     """
-    # Step 1: check numbers against BOTH the payload AND the rag_context
-    # (numbers from RAG are legitimate sources too).
+    # Step 1: check numbers against payload, rag_context, AND correction notices.
     rag_numbers = _extract_significant_numbers(rag_context)
     payload_numbers = _extract_significant_numbers(payload.answer)
-    allowed_numbers = payload_numbers | rag_numbers
+    notice_numbers = _extract_notice_numbers(payload)
+    allowed_numbers = payload_numbers | rag_numbers | notice_numbers
 
     llm_numbers = _extract_significant_numbers(llm_answer)
     if payload_numbers:  # Only enforce when payload has authoritative numbers.
@@ -112,17 +121,22 @@ def sanitize_llm_answer(
             return payload.answer
 
     # Step 2: strip phantom article citations.
-    # A citation is allowed if it appears in RAG context OR in payload answer.
+    # A citation is allowed if it appears in RAG context OR in payload answer
+    # OR in any correction notice explanation.
+    notice_citations: set[str] = set()
+    for notice in payload.trace.correction_notices:
+        notice_citations |= _extract_article_citations(notice.explanation)
+
     allowed_citations = (
         _extract_article_citations(rag_context)
         | _extract_article_citations(payload.answer)
+        | notice_citations
     )
     llm_citations = _extract_article_citations(llm_answer)
     phantom_citations = [c for c in llm_citations if c not in allowed_citations]
 
     result = llm_answer
     for phantom in phantom_citations:
-        # Remove the phantom citation token from the text.
         result = result.replace(phantom, "")
 
     # Clean up any double spaces left by removal.
@@ -152,11 +166,26 @@ def _extract_significant_numbers(text: str) -> set[str]:
     return results
 
 
+def _extract_notice_numbers(payload: PayloadResult) -> set[str]:
+    """
+    Extract significant numbers from all correction_notice explanations
+    and numeric fields so they are never flagged as hallucinations when
+    the LLM faithfully reproduces the verbatim correction text.
+    """
+    numbers: set[str] = set()
+    for notice in payload.trace.correction_notices:
+        numbers |= _extract_significant_numbers(notice.explanation)
+        # Also add the raw numeric fields directly.
+        for val in (notice.user_claimed, notice.legal_limit, notice.discrepancy):
+            if val >= _SIGNIFICANT_NUMBER_THRESHOLD:
+                numbers.add(str(int(val)) if val == int(val) else str(val))
+    return numbers
+
+
 def _extract_article_citations(text: str) -> set[str]:
     """Extract all '第N条' style citations, normalised (no whitespace)."""
     citations: set[str] = set()
     for match in _ARTICLE_PATTERN.finditer(text):
-        # Normalise: remove internal whitespace
         normalised = re.sub(r"\s+", "", match.group())
         citations.add(normalised)
     return citations

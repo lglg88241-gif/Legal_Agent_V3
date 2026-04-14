@@ -6,6 +6,11 @@ no network. Input is a CaseState; output is a structured PayloadResult.
 
 The LLM's only job downstream is to polish the prose and weave in
 RAG-retrieved citations. It must NEVER override the numbers produced here.
+
+Surgery 7: CalculationTrace added.  PayloadResult now carries a full
+audit trail (steps, totals, correction notices) so the Advisor node can
+feed the LLM the *why* behind each number without giving it license to
+recalculate.
 """
 from __future__ import annotations
 
@@ -15,6 +20,46 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.schemas.case_state import CaseState
+
+
+# ======================================================================
+# Calculation trace models (Surgery 7)
+# ======================================================================
+
+class CalculationStep(BaseModel):
+    """Audit record for a single deterministic claim calculation."""
+
+    item: str = Field(description="索赔项目名称，如'二倍工资差额'")
+    formula: str = Field(description="人类可读计算公式，如'月工资 12000 × 可主张月数 11'")
+    result: float = Field(ge=0, description="计算结果（元）")
+    cap_rule: str | None = Field(default=None, description="法定上限说明")
+    legal_basis: str | None = Field(default=None, description="法律依据名称（无条文编号）")
+
+
+class CorrectionNotice(BaseModel):
+    """
+    Auto-generated correction when the user's claimed amount exceeds the
+    statutory calculation.  All text is Python-generated; the LLM must
+    reproduce it verbatim.
+    """
+
+    item: str = Field(description="纠错针对的索赔项目，如'二倍工资差额'")
+    user_claimed: float = Field(ge=0, description="用户主张金额（元）")
+    legal_limit: float = Field(ge=0, description="法定正确金额（元）")
+    discrepancy: float = Field(ge=0, description="差额 = user_claimed − legal_limit（元）")
+    is_overclaim: bool = Field(description="True 表示用户超额主张")
+    explanation: str = Field(description="预制纠错文案（Python 生成，LLM 必须逐字转述）")
+
+
+class CalculationTrace(BaseModel):
+    """Complete audit trail produced by build_claim_payload()."""
+
+    steps: list[CalculationStep] = Field(default_factory=list)
+    total: float = Field(ge=0, description="各 step.result 之和")
+    correction_notices: list[CorrectionNotice] = Field(
+        default_factory=list,
+        description="超额/非法主张纠错列表（支持多项）",
+    )
 
 
 # ======================================================================
@@ -29,6 +74,105 @@ class PayloadResult(BaseModel):
     followup: str = Field(default="", description="Sandwich-style follow-up question")
     constructive_next_step: str = Field(default="", description="Proactive next action proposal")
     unknowns: list[str] = Field(default_factory=list, description="Missing core fields (max 2)")
+    trace: CalculationTrace = Field(
+        default_factory=lambda: CalculationTrace(total=0.0),
+        description="Deterministic calculation audit trail (Surgery 7)",
+    )
+
+
+# ======================================================================
+# Overclaim detection (context-aware, Surgery 7)
+# ======================================================================
+
+# Keywords that make a nearby number relevant to double-salary claims.
+_DOUBLE_SALARY_CONTEXT_TOKENS = (
+    "双倍工资", "二倍工资", "双薪", "双倍薪", "赔偿", "差额",
+    "补偿", "要求", "主张", "能要", "应得", "索赔",
+)
+
+# Lookahead/lookbehind window (characters) for context matching.
+_CONTEXT_WINDOW = 30
+
+# Pattern for extracting numbers in a string.
+_NUM_RE = re.compile(r"\d+(?:[,，]\d{3})*(?:\.\d+)?")
+
+
+def _strip_number_separators(raw: str) -> str:
+    """Remove Chinese/Western thousand separators before parsing."""
+    return raw.replace(",", "").replace("，", "")
+
+
+def _extract_contextual_numbers(text: str, context_tokens: tuple[str, ...]) -> list[float]:
+    """
+    Extract numbers that appear within _CONTEXT_WINDOW characters of at
+    least one keyword in context_tokens.  Numbers near unrelated content
+    (case numbers, deposit amounts without salary context) are ignored.
+    """
+    results: list[float] = []
+    for match in _NUM_RE.finditer(text):
+        start, end = match.start(), match.end()
+        window = text[max(0, start - _CONTEXT_WINDOW): end + _CONTEXT_WINDOW]
+        if any(tok in window for tok in context_tokens):
+            try:
+                value = float(_strip_number_separators(match.group()))
+                if value >= 1000:
+                    results.append(value)
+            except ValueError:
+                pass
+    return results
+
+
+def _detect_overclaim(cs: CaseState) -> list[CorrectionNotice]:
+    """
+    Detect overclaim situations where the user's stated amount exceeds
+    the deterministically computed statutory ceiling.
+
+    Context-aware: only numbers appearing near double-salary / compensation
+    keywords in cs.question are compared.  Unrelated large numbers (deposits,
+    case numbers) are ignored.
+
+    Returns a list of CorrectionNotice objects (one per detected overclaim).
+    Currently covers: double-salary-gap overclaim.
+    """
+    notices: list[CorrectionNotice] = []
+
+    # --- Double salary overclaim ---
+    if (
+        cs.has_unsigned_contract
+        and cs.monthly_salary is not None
+        and cs.work_months is not None
+        and cs.double_salary_gap > 0
+    ):
+        candidate_numbers = _extract_contextual_numbers(
+            cs.question, _DOUBLE_SALARY_CONTEXT_TOKENS
+        )
+        for user_val in candidate_numbers:
+            # Tolerance: 1% to absorb float rounding in user's mental math.
+            if user_val > cs.double_salary_gap * 1.01:
+                discrepancy = round(user_val - cs.double_salary_gap, 2)
+                explanation = (
+                    f"您提到的 {user_val:.0f} 元与法定计算有出入。"
+                    f"根据《劳动合同法》关于未签书面劳动合同二倍工资的规定，"
+                    f"可主张月数从实际用工满一个月后起算，首月不计入，"
+                    f"且法定上限为 11 个月。"
+                    f"按您的情况，法定可主张月数为 {cs.compensable_months} 个月"
+                    f"（而非 {cs.work_months} 个月），"
+                    f"正确金额为 {cs.monthly_salary:.0f} 元 × {cs.compensable_months} 个月"
+                    f" = {cs.double_salary_gap:.0f} 元，"
+                    f"而非 {user_val:.0f} 元。"
+                    f"建议按 {cs.double_salary_gap:.0f} 元申请，"
+                    f"以避免仲裁委因超出法定上限而驳回该项请求。"
+                )
+                notices.append(CorrectionNotice(
+                    item="二倍工资差额",
+                    user_claimed=user_val,
+                    legal_limit=cs.double_salary_gap,
+                    discrepancy=discrepancy,
+                    is_overclaim=True,
+                    explanation=explanation,
+                ))
+
+    return notices
 
 
 # ======================================================================
@@ -93,6 +237,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     This is the authoritative pure-Python replacement for the legacy
     module-level functions in legal_agent.py (Surgery 5).
     It produces structured PayloadResult output consumed by all nodes.
+    Surgery 7 adds a CalculationTrace for white-box LLM context.
     """
     merged = _merged_text(cs)
     facts = _split_fact_lines(cs.case_summary, cs.question, cs.graph_context)
@@ -101,6 +246,9 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     strategy_lines: list[str] = []
     action_lines: list[str] = []
     unknowns: list[str] = []
+
+    # --- Trace steps accumulator ---
+    steps: list[CalculationStep] = []
 
     # --- Unsigned contract / double salary ---
     if cs.has_unsigned_contract:
@@ -114,6 +262,19 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
                 f" × 可主张月数 {cs.compensable_months}"
                 f" = 二倍工资差额约 {cs.double_salary_gap:.0f} 元。"
             )
+            steps.append(CalculationStep(
+                item="二倍工资差额",
+                formula=(
+                    f"月工资 {cs.monthly_salary:.0f} 元"
+                    f" × 可主张月数 {cs.compensable_months}"
+                ),
+                result=cs.double_salary_gap,
+                cap_rule=(
+                    f"首月不计入，法定上限 11 个月"
+                    f"（实际工作 {cs.work_months} 个月，可主张 {cs.compensable_months} 个月）"
+                ) if cs.work_months > 1 else "法定上限 11 个月",
+                legal_basis="《劳动合同法》关于未签书面劳动合同二倍工资的规定",
+            ))
         else:
             if cs.monthly_salary is None:
                 unknowns.append("月工资标准")
@@ -123,6 +284,13 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     # --- Owed wages ---
     if cs.owed_wages > 0:
         calculation_lines.append(f"拖欠工资部分：约 {cs.owed_wages:.0f} 元。")
+        steps.append(CalculationStep(
+            item="拖欠工资",
+            formula=f"欠薪金额 {cs.owed_wages:.0f} 元",
+            result=cs.owed_wages,
+            cap_rule=None,
+            legal_basis="《劳动合同法》关于工资支付的规定",
+        ))
     elif cs.has_owed_wages and cs.monthly_salary is not None:
         calculation_lines.append("存在工资拖欠事实，待确认具体欠薪月数后可精确计算。")
 
@@ -132,6 +300,13 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
             f"押金/保证金部分：{cs.deposit:.0f} 元，"
             "用人单位收取押金本身违反《劳动合同法》第九条，可依法要求全额退还。"
         )
+        steps.append(CalculationStep(
+            item="押金退还",
+            formula=f"押金/保证金 {cs.deposit:.0f} 元",
+            result=cs.deposit,
+            cap_rule=None,
+            legal_basis="《劳动合同法》第九条（禁止收取押金）",
+        ))
     elif cs.has_deposit_dispute:
         calculation_lines.append(
             "存在押金争议，用人单位向劳动者收取押金违反《劳动合同法》第九条，可要求退还。"
@@ -247,10 +422,18 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     else:
         answer_parts.append("建设性推进：\n- " + constructive_next_step)
 
+    # --- Build trace ---
+    trace = CalculationTrace(
+        steps=steps,
+        total=cs.claim_total,
+        correction_notices=_detect_overclaim(cs),
+    )
+
     return PayloadResult(
         answer="\n\n".join(answer_parts),
         needs_core_followup=needs_core_followup,
         followup=sandwich_followup,
         constructive_next_step=constructive_next_step,
         unknowns=unknowns[:2],
+        trace=trace,
     )
