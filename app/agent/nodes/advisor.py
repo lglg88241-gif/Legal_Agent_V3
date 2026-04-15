@@ -14,6 +14,11 @@ Architecture contract:
       * Any phantom "第N条" citation absent from RAG → surgical strip.
 
 Surgery 7: VERBATIM correction_notice block injected when overclaim detected.
+
+Surgery 11:
+- GENERAL_CONSULT 路径默认不会经过 reflector，因此原先 confidence_score 会沿用 0.0。
+- 现在在 advisor 返回前补一层启发式 confidence：
+  0源+无payload=0.35，1-2源=0.55，3+源+payload=0.78，其余=0.65。
 """
 from __future__ import annotations
 
@@ -179,6 +184,34 @@ def _build_statute_guard_rag_sources(
         fragments.append(cleaned)
 
     return fragments
+
+
+def _compute_heuristic_confidence(state: dict[str, Any]) -> float | None:
+    """
+    Surgery #11: 当 reflector 未执行时，基于检索源数量和 payload 存在性估算 confidence。
+
+    规则：
+    - 0源 + 无 payload -> 0.35
+    - 1-2 源 -> 0.55
+    - 3+ 源 + 有 payload -> 0.78
+    - 其他 -> 0.65
+
+    若 confidence_score 已由 reflector 写入（>= 0.01），返回 None 表示不覆盖。
+    """
+    if float(state.get("confidence_score", 0.0) or 0.0) >= 0.01:
+        return None
+
+    rag_sources = state.get("rag_sources") or []
+    source_count = len(rag_sources) if isinstance(rag_sources, list) else 0
+    has_payload = bool(state.get("claim_payload"))
+
+    if source_count == 0 and not has_payload:
+        return 0.35
+    if source_count <= 2:
+        return 0.55
+    if source_count >= 3 and has_payload:
+        return 0.78
+    return 0.65
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -401,9 +434,23 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         statute_guard_rag_sources,
     )
 
+    heuristic_confidence = _compute_heuristic_confidence(
+        {
+            "confidence_score": state.get("confidence_score", 0.0),
+            "rag_sources": candidate_sources,
+            "claim_payload": layered_payload if _payload_has_authoritative_claims(layered_payload) else None,
+        }
+    )
+    confidence_score = (
+        float(heuristic_confidence)
+        if heuristic_confidence is not None
+        else float(state.get("confidence_score", 0.0))
+    )
+
     sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
     return {
         "response": answer.strip(),
         "sources": sources,
+        "confidence_score": confidence_score,
         "is_final": True,
     }
