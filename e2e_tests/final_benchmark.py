@@ -2,8 +2,8 @@
 Legal Agent V3 — 毕业论文最终全量端到端基准测试。
 
 输出：
-  - e2e_tests/results/final_benchmark_data.json
-  - e2e_tests/results/final_benchmark_report.md
+  - e2e_tests/results/benchmark_v11_data.json
+  - e2e_tests/results/benchmark_v11_report.md
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ from e2e_tests.dialogue_scenarios import README_STANDARD_QUESTIONS
 
 BASE_URL = "http://127.0.0.1:8000"
 RESULTS_DIR = ROOT / "e2e_tests" / "results"
-JSON_PATH = RESULTS_DIR / "final_benchmark_data.json"
-REPORT_PATH = RESULTS_DIR / "final_benchmark_report.md"
+JSON_PATH = RESULTS_DIR / "benchmark_v11_data.json"
+REPORT_PATH = RESULTS_DIR / "benchmark_v11_report.md"
 INTER_REQUEST_DELAY = 3
 TIMEOUT_SECONDS = 120
 
@@ -104,6 +104,37 @@ def check_keywords(response: str, keywords: list[str]) -> dict:
 
 def safe_sleep() -> None:
     time.sleep(INTER_REQUEST_DELAY)
+
+
+def run_warmup_stage(client: LegalAgentClient) -> None:
+    """预热阶段：触发 lazy-init 组件加载，结果不计入正式基准。"""
+    print("\n" + "=" * 72)
+    print("预热阶段：消除冷启动延迟")
+    print("=" * 72)
+    conv_id = client.create_conversation(title="最终基准-预热会话")
+
+    for index in range(2):
+        print(f"[预热 {index + 1}/2] 发送预热请求")
+        try:
+            result = client.send_message(
+                conv_id,
+                "你好",
+                force_current_case=False,
+                is_precise_mode=False,
+                proactive_graph_mode=False,
+            )
+            print(
+                f"  预热请求 #{index + 1} 完成："
+                f"status={result.get('status')} "
+                f"wall={result.get('wall_ms')}ms "
+                f"latency={result.get('latency_ms')}"
+            )
+        except Exception as exc:  # pragma: no cover - 仅用于真实端到端执行
+            print(f"  预热请求 #{index + 1} 失败：{exc}")
+        if index != 1:
+            safe_sleep()
+
+    print("预热完成，开始正式基准测试。\n")
 
 
 def dialog_record(
@@ -457,6 +488,7 @@ def make_comparison_rows(summary: dict) -> list[dict]:
 
 
 def write_json(system_status: dict, standard: list[dict], scripts: list[dict], defenses: dict, graph_checks: dict, summary: dict, comparison: list[dict], commit_hash: str) -> None:
+    flattened_requests = flatten_dialog_records(standard, scripts, defenses)
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "base_url": BASE_URL,
@@ -464,6 +496,7 @@ def write_json(system_status: dict, standard: list[dict], scripts: list[dict], d
         "system_status": system_status,
         "summary": summary,
         "comparison": comparison,
+        "requests": flattened_requests,
         "standard_questions": standard,
         "scripts": scripts,
         "defenses": defenses,
@@ -643,6 +676,7 @@ def main() -> int:
     client = LegalAgentClient(BASE_URL)
     username = LegalAgentClient.random_username("paper_")
     client.register_and_login(username, "Test1234!")
+    run_warmup_stage(client)
 
     standard = run_standard_questions(client)
     safe_sleep()
@@ -662,9 +696,6 @@ def main() -> int:
     scripts = [script_a, script_b, script_c]
     summary = compute_summary(standard, scripts, defenses, graph_checks)
     comparison = make_comparison_rows(summary)
-    commit_hash = requests.get if False else None
-    commit_hash = Path(".")
-    del commit_hash
 
     import subprocess
 
