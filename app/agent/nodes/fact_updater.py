@@ -19,7 +19,7 @@ async def fact_updater_node(self, state: AgentState) -> AgentState:
 
     try:
         content = await self._chat_model(
-            self.expert_llm,
+            self.summary_llm,
             [
                 {"role": "system", "content": FACT_UPDATER_SYSTEM_PROMPT_V2},
                 {

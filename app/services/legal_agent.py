@@ -19,10 +19,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_community.chat_models import ChatZhipuAI
-
 from app.agent.graph import AgentState, build_legal_agent_graph
-from app.core.config import settings
+from app.core.llm_factory import (
+    create_expert_llm,
+    create_router_llm,
+    create_summary_llm,
+)
 
 # --- Import node implementations ---
 from app.agent.nodes._llm import (
@@ -69,21 +71,9 @@ logger = logging.getLogger(__name__)
 
 class LegalGraphAgent:
     def __init__(self):
-        self.router_llm = ChatZhipuAI(
-            model="glm-4",
-            api_key=settings.ZHIPUAI_API_KEY,
-            temperature=0.1,
-        )
-        self.reflector_llm = ChatZhipuAI(
-            model="glm-4",
-            api_key=settings.ZHIPUAI_API_KEY,
-            temperature=0.1,
-        )
-        self.expert_llm = ChatZhipuAI(
-            model="glm-4",
-            api_key=settings.ZHIPUAI_API_KEY,
-            temperature=0.1,
-        )
+        self.router_llm = create_router_llm()
+        self.expert_llm = create_expert_llm()
+        self.summary_llm = create_summary_llm()
         self.graph = build_legal_agent_graph(self)
 
     # === Shared LLM utilities (delegated to _llm module) ===
