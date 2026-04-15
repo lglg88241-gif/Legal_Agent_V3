@@ -15,7 +15,7 @@ recalculate.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, Field
 
@@ -99,7 +99,7 @@ _NUM_RE = re.compile(r"\d+(?:[,，]\d{3})*(?:\.\d+)?")
 # Overclaim tolerance: only flag when user's claim exceeds legal limit by
 # more than this factor.  1.01 = 1 % buffer absorbs minor rounding in
 # the user's mental arithmetic without swamping genuine overclaims.
-_OVERCLAIM_TOLERANCE = 1.01
+_OVERCLAIM_TOLERANCE: Final[float] = 1.01
 
 
 def _strip_number_separators(raw: str) -> str:
