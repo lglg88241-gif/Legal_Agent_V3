@@ -10,7 +10,8 @@ class Settings:
     LLM_MODE = os.getenv("LLM_MODE", "mock")
     API_KEY = os.getenv("API_KEY", "EMPTY")
     BASE_URL = os.getenv("BASE_URL", "http://localhost:8001/v1")
-    LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen/Qwen1.5-1.8B-Chat-AWQ")
+    LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct-AWQ")
+    LOCAL_LLM_ENABLED = os.getenv("LOCAL_LLM_ENABLED", "true").lower() == "true"
 
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")

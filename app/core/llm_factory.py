@@ -1,0 +1,207 @@
+"""
+Surgery #12: 双模型工厂 — 本地 vLLM + 云端智谱协作。
+
+本地模型（OpenAI 兼容的 vLLM）用于：
+  - router_llm: 意图路由分类
+  - query_expansion_llm: 查询扩展 / 指代消解
+
+云端模型（ChatZhipuAI）用于：
+  - expert_llm: 法律回答生成
+  - summary_llm: 案情摘要合并
+
+降级策略：
+  - 本地模型创建成功后，由调用方在关键路径上负责 fallback 到云端。
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+import requests
+
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _ChatResponse:
+    content: str
+
+
+class ChatOpenAI:
+    """Minimal OpenAI-compatible chat client for local vLLM."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        base_url: str,
+        temperature: float = 0.1,
+        max_tokens: int = 512,
+        timeout: float = 60.0,
+    ) -> None:
+        self.model_name = model
+        self.openai_api_key = api_key
+        self.openai_api_base = base_url.rstrip("/")
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.timeout = timeout
+
+    def _chat_completions_url(self) -> str:
+        return f"{self.openai_api_base}/chat/completions"
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.openai_api_key:
+            headers["Authorization"] = f"Bearer {self.openai_api_key}"
+        return headers
+
+    def _normalize_role(self, message: Any) -> str:
+        if isinstance(message, dict):
+            role = str(message.get("role", "user")).lower()
+        else:
+            role = str(getattr(message, "type", type(message).__name__.replace("Message", ""))).lower()
+
+        if role in {"human", "user"}:
+            return "user"
+        if role in {"ai", "assistant"}:
+            return "assistant"
+        if role == "system":
+            return "system"
+        return "user"
+
+    def _normalize_content(self, message: Any) -> str:
+        if isinstance(message, dict):
+            content = message.get("content", "")
+        else:
+            content = getattr(message, "content", "")
+        return content if isinstance(content, str) else str(content)
+
+    def _build_payload(self, messages: list[Any]) -> dict[str, Any]:
+        return {
+            "model": self.model_name,
+            "messages": [
+                {
+                    "role": self._normalize_role(message),
+                    "content": self._normalize_content(message),
+                }
+                for message in messages
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+
+    @staticmethod
+    def _extract_content(data: dict[str, Any]) -> str:
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError(f"Missing choices in vLLM response: {data}")
+
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        return content if isinstance(content, str) else str(content)
+
+    def invoke(self, messages: list[Any]) -> _ChatResponse:
+        response = requests.post(
+            self._chat_completions_url(),
+            headers=self._headers(),
+            json=self._build_payload(messages),
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return _ChatResponse(content=self._extract_content(response.json()))
+
+    async def ainvoke(self, messages: list[Any]) -> _ChatResponse:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                self._chat_completions_url(),
+                headers=self._headers(),
+                json=self._build_payload(messages),
+            )
+            response.raise_for_status()
+        return _ChatResponse(content=self._extract_content(response.json()))
+
+
+class ChatZhipuAI(ChatOpenAI):
+    """Minimal ZhipuAI chat client using the public chat completions API."""
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        temperature: float = 0.1,
+        max_tokens: int = 2048,
+        timeout: float = 60.0,
+        base_url: str = "https://open.bigmodel.cn/api/paas/v4",
+    ) -> None:
+        super().__init__(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+        )
+
+
+def create_local_llm(
+    temperature: float = 0.1,
+    max_tokens: int = 512,
+) -> ChatOpenAI:
+    """Create a local OpenAI-compatible chat client for vLLM."""
+    return ChatOpenAI(
+        model=settings.LLM_MODEL_NAME,
+        api_key=settings.API_KEY,
+        base_url=settings.BASE_URL,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def create_cloud_llm(
+    model: str = "glm-4-flash",
+    temperature: float = 0.1,
+    max_tokens: int = 2048,
+) -> ChatZhipuAI:
+    """Create a cloud ChatZhipuAI client."""
+    return ChatZhipuAI(
+        model=model,
+        api_key=settings.ZHIPUAI_API_KEY,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+
+def create_router_llm() -> ChatOpenAI | ChatZhipuAI:
+    """Router LLM — prefer local vLLM, otherwise use cloud."""
+    if settings.LOCAL_LLM_ENABLED:
+        logger.info("Router LLM -> local vLLM (%s)", settings.LLM_MODEL_NAME)
+        return create_local_llm(temperature=0.1, max_tokens=256)
+
+    logger.info("Router LLM -> cloud ZhipuAI (LOCAL_LLM_ENABLED=false)")
+    return create_cloud_llm(temperature=0.1, max_tokens=256)
+
+
+def create_query_expansion_llm() -> ChatOpenAI | ChatZhipuAI:
+    """Query expansion LLM — prefer local vLLM, otherwise use cloud."""
+    if settings.LOCAL_LLM_ENABLED:
+        logger.info("Query expansion LLM -> local vLLM (%s)", settings.LLM_MODEL_NAME)
+        return create_local_llm(temperature=0.3, max_tokens=512)
+
+    logger.info("Query expansion LLM -> cloud ZhipuAI (LOCAL_LLM_ENABLED=false)")
+    return create_cloud_llm(temperature=0.3, max_tokens=512)
+
+
+def create_expert_llm(model: str = "glm-4-flash") -> ChatZhipuAI:
+    """Expert LLM — always cloud for answer quality."""
+    return create_cloud_llm(model=model, temperature=0.1, max_tokens=2048)
+
+
+def create_summary_llm(model: str = "glm-4-flash") -> ChatZhipuAI:
+    """Summary LLM — always cloud for case-summary merging."""
+    return create_cloud_llm(model=model, temperature=0.1, max_tokens=1024)
