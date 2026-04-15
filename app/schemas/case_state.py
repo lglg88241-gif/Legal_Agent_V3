@@ -71,6 +71,8 @@ class CaseState(BaseModel):
         case_summary = case_summary or ""
         question = question or ""
         graph_context = graph_context or ""
+        if not any((case_summary.strip(), question.strip(), graph_context.strip())):
+            return cls()
         merged = " ".join(
             part for part in [case_summary, question, graph_context] if part
         ).strip()
