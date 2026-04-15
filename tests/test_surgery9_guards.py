@@ -18,6 +18,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agent.guards import (
+    _strip_case_numbers,
     sanitize_hallucinated_statutes,
     sanitize_unverified_claims,
 )
@@ -122,6 +123,14 @@ def test_case_number_amount_does_not_trigger() -> None:
         None,
     )
     assert result == llm_answer
+
+
+def test_case_number_not_flagged_by_guard() -> None:
+    """P1-B: 案号中的数字不应被守卫误杀。"""
+    text = "根据(2024)京0105民初12345号判决，赔偿金额为5000元"
+    cleaned = _strip_case_numbers(text)
+    assert "12345" not in cleaned
+    assert "5000" in cleaned
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -410,9 +410,10 @@ def _extract_claim_amounts_from_user_input(text: str) -> list[float]:
     """Extract claim-related user amounts while ignoring case numbers / years."""
     amounts: list[float] = []
     seen: set[str] = set()
+    stripped_text = _strip_case_numbers(text or "")
     exempt = _extract_exempt_numbers(text)
 
-    for match in _AMOUNT_PATTERN.finditer(text or ""):
+    for match in _AMOUNT_PATTERN.finditer(stripped_text):
         raw = match.group()
         normalized = _normalize_numeric_token(raw)
         if normalized in exempt:
@@ -424,7 +425,7 @@ def _extract_claim_amounts_from_user_input(text: str) -> list[float]:
         if value < _SIGNIFICANT_NUMBER_THRESHOLD:
             continue
         start, end = match.start(), match.end()
-        window = (text or "")[max(0, start - _AMOUNT_CONTEXT_WINDOW): end + _AMOUNT_CONTEXT_WINDOW]
+        window = stripped_text[max(0, start - _AMOUNT_CONTEXT_WINDOW): end + _AMOUNT_CONTEXT_WINDOW]
         if not any(token in window for token in _CLAIM_AMOUNT_CONTEXT_TOKENS):
             continue
         if normalized in seen:
@@ -432,6 +433,11 @@ def _extract_claim_amounts_from_user_input(text: str) -> list[float]:
         seen.add(normalized)
         amounts.append(value)
     return amounts
+
+
+def _strip_case_numbers(text: str) -> str:
+    """Remove case-number spans before numeric guard checks."""
+    return _CASE_NUMBER_PATTERN.sub("", text or "")
 
 
 def _replace_claim_amount_lines(text: str, amounts: list[float]) -> str:
