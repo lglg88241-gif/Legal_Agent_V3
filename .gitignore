@@ -7,9 +7,14 @@ venv/
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
 
 # Runtime vector stores
 chroma_data/
 runtime_chroma_data/
 *.pkl
 e2e_tests/results/
+e2e_tests/results/*.json
+e2e_tests/results/*.md
