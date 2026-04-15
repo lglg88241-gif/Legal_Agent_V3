@@ -109,16 +109,20 @@ def safe_sleep() -> None:
 def run_warmup_stage(client: LegalAgentClient) -> None:
     """预热阶段：触发 lazy-init 组件加载，结果不计入正式基准。"""
     print("\n" + "=" * 72)
-    print("预热阶段：消除冷启动延迟")
+    print("预热阶段：触发 ChromaDB + BM25 + Reranker + LLM 全链路")
     print("=" * 72)
-    conv_id = client.create_conversation(title="最终基准-预热会话")
+    warmup_queries = [
+        "劳动合同解除的经济补偿金标准是什么",
+        "公司未签劳动合同但长期发工资算劳动关系吗",
+    ]
 
-    for index in range(2):
-        print(f"[预热 {index + 1}/2] 发送预热请求")
+    for index, warmup_query in enumerate(warmup_queries, start=1):
+        print(f"[预热 {index}/2] {warmup_query[:30]}")
+        conv_id = client.create_conversation(title=f"最终基准-预热-{index}")
         try:
             result = client.send_message(
                 conv_id,
-                "你好",
+                warmup_query,
                 force_current_case=False,
                 is_precise_mode=False,
                 proactive_graph_mode=False,
@@ -126,15 +130,17 @@ def run_warmup_stage(client: LegalAgentClient) -> None:
             print(
                 f"  预热请求 #{index + 1} 完成："
                 f"status={result.get('status')} "
+                f"route={result.get('route_intent')} "
                 f"wall={result.get('wall_ms')}ms "
-                f"latency={result.get('latency_ms')}"
+                f"latency={result.get('latency_ms')} "
+                f"confidence={result.get('confidence_score')}"
             )
         except Exception as exc:  # pragma: no cover - 仅用于真实端到端执行
             print(f"  预热请求 #{index + 1} 失败：{exc}")
-        if index != 1:
+        if index != len(warmup_queries):
             safe_sleep()
 
-    print("预热完成，开始正式基准测试。\n")
+    print("预热完成 — ChromaDB/BM25/Reranker/LLM 已进入热态\n")
 
 
 def dialog_record(
