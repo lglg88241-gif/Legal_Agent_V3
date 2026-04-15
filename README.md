@@ -111,6 +111,7 @@
 | Surgery #6 | LLM 幻觉三层防护——数字锁、引用锁、角色降级 | 根本原因：LLM 在「精校」环节私自重算数字或脑补《劳动合同法》第82条等未经 RAG 验证的条文编号。防护方案：① 将 LLM 角色从"法律专家"降级为"文本精校员"；② `<number_lock>` 块禁止任何数字改写，优先级最高；③ `<citation_lock>` 块严禁在 RAG 之外补写"第N条"；④ 后生成守卫 `sanitize_llm_answer()`：发现陌生显著数字（≥1000）→ 整体回退到确定性骨架；发现幻觉条文编号 → 外科式删除。新增 `tests/test_advisor_hallucination_defense.py` 15 项纯确定性测试（T1 数字异常检测×7，T2 幻觉条文检测×5，T3 集成×3）。全量 90 项测试全绿。 |
 | Surgery #7 | CalculationTrace 白盒数据契约 + VERBATIM 超额纠错注入 | 根本原因："惩罚恐惧"——用户问"我能要144000元吗"，后端计算结果为132000，LLM 持有 `<number_lock>` 却不知道为何差12000，选择回避该话题。解决方案：Python 预生成完整 `CorrectionNotice`（含"首月不计入"、可主张月数、双方数字、仲裁驳回风险警告），通过 `<correction_notice priority="VERBATIM">` 块强制 LLM 原样转述——"精校员只需复读，无需推理"。同步增强：① 超额检测上下文感知：仅在30字符关键词窗口内的数字（"双倍工资"/"赔偿"/"能要"等）才触发纠错，排除案号等无关大数；② `correction_notices` 为列表，支持多项超额并发；③ `<citation_demotion_guard>` 阻止 LLM 在 RAG 未收录时自行补写法律条文编号；④ 守卫白名单扩展：`_extract_notice_numbers()` 将纠错文本中的数字加入允许集，防止"忠实复述纠错内容"被误判为幻觉。新增 `tests/test_calculation_trace.py` 17 项零 LLM 测试（T1 轨迹结构×6，T2 超额检测×6，T3 Prompt 注入+Guard×5）。全量 107 项测试全绿（0.84s）。 |
 | Surgery #8 | 超范围拦截 + 未验证金额防御 + 未收录法条前向防御 | 端到端对抗测试暴露三类失守：① **P0-1**：境外法律与非法律问题未在路由层拦截，系统误入标准法律回答链路；② **P0-2**：用户抛出天文数字时，若计算所需事实尚未齐备，LLM 会围绕未验证金额展开策略推演；③ **P1**：用户主动引用不存在的法律/条文时，LLM 可能用训练记忆或相近法条“代答”。修复方案：① `router.py` 升级为四轨路由，新增确定性 `OUT_OF_SCOPE` 守卫，命中境外法律/非法律请求时直接返回固定拒答话术，不进入 RAG/Agent 流水线；② `advisor.py` 新增 `<amount_guard>` 与 `<amount_verification_notice priority="VERBATIM">`，当用户金额未被 `CalculationTrace` 或纠错通知验证时，强制转向“补充工资/工时等事实再计算”；③ 新增 `<statute_guard>` 与 `<statute_verification_notice priority="VERBATIM">`，用户引用的法律/条文若未被 RAG 检索到，必须明确说明知识库未收录并建议通过国家法律法规数据库等官方渠道核验，严禁凭训练记忆补答。新增 `tests/test_audit_e2e_defense.py` 14 项零 LLM 防御测试（超范围拦截×10、未验证金额防御×2、未收录法条防御×2）。**全量 159 项测试全绿（1.26s）**。 |
+| Surgery #9 | 代码层强制拦截——未验证金额守卫 + 幻觉法条守卫 | Surgery #8 的 Prompt 约束在 Qwen1.5-1.8B 上端到端效果不足，说明“小模型不可靠地遵守 prompt 禁令”。修复策略从“劝 LLM 别乱说”切换为“Python 后生成强制拦截”：① `guards.py` 新增 `sanitize_unverified_claims()`，若用户金额未被确定性计算核验，则插入金额提示并把回答中直接背书该金额的句子替换为“具体金额需经系统核算”；若用户金额超过 `trace.total` 且超出 1% 容差，则插入金额纠正文案；② 新增 `sanitize_hallucinated_statutes()`，通过 15+ 部中国常见法律白名单识别不存在的法律名称，并对未被 RAG 验证的具体条文内容追加“未经 RAG 检索验证”的注释；③ `advisor.py` 在既有 `sanitize_llm_answer()` 之后串联两层新守卫，形成三段式后处理管线。新增 `tests/test_surgery9_guards.py` 16 项零 LLM 测试（未验证金额守卫×8、幻觉法条守卫×8）。**全量 175 项测试全绿（1.93s）**。 |
 
 ### 当前模块结构
 
@@ -119,7 +120,7 @@ app/
 ├── agent/
 │   ├── graph.py              # LangGraph StateGraph 定义与路由条件
 │   ├── tools.py              # RAG 工具（ChromaDB + BM25 + BGE Reranker）
-│   ├── guards.py             # 后生成幻觉守卫（Surgery 6/7：数字异常检测、幻觉条文剥离）
+│   ├── guards.py             # 后生成守卫（Surgery 6/7/9：数字异常、幻觉条文、未核验金额/法律名拦截）
 │   ├── nodes/                # 节点函数独立模块（Surgery 4b 新增）
 │   │   ├── _llm.py            # LLM 客户端工厂（共享单例）
 │   │   ├── advisor.py         # legal_advisor_node + build_advisor_system_prompt()（纯函数）
@@ -154,6 +155,12 @@ app/
           ├─ SUFFICIENT → legal_advisor_node（V3 分层回答 + LLM 润色）
           ├─ NEED_USER_INFO → clarifier_node（三明治柔性追问）
           └─ NEED_DEEP_GRAPH → neo4j_specialist_node → reflector（循环）
+
+legal_advisor_node 后处理：
+  sanitize_llm_answer()
+    → sanitize_unverified_claims()
+    → sanitize_hallucinated_statutes()
+    → 返回最终 response
 ```
 
 ### 测试基线
@@ -165,6 +172,8 @@ app/
 **Surgery 7 新增**：`tests/test_calculation_trace.py` 17 项零 LLM 测试（轨迹结构×6、超额检测×6、Prompt 注入+Guard×5），累计 **107 项全绿（0.84s）**。所有测试均为纯确定性断言：零 LLM 调用、零 IO、零网络。
 
 **Surgery 8（对抗防御修复）新增**：`tests/test_audit_e2e_defense.py` 14 项零 LLM 测试（超范围拦截×10、未验证金额防御×2、未收录法条前向防御×2），累计 **159 项全绿（1.26s）**。所有新增测试均为纯确定性断言：零 LLM、零 IO、零网络。
+
+**Surgery 9（代码层强制拦截）新增**：`tests/test_surgery9_guards.py` 16 项零 LLM 测试（未验证金额守卫×8、幻觉法条守卫×8），累计 **175 项全绿（1.93s）**。所有新增测试均为纯确定性断言：零 LLM、零 IO、零网络。
 
 ### 端到端测试套件（e2e_tests/）
 

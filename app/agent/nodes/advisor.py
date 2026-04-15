@@ -27,7 +27,11 @@ if TYPE_CHECKING:
 
 from app.schemas.case_state import CaseState
 from app.logic.calculators import PayloadResult, build_claim_payload
-from app.agent.guards import sanitize_llm_answer
+from app.agent.guards import (
+    sanitize_hallucinated_statutes,
+    sanitize_llm_answer,
+    sanitize_unverified_claims,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +137,14 @@ def _build_statute_verification_block(question: str, rag_context: str) -> str:
 你必须明确告知知识库未收录或未检索到该法律/条文，并建议用户通过国家法律法规数据库等官方渠道核验。
 严禁凭训练记忆补充条文内容，严禁把它替换映射成其他法律条文后继续作答。
 </statute_verification_notice>"""
+
+
+def _payload_has_authoritative_claims(payload: PayloadResult) -> bool:
+    return bool(
+        payload.trace.steps
+        or payload.trace.correction_notices
+        or payload.trace.total > 0
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -346,6 +358,13 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
 
     # ── Post-generation hallucination guard (Surgery 6+7) ─────────────────
     answer = sanitize_llm_answer(raw_answer, layered_payload, rag_context)
+    payload_for_claim_guard = layered_payload if _payload_has_authoritative_claims(layered_payload) else None
+    answer = sanitize_unverified_claims(answer, state["question"], payload_for_claim_guard)
+    answer = sanitize_hallucinated_statutes(
+        answer,
+        state["question"],
+        [rag_context, *candidate_sources],
+    )
 
     sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
     return {
