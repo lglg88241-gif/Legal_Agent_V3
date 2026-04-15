@@ -45,11 +45,14 @@ class CaseState(BaseModel):
     @model_validator(mode="after")
     def _recompute_derived(self) -> "CaseState":
         """Ensure derived fields are consistent with base fields."""
+        self.owed_wages = round(self.owed_wages, 2)
+        self.deposit = round(self.deposit, 2)
         if self.monthly_salary is not None and self.work_months is not None:
             self.compensable_months = max(min(self.work_months - 1, 11), 0)
             if self.has_unsigned_contract:
-                self.double_salary_gap = self.monthly_salary * self.compensable_months
-        self.claim_total = self.double_salary_gap + self.owed_wages + self.deposit
+                self.double_salary_gap = round(self.monthly_salary * self.compensable_months, 2)
+        self.double_salary_gap = round(self.double_salary_gap, 2)
+        self.claim_total = round(self.double_salary_gap + self.owed_wages + self.deposit, 2)
         return self
 
     # ------------------------------------------------------------------
