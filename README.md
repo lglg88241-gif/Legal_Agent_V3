@@ -8,6 +8,19 @@
 - `data/corpus/` 下的指导案例与典型案例 `.pdf`
 - Neo4j 中抽取的案件实体关系图谱
 
+## 架构亮点
+
+| 特性 | 实现 |
+|------|------|
+| 类型安全 | Pydantic V2 CaseState, `ge=0` 边界约束 |
+| 确定性计算 | `build_claim_payload()` 纯函数管线, `round(x,2)` 精度保证 |
+| 幻觉防御 | 三层: Prompt约束 → number_lock/citation_lock → 代码层 sanitize |
+| 可解释性 | `CalculationTrace` 白盒数据契约, VERBATIM 纠错注入 |
+| 路由安全 | 四轨路由 + OUT_OF_SCOPE 拦截 (境外法律/非法律请求) |
+| Confidence | reflector 二档评分 (CASE_UPDATE) + 启发式四档 (GENERAL_CONSULT) |
+| 架构瘦身 | 主编排器 1903→239行 (-87%), 关注点分离到 7 个节点 |
+| 测试覆盖 | 187 个确定性断言, 零 LLM/IO/网络依赖 |
+
 ## 如何更容易命中案例库
 
 提问时尽量包含以下信息中的两项或以上：
@@ -112,35 +125,49 @@
 | Surgery #7 | CalculationTrace 白盒数据契约 + VERBATIM 超额纠错注入 | 根本原因："惩罚恐惧"——用户问"我能要144000元吗"，后端计算结果为132000，LLM 持有 `<number_lock>` 却不知道为何差12000，选择回避该话题。解决方案：Python 预生成完整 `CorrectionNotice`（含"首月不计入"、可主张月数、双方数字、仲裁驳回风险警告），通过 `<correction_notice priority="VERBATIM">` 块强制 LLM 原样转述——"精校员只需复读，无需推理"。同步增强：① 超额检测上下文感知：仅在30字符关键词窗口内的数字（"双倍工资"/"赔偿"/"能要"等）才触发纠错，排除案号等无关大数；② `correction_notices` 为列表，支持多项超额并发；③ `<citation_demotion_guard>` 阻止 LLM 在 RAG 未收录时自行补写法律条文编号；④ 守卫白名单扩展：`_extract_notice_numbers()` 将纠错文本中的数字加入允许集，防止"忠实复述纠错内容"被误判为幻觉。新增 `tests/test_calculation_trace.py` 17 项零 LLM 测试（T1 轨迹结构×6，T2 超额检测×6，T3 Prompt 注入+Guard×5）。全量 107 项测试全绿（0.84s）。 |
 | Surgery #8 | 超范围拦截 + 未验证金额防御 + 未收录法条前向防御 | 端到端对抗测试暴露三类失守：① **P0-1**：境外法律与非法律问题未在路由层拦截，系统误入标准法律回答链路；② **P0-2**：用户抛出天文数字时，若计算所需事实尚未齐备，LLM 会围绕未验证金额展开策略推演；③ **P1**：用户主动引用不存在的法律/条文时，LLM 可能用训练记忆或相近法条“代答”。修复方案：① `router.py` 升级为四轨路由，新增确定性 `OUT_OF_SCOPE` 守卫，命中境外法律/非法律请求时直接返回固定拒答话术，不进入 RAG/Agent 流水线；② `advisor.py` 新增 `<amount_guard>` 与 `<amount_verification_notice priority="VERBATIM">`，当用户金额未被 `CalculationTrace` 或纠错通知验证时，强制转向“补充工资/工时等事实再计算”；③ 新增 `<statute_guard>` 与 `<statute_verification_notice priority="VERBATIM">`，用户引用的法律/条文若未被 RAG 检索到，必须明确说明知识库未收录并建议通过国家法律法规数据库等官方渠道核验，严禁凭训练记忆补答。新增 `tests/test_audit_e2e_defense.py` 14 项零 LLM 防御测试（超范围拦截×10、未验证金额防御×2、未收录法条防御×2）。**全量 159 项测试全绿（1.26s）**。 |
 | Surgery #9 | 代码层强制拦截——未验证金额守卫 + 幻觉法条守卫 | Surgery #8 的 Prompt 约束在 Qwen1.5-1.8B 上端到端效果不足，说明“小模型不可靠地遵守 prompt 禁令”。修复策略从“劝 LLM 别乱说”切换为“Python 后生成强制拦截”：① `guards.py` 新增 `sanitize_unverified_claims()`，若用户金额未被确定性计算核验，则插入金额提示并把回答中直接背书该金额的句子替换为“具体金额需经系统核算”；若用户金额超过 `trace.total` 且超出 1% 容差，则插入金额纠正文案；② 新增 `sanitize_hallucinated_statutes()`，通过 15+ 部中国常见法律白名单识别不存在的法律名称，并对未被 RAG 验证的具体条文内容追加“未经 RAG 检索验证”的注释；③ `advisor.py` 在既有 `sanitize_llm_answer()` 之后串联两层新守卫，形成三段式后处理管线。新增 `tests/test_surgery9_guards.py` 16 项零 LLM 测试（未验证金额守卫×8、幻觉法条守卫×8）。**全量 175 项测试全绿（1.93s）**。 |
+| Surgery #10 | Bug 修复（空值/案号/浮点/常量） | 质量修复四连：① `from_text(None)` / 空字符串优雅降级为默认 CaseState；② 守卫层新增案号剥离，案号中的大数字不再被 number guard 误杀；③ 金额派生字段统一 `round(x, 2)`，消除浮点尾数伪影；④ `_OVERCLAIM_TOLERANCE = 1.01` 固化为命名常量。累计测试基线提升至 182 项。 |
+| Surgery #11 | GENERAL_CONSULT 启发式 confidence | 修复 `GENERAL_CONSULT` / `GREETING` / `OUT_OF_SCOPE` 路径默认 `confidence_score = 0.00` 的问题。在不改 LangGraph 边结构的前提下，于 `advisor.py` 返回前补充四档启发式评分：0源=0.35，1-2源=0.55，3+源+payload=0.78，其他=0.65；若 reflector 已写入 0.62 / 0.84，则绝不覆盖。新增 `tests/test_advisor_confidence.py` 5 项回归测试，当前测试基线 **187 项全绿**。 |
 
-### 当前模块结构
+## 项目结构
 
 ```
 app/
 ├── agent/
-│   ├── graph.py              # LangGraph StateGraph 定义与路由条件
-│   ├── tools.py              # RAG 工具（ChromaDB + BM25 + BGE Reranker）
-│   ├── guards.py             # 后生成守卫（Surgery 6/7/9：数字异常、幻觉条文、未核验金额/法律名拦截）
-│   ├── nodes/                # 节点函数独立模块（Surgery 4b 新增）
-│   │   ├── _llm.py            # LLM 客户端工厂（共享单例）
-│   │   ├── advisor.py         # legal_advisor_node + build_advisor_system_prompt()（纯函数）
-│   │   ├── clarifier.py       # clarifier_node
-│   │   ├── fact_updater.py    # fact_updater_node
-│   │   ├── reflector.py       # reflector_node
-│   │   ├── researcher.py      # vector_researcher_node
-│   │   └── router.py          # tool_router_node（四轨路由 + OUT_OF_SCOPE 守卫）
+│   ├── graph.py              # LangGraph StateGraph (124行)
+│   ├── tools.py              # RAG 混合检索工具
+│   ├── guards.py             # 三层守卫: number_lock + citation_lock + sanitize (577行)
+│   ├── nodes/
+│   │   ├── _llm.py           # LLM 工厂
+│   │   ├── advisor.py        # 法律顾问节点 + Surgery #11 confidence
+│   │   ├── clarifier.py      # 澄清节点
+│   │   ├── fact_updater.py   # 案情更新节点
+│   │   ├── reflector.py      # 反思节点 (confidence 0.62/0.84)
+│   │   ├── researcher.py     # 向量检索节点
+│   │   └── router.py         # 四轨路由
 │   └── prompts/
-│       ├── advisor.py         # 法律 Agent 流水线 prompt 常量（8 个）
-│       └── extractor.py       # 图谱抽取流水线 prompt 常量（5 个，已去重）
+│       ├── advisor.py        # 顾问提示词
+│       └── extractor.py      # 提取器提示词
 ├── schemas/
-│   └── case_state.py          # CaseState Pydantic 模型（Surgery 5 强化：ge=0 约束）
+│   └── case_state.py         # CaseState Pydantic 模型 (224行)
 ├── logic/
-│   ├── calculators.py         # 确定性计算管线（Surgery 7：含 CalculationTrace / CorrectionNotice）
-│   └── __init__.py
+│   └── calculators.py        # 确定性计算管线 (444行)
 └── services/
-    ├── legal_agent.py         # 薄壳编排器（Surgery 5 后：229 行，仅含 LegalGraphAgent 类）
-    ├── graph_extractor.py     # Neo4j 图谱 CRUD（已去重 prompt）
-    └── ...
+    └── legal_agent.py        # 薄壳编排器 (239行, 从1903行瘦身87%)
+
+scripts/
+└── warmup.py                 # 服务预热脚本
+
+docs/
+├── latency_analysis.md       # 延迟瓶颈分析 + Mermaid 时序图
+└── confidence_score_diagnosis.md  # confidence_score 诊断报告
+
+e2e_tests/
+├── final_benchmark.py        # 端到端基准测试
+├── compare_benchmarks.py     # 新旧基准对比工具
+├── RUN_BENCHMARK.md          # 基准测试运行指南
+├── surgery8_validation.py    # Surgery #8 验证
+├── surgery9_validation.py    # Surgery #9 验证
+└── results/                  # 基准数据 (JSON + MD)
 ```
 
 ### 数据流
@@ -163,17 +190,23 @@ legal_advisor_node 后处理：
     → 返回最终 response
 ```
 
-### 测试基线
+## 测试
 
-75 项测试覆盖：提取器精度（7）、Payload 构建（14）、回归守卫（3）、CaseState 模型（11）、新计算管线（18）、既有回归（15）、**Pydantic 防御硬化（7，Surgery 5 新增）**。全部为确定性断言，不依赖 LLM 调用。全量运行耗时 1.59s。
+```bash
+D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
+```
 
-**Surgery 6 新增**：`tests/test_advisor_hallucination_defense.py` 15 项守卫测试（数字异常检测×7、幻觉条文检测×5、端到端集成×3），累计 **90 项全绿**。
+**当前基线**: 187 passed, 0 failed
 
-**Surgery 7 新增**：`tests/test_calculation_trace.py` 17 项零 LLM 测试（轨迹结构×6、超额检测×6、Prompt 注入+Guard×5），累计 **107 项全绿（0.84s）**。所有测试均为纯确定性断言：零 LLM 调用、零 IO、零网络。
-
-**Surgery 8（对抗防御修复）新增**：`tests/test_audit_e2e_defense.py` 14 项零 LLM 测试（超范围拦截×10、未验证金额防御×2、未收录法条前向防御×2），累计 **159 项全绿（1.26s）**。所有新增测试均为纯确定性断言：零 LLM、零 IO、零网络。
-
-**Surgery 9（代码层强制拦截）新增**：`tests/test_surgery9_guards.py` 16 项零 LLM 测试（未验证金额守卫×8、幻觉法条守卫×8），累计 **175 项全绿（1.93s）**。所有新增测试均为纯确定性断言：零 LLM、零 IO、零网络。
+| 测试维度 | 覆盖 |
+|----------|------|
+| CaseState Pydantic 模型 | ✅ 边界值 + None 防御 |
+| 确定性计算管线 | ✅ 金额精度 + 浮点安全 |
+| 幻觉守卫 (number_lock, citation_lock) | ✅ 案号豁免 |
+| 超额检测 | ✅ 命名常量 |
+| 代码层守卫 (unverified_claims, hallucinated_statutes) | ✅ |
+| 路由拦截 (OUT_OF_SCOPE) | ✅ |
+| Confidence 启发式 | ✅ 四档覆盖 + reflector 不覆盖 |
 
 ### 端到端测试套件（e2e_tests/）
 
@@ -296,3 +329,19 @@ Redis 默认在 bgsave 失败（通常是内存不足）后会**拒绝所有写�
 2. 严禁在 `graph_extractor` 阶段做全量索引加载或高并发 Embedding。Windows 环境下这会放大 Tokenizer 死锁风险，并触发 OOM 连续内存申请失败。
 3. 图谱相关 Prompt 若包含 JSON 示例，所有示例大括号都必须写成 `{{` 与 `}}`，防止 Python `.format()` 在运行期抛出 `KeyError`。
 4. 代码中严禁混入中文弯引号 `“”`、`‘’`。这类字符一旦进入 Python 源码或字符串边界，极易在启动期触发 `SyntaxError`。
+
+## 开发历程
+
+| Surgery | 名称 | 性质 |
+|---------|------|------|
+| #1 | CaseState Pydantic 强类型模型 | 架构 |
+| #2 | 确定性计算管线 | 架构 |
+| #3 | Prompt 统一管理 | 架构 |
+| #4a/4b | legal_agent 瘦身 + 节点拆分 | 架构 |
+| #5 | Pydantic 全面接管 | 质量 |
+| #6 | LLM 幻觉三层防护 | 安全 |
+| #7 | CalculationTrace 白盒契约 | 可解释性 |
+| #8 | OUT_OF_SCOPE 路由拦截 | 安全 |
+| #9 | 代码层强制守卫 | 安全 |
+| #10 | Bug 修复 (浮点/案号/空值/常量) | 质量 |
+| #11 | Confidence 启发式补丁 | 功能完善 |
