@@ -21,6 +21,7 @@ from app.agent.guards import (
     sanitize_hallucinated_statutes,
     sanitize_unverified_claims,
 )
+from app.agent.nodes.advisor import _build_statute_guard_rag_sources
 from app.logic.calculators import build_claim_payload
 from app.schemas.case_state import CaseState
 
@@ -206,3 +207,44 @@ def test_verified_article_82_does_not_add_disclaimer() -> None:
         ["《劳动合同法》第82条：用人单位自用工之日起超过一个月不满一年未与劳动者订立书面劳动合同的，应当向劳动者每月支付二倍工资。"],
     )
     assert "未经 RAG 检索验证" not in result
+
+
+def test_guard_rag_sources_excludes_query_wrappers_for_nonexistent_law() -> None:
+    tool_results = [
+        {
+            "tool": "search_law_articles",
+            "arguments": {"query": "《劳动者权益保护法》第88条怎么规定的？"},
+            "result": '[{"content": "未找到匹配法条", "source": "劳动合同法.docx"}]',
+        }
+    ]
+    guard_sources = _build_statute_guard_rag_sources(tool_results, ["劳动合同法.docx"])
+    llm_answer = "已知事实：\n- 您想了解《劳动者权益保护法》第88条的具体规定"
+
+    result = sanitize_hallucinated_statutes(
+        llm_answer,
+        "《劳动者权益保护法》第88条怎么规定的？",
+        guard_sources,
+    )
+
+    assert "法律名称提示" in result
+    assert "《劳动者权益保护法》" in result
+
+
+def test_guard_rag_sources_excludes_query_wrappers_for_unverified_article() -> None:
+    tool_results = [
+        {
+            "tool": "search_law_articles",
+            "arguments": {"query": "《劳动合同法》第999条规定了什么？"},
+            "result": '[{"content": "《劳动合同法》第82条：用人单位应当支付二倍工资。", "source": "劳动合同法.docx"}]',
+        }
+    ]
+    guard_sources = _build_statute_guard_rag_sources(tool_results, ["劳动合同法.docx"])
+    llm_answer = "《劳动合同法》第999条规定，用人单位应当支付赔偿。"
+
+    result = sanitize_hallucinated_statutes(
+        llm_answer,
+        "《劳动合同法》第999条规定了什么？",
+        guard_sources,
+    )
+
+    assert "未经 RAG 检索验证" in result

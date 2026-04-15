@@ -147,6 +147,40 @@ def _payload_has_authoritative_claims(payload: PayloadResult) -> bool:
     )
 
 
+def _build_statute_guard_rag_sources(
+    tool_results: list[dict[str, Any]],
+    candidate_sources: list[str],
+) -> list[str]:
+    """
+    Build a clean RAG source list for statute guards.
+
+    Important: do NOT use build_context_blocks() output here, because it embeds
+    tool-call arguments (including the user's raw query) and would make the
+    guard falsely believe a hallucinated law/article was retrieved by RAG.
+    """
+    fragments: list[str] = []
+    seen: set[str] = set()
+
+    for item in tool_results:
+        result = item.get("result")
+        if not isinstance(result, str):
+            continue
+        cleaned = result.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        fragments.append(cleaned)
+
+    for source in candidate_sources:
+        cleaned = source.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        fragments.append(cleaned)
+
+    return fragments
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt builder (pure function — testable without LLM)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -309,6 +343,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
     tool_results = state.get("tool_results", [])
     candidate_sources = self._extract_candidate_sources(tool_results)
     retrieved_docs = self._build_context_blocks(tool_results)
+    statute_guard_rag_sources = _build_statute_guard_rag_sources(tool_results, candidate_sources)
     case_summary = (state.get("case_summary") or "").strip()
     graph_context = (
         (state.get("graph_context") or "").strip()
@@ -363,7 +398,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
     answer = sanitize_hallucinated_statutes(
         answer,
         state["question"],
-        [rag_context, *candidate_sources],
+        statute_guard_rag_sources,
     )
 
     sources = self._normalize_sources(parsed.get("sources", []), candidate_sources)
