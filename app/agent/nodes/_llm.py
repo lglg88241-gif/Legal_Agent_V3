@@ -36,7 +36,7 @@ OUT_OF_SCOPE_RESPONSE = (
 
 
 async def chat_model(self, llm, messages: list[dict[str, str]]) -> str:
-    """Send messages to a ChatZhipuAI LLM and return the text response."""
+    """Send messages to a chat model and return the text response."""
     langchain_messages = []
     for message in messages:
         role = message.get("role")
@@ -48,6 +48,20 @@ async def chat_model(self, llm, messages: list[dict[str, str]]) -> str:
 
     response = await llm.ainvoke(langchain_messages)
     return response.content if isinstance(response.content, str) else str(response.content)
+
+
+async def chat_model_with_fallback(self, primary_llm, fallback_llm, messages: list[dict[str, str]]) -> str:
+    """Try the primary chat model first and fall back to the secondary model."""
+    try:
+        return await self._chat_model(primary_llm, messages)
+    except Exception as exc:
+        logger.warning(
+            "Primary LLM failed (%s), falling back to %s: %s",
+            type(primary_llm).__name__,
+            type(fallback_llm).__name__,
+            exc,
+        )
+        return await self._chat_model(fallback_llm, messages)
 
 
 def safe_json_load(self, raw_content: str, fallback: dict[str, Any]) -> dict[str, Any]:

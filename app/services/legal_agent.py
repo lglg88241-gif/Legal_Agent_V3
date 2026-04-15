@@ -21,6 +21,7 @@ from typing import Any
 
 from app.agent.graph import AgentState, build_legal_agent_graph
 from app.core.llm_factory import (
+    create_cloud_llm,
     create_expert_llm,
     create_router_llm,
     create_summary_llm,
@@ -32,6 +33,7 @@ from app.agent.nodes._llm import (
     OUT_OF_SCOPE_RESPONSE,
     GRAPH_TOOL,
     chat_model,
+    chat_model_with_fallback,
     safe_json_load,
     extract_candidate_sources,
     normalize_sources,
@@ -72,12 +74,14 @@ logger = logging.getLogger(__name__)
 class LegalGraphAgent:
     def __init__(self):
         self.router_llm = create_router_llm()
+        self.router_fallback_llm = create_cloud_llm(temperature=0.1, max_tokens=256)
         self.expert_llm = create_expert_llm()
         self.summary_llm = create_summary_llm()
         self.graph = build_legal_agent_graph(self)
 
     # === Shared LLM utilities (delegated to _llm module) ===
     _chat_model = chat_model
+    _chat_model_with_fallback = chat_model_with_fallback
     _safe_json_load = safe_json_load
     _extract_candidate_sources = extract_candidate_sources
     _normalize_sources = normalize_sources

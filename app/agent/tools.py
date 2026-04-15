@@ -15,7 +15,7 @@ from neo4j import GraphDatabase
 
 from app.core.bm25_retriever import BM25Retriever
 from app.core.config import settings
-from app.core.llm_factory import create_query_expansion_llm
+from app.core.llm_factory import create_cloud_llm, create_query_expansion_llm
 from app.core.reranker import BGEReranker
 from app.database.chroma_utils import resolve_persist_dir
 
@@ -52,6 +52,8 @@ CASE_TOP_K = 2
 
 _query_expansion_llm: Any | None = None
 _query_expansion_llm_lock = threading.Lock()
+_query_expansion_fallback_llm: Any | None = None
+_query_expansion_fallback_llm_lock = threading.Lock()
 
 
 def _serialize_reranked_documents(
@@ -115,6 +117,19 @@ def _get_query_expansion_llm() -> Any:
     return _query_expansion_llm
 
 
+def _get_query_expansion_fallback_llm() -> Any:
+    global _query_expansion_fallback_llm
+
+    if _query_expansion_fallback_llm is None:
+        with _query_expansion_fallback_llm_lock:
+            if _query_expansion_fallback_llm is None:
+                _query_expansion_fallback_llm = create_cloud_llm(
+                    temperature=0.3,
+                    max_tokens=512,
+                )
+    return _query_expansion_fallback_llm
+
+
 def _normalize_query_list(original_query: str, queries: list[Any]) -> list[str]:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -138,8 +153,7 @@ def _expand_queries(query: str, chat_history: str = "") -> list[str]:
 
     try:
         history_text = (chat_history or "").strip() or "无历史对话"
-        response = _get_query_expansion_llm().invoke(
-            [
+        messages = [
                 SystemMessage(content=QUERY_EXPANSION_SYSTEM_PROMPT),
                 HumanMessage(
                     content=(
@@ -152,7 +166,11 @@ def _expand_queries(query: str, chat_history: str = "") -> list[str]:
                     )
                 ),
             ]
-        )
+        try:
+            response = _get_query_expansion_llm().invoke(messages)
+        except Exception as exc:
+            logger.warning("Primary query expansion LLM failed, fallback to cloud: %s", exc)
+            response = _get_query_expansion_fallback_llm().invoke(messages)
         content = response.content if isinstance(response.content, str) else str(response.content)
         parsed = json.loads(repair_json(content))
 

@@ -412,9 +412,7 @@ async def route_decision(
         fallback_intent = "CASE_UPDATE" if fallback_intent != "GREETING" and summary_text != "无案情摘要" else fallback_intent
 
     try:
-        content = await self._chat_model(
-            self.router_llm,
-            [
+        messages = [
                 {"role": "system", "content": TRIPLE_TRACK_ROUTER_PROMPT_V2},
                 {
                     "role": "user",
@@ -424,7 +422,11 @@ async def route_decision(
                         f"用户最新输入：{cleaned_question}"
                     ),
                 },
-            ],
+            ]
+        content = await self._chat_model_with_fallback(
+            self.router_llm,
+            self.router_fallback_llm,
+            messages,
         )
         parsed = self._safe_json_load(content, {"route_intent": fallback_intent})
         route_intent = str(parsed.get("route_intent", fallback_intent)).upper()
