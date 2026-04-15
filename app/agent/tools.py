@@ -9,13 +9,13 @@ from typing import Any
 
 from json_repair import repair_json
 from langchain_chroma import Chroma
-from langchain_community.chat_models import ChatZhipuAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from neo4j import GraphDatabase
 
 from app.core.bm25_retriever import BM25Retriever
 from app.core.config import settings
+from app.core.llm_factory import create_query_expansion_llm
 from app.core.reranker import BGEReranker
 from app.database.chroma_utils import resolve_persist_dir
 
@@ -50,7 +50,7 @@ BM25_RECALL_K = 10
 LAW_TOP_K = 3
 CASE_TOP_K = 2
 
-_query_expansion_llm: ChatZhipuAI | None = None
+_query_expansion_llm: Any | None = None
 _query_expansion_llm_lock = threading.Lock()
 
 
@@ -105,17 +105,13 @@ def _serialize_reranked_documents(
         return json.dumps(fallback_payload, ensure_ascii=False)
 
 
-def _get_query_expansion_llm() -> ChatZhipuAI:
+def _get_query_expansion_llm() -> Any:
     global _query_expansion_llm
 
     if _query_expansion_llm is None:
         with _query_expansion_llm_lock:
             if _query_expansion_llm is None:
-                _query_expansion_llm = ChatZhipuAI(
-                    model="glm-4",
-                    api_key=settings.ZHIPUAI_API_KEY,
-                    temperature=0.1,
-                )
+                _query_expansion_llm = create_query_expansion_llm()
     return _query_expansion_llm
 
 
