@@ -139,3 +139,75 @@
 
 3. 记录分阶段耗时
 在 router、fact_updater、researcher、advisor 入口出口增加结构化 timing log，下一轮能把“预估瓶颈”升级为“真实节点耗时占比”。
+
+## 附录：调用链时序图（Mermaid）
+
+### GENERAL_CONSULT 路径
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant API as FastAPI
+    participant C as Celery Worker
+    participant R as Router
+    participant VR as Researcher
+    participant Chroma as ChromaDB
+    participant BM25 as BM25 Index
+    participant RR as BGE Reranker
+    participant A as Advisor
+    participant LLM as Qwen1.5-1.8B
+    participant G as Guards
+    U->>API: POST /dialog
+    API->>C: dispatch task
+    C->>R: route_decision()
+    R->>LLM: router_llm (路由精修)
+    LLM-->>R: GENERAL_CONSULT
+    R-->>C: route_intent
+    C->>VR: vector_researcher_node()
+    par 并发检索
+        VR->>Chroma: dense retrieval
+        VR->>BM25: sparse retrieval
+    end
+    Chroma-->>VR: dense candidates
+    BM25-->>VR: sparse candidates
+    VR->>RR: rerank_with_scores()
+    Note over RR: _predict_lock 串行化
+    RR-->>VR: ranked results
+    C->>A: legal_advisor_node()
+    A->>LLM: expert_llm (生成回答)
+    LLM-->>A: raw answer
+    A->>G: sanitize_llm_answer()
+    A->>G: sanitize_unverified_claims()
+    A->>G: sanitize_hallucinated_statutes()
+    G-->>A: cleaned answer
+    Note over A: Surgery #11: 启发式 confidence
+    A-->>C: response + confidence
+    C-->>API: task completed
+    API-->>U: GET /dialog/status → response
+```
+
+### CASE_UPDATE 路径
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as Celery Worker
+    participant R as Router
+    participant FU as FactUpdater
+    participant VR as Researcher
+    participant RF as Reflector
+    participant A as Advisor
+    participant LLM as Qwen1.5-1.8B
+    C->>R: route_decision()
+    R->>LLM: router_llm
+    LLM-->>R: CASE_UPDATE
+    C->>FU: fact_updater_node()
+    FU->>LLM: expert_llm (合并摘要)
+    Note over FU: 额外 LLM 调用 ⚠️
+    LLM-->>FU: updated case_summary
+    C->>VR: vector_researcher_node()
+    Note over VR: 同 GENERAL_CONSULT
+    C->>RF: reflector_node()
+    Note over RF: confidence = 0.62 / 0.84
+    C->>A: legal_advisor_node()
+    A->>LLM: expert_llm (生成回答)
+    Note over A: 第二次 LLM 调用 ⚠️
+```
