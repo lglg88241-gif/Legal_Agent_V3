@@ -241,6 +241,7 @@ class LegalGraphAgent:
                 }
             },
         )
+        # Surgery #13 + fix: 序列化 CaseState 快照
         _case_state_snapshot = None
         _case_type = None
         try:
@@ -249,13 +250,32 @@ class LegalGraphAgent:
             _final_summary = final_state.get("case_summary") or case_summary or ""
             _final_question = question
             _final_graph = final_state.get("graph_context") or graph_memory or ""
-            if _final_summary.strip():
-                _cs = CaseState.from_text(_final_summary, _final_question, _final_graph)
+            # 构建 CaseState：优先用 case_summary，fallback 用 question
+            _text_for_extraction = _final_summary.strip() or _final_question.strip()
+            if _text_for_extraction:
+                _cs = CaseState.from_text(
+                    _final_summary if _final_summary.strip() else "",
+                    _final_question,
+                    _final_graph,
+                )
+                # Bug B fix: 用 saved_case_state 补全 from_text 未能提取的字段
+                if saved_case_state and isinstance(saved_case_state, dict):
+                    if _cs.monthly_salary is None and saved_case_state.get("monthly_salary") is not None:
+                        _cs.monthly_salary = saved_case_state["monthly_salary"]
+                    if _cs.work_months is None and saved_case_state.get("work_months") is not None:
+                        _cs.work_months = saved_case_state["work_months"]
+                    if not _cs.has_unsigned_contract and saved_case_state.get("has_unsigned_contract"):
+                        _cs.has_unsigned_contract = True
+                    if _cs.deposit == 0.0 and saved_case_state.get("deposit", 0) > 0:
+                        _cs.deposit = saved_case_state["deposit"]
+                    # 触发 Pydantic 重新计算派生字段
+                    _cs = _cs.model_validate(_cs.model_dump())
                 _case_state_snapshot = _cs.model_dump()
-                _case_type = _infer_case_type(_final_summary, _final_question)
-            elif isinstance(saved_case_state, dict) and saved_case_state:
-                _case_state_snapshot = saved_case_state
-                _case_type = _infer_case_type(case_summary or "", question)
+                # 推断案件类型（合并 summary + question）
+                _case_type = _infer_case_type(
+                    _final_summary or _final_question,
+                    _final_question,
+                )
         except Exception:
             pass
 
