@@ -9,7 +9,7 @@ from typing import Any
 
 from app.agent.graph import AgentState
 from app.agent.nodes._llm import LAW_TOOL, CASE_TOOL
-from app.services.graph_extractor import format_graph_memory
+from app.services.graph_extractor import format_graph_memory, get_user_cases_graph_overview
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,28 @@ async def vector_researcher_node(self, state: AgentState) -> AgentState:
         )
     else:
         tool_results = await retrieval_task
+
+    user_id = state.get("user_id")
+    if user_id and conversation_id:
+        try:
+            user_cases = await get_user_cases_graph_overview(int(user_id))
+            history_cases = [case for case in user_cases if case.get("case_id") != int(conversation_id)]
+            if history_cases:
+                history_lines = []
+                for case in history_cases[:5]:
+                    case_id = case.get("case_id", "?")
+                    sources = case.get("source_names", [])
+                    targets = case.get("target_names", [])
+                    all_entities = list(dict.fromkeys([*sources, *targets]))[:8]
+                    history_lines.append(f"  案件#{case_id}: {', '.join(all_entities)}")
+                if history_lines:
+                    graph_context = (
+                        f"{graph_context}\n\n"
+                        f"用户历史案件实体（可能与当前案件相关）：\n"
+                        + "\n".join(history_lines)
+                    )
+        except Exception as exc:
+            logger.warning("Failed to load user case history for graph context: %s", exc)
 
     return {
         "current_query": current_query,
