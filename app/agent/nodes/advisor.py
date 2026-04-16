@@ -394,10 +394,21 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
             )
     layered_payload = build_claim_payload(_cs_for_payload)
     rag_context = retrieved_docs or "无有效检索结果"
+    _wage_bridged = (
+        _cs_for_payload.monthly_salary is not None
+        and state.get("_detected_monthly_wage") is not None
+        and str(int(_cs_for_payload.monthly_salary)) not in (case_summary or "")
+    )
+    display_case_summary = case_summary or ""
+    if _wage_bridged:
+        display_case_summary = (
+            display_case_summary.strip()
+            + f"\n- 已知月薪：{int(_cs_for_payload.monthly_salary)} 元（来自会话上下文）"
+        ).strip()
 
     advisor_system_prompt = build_advisor_system_prompt(
         question=state["question"],
-        case_summary=case_summary,
+        case_summary=display_case_summary,
         graph_context=graph_context,
         rag_context=rag_context,
         payload=layered_payload,
@@ -413,6 +424,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
                 "role": "user",
                 "content": (
                     f"用户问题：{state['question']}\n\n"
+                    f"案件摘要：{display_case_summary or '无案件摘要'}\n\n"
                     f"候选来源：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
                     f"<rag_context>\n{rag_context}\n</rag_context>\n\n"
                     "以下是已经完成的基础回答骨架。"
