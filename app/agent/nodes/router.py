@@ -442,6 +442,21 @@ async def route_decision(
         route_intent = str(parsed.get("route_intent", fallback_intent)).upper()
         if route_intent not in {"GREETING", "GENERAL_CONSULT", "CASE_UPDATE", OUT_OF_SCOPE_INTENT}:
             route_intent = fallback_intent
+        # Surgery #12A: local 3B router guardrail
+        # 规则1：没有历史对话、没有案情摘要时，首轮输入不允许被 LLM 提升为 CASE_UPDATE
+        if (
+            route_intent == "CASE_UPDATE"
+            and not (chat_history or "").strip()
+            and not has_case_summary
+        ):
+            route_intent = "GENERAL_CONSULT"
+        # 规则2：已有历史/摘要且问题是短句跟进时，不允许 LLM 降级为 GENERAL_CONSULT
+        if (
+            route_intent == "GENERAL_CONSULT"
+            and history_has_case_continuity(chat_history, case_summary)
+            and question_looks_like_brief_followup(cleaned_question)
+        ):
+            route_intent = "CASE_UPDATE"
     except Exception as exc:
         logger.warning("Triple-track routing failed, fallback to heuristic route: %s", exc)
         route_intent = fallback_intent
