@@ -326,11 +326,21 @@ def question_looks_like_brief_followup(question: str) -> bool:
     brief_followup_tokens = [
         "怎么办", "怎么维权", "怎么处理", "怎么赔", "赔多少",
         "怎么告", "怎么仲裁", "接下来呢", "然后呢",
+        "还能要求什么赔偿", "还能主张什么", "我还能拿什么",
+        "还可以要什么", "还能申请什么", "继续怎么维权",
+        "那我怎么办", "那怎么赔", "那我还能要求什么",
     ]
     if any(token in text for token in brief_followup_tokens):
         return True
     condensed = "".join(text.split())
-    return len(condensed) <= 8 and any(token in condensed for token in ["怎么办", "怎么赔", "怎么告", "维权"])
+    return len(condensed) <= 14 and any(
+        token in condensed
+        for token in [
+            "怎么办", "怎么赔", "怎么告", "维权",
+            "还能要求什么", "还能主张什么", "还可以要什么",
+            "还能申请什么", "拿什么赔偿",
+        ]
+    )
 
 
 def history_has_case_continuity(chat_history: str, case_summary: str) -> bool:
