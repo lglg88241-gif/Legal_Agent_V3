@@ -70,6 +70,30 @@ from app.agent.nodes.clarifier import generate_clarifier_question_v3
 
 logger = logging.getLogger(__name__)
 
+_CASE_TYPE_RULES: list[tuple[str, list[str]]] = [
+    ("劳动争议", ["劳动合同", "工资", "解雇", "辞退", "工伤", "社保", "加班", "竞业", "未签合同", "经济补偿"]),
+    ("刑事", ["犯罪", "刑事", "判刑", "拘留", "逮捕", "正当防卫", "醉驾", "盗窃", "诈骗", "故意伤害"]),
+    ("民事侵权", ["侵权", "名誉", "隐私", "人身损害", "交通事故", "医疗事故"]),
+    ("合同纠纷", ["合同", "违约", "解约", "退款", "定金", "买卖"]),
+    ("婚姻家庭", ["离婚", "抚养", "赡养", "财产分割", "家暴"]),
+    ("知识产权", ["版权", "专利", "商标", "著作权"]),
+    ("行政", ["行政", "公安", "城管", "拆迁", "征地"]),
+    ("环境公益", ["环境", "污染", "公益诉讼"]),
+]
+
+
+def _infer_case_type(case_summary: str, question: str) -> str | None:
+    """基于关键词匹配推断案件类型。"""
+    merged = f"{case_summary} {question}"
+    best_type = None
+    best_score = 0
+    for case_type, keywords in _CASE_TYPE_RULES:
+        score = sum(1 for kw in keywords if kw in merged)
+        if score > best_score:
+            best_score = score
+            best_type = case_type
+    return best_type if best_score > 0 else None
+
 
 class LegalGraphAgent:
     def __init__(self):
@@ -178,6 +202,7 @@ class LegalGraphAgent:
         is_precise_mode: bool = False,
         proactive_graph_mode: bool = True,
         conversation_id: int | None = None,
+        saved_case_state: dict | None = None,
     ) -> dict[str, Any]:
         initial_state: AgentState = {
             "user_id": user_id,
@@ -204,6 +229,7 @@ class LegalGraphAgent:
             "reflection_analysis": "",
             "graph_focus": "",
             "is_final": False,
+            "saved_case_state": saved_case_state,
         }
 
         final_state = await self.graph.ainvoke(
@@ -215,6 +241,24 @@ class LegalGraphAgent:
                 }
             },
         )
+        _case_state_snapshot = None
+        _case_type = None
+        try:
+            from app.schemas.case_state import CaseState
+
+            _final_summary = final_state.get("case_summary") or case_summary or ""
+            _final_question = question
+            _final_graph = final_state.get("graph_context") or graph_memory or ""
+            if _final_summary.strip():
+                _cs = CaseState.from_text(_final_summary, _final_question, _final_graph)
+                _case_state_snapshot = _cs.model_dump()
+                _case_type = _infer_case_type(_final_summary, _final_question)
+            elif isinstance(saved_case_state, dict) and saved_case_state:
+                _case_state_snapshot = saved_case_state
+                _case_type = _infer_case_type(case_summary or "", question)
+        except Exception:
+            pass
+
         return {
             "response": final_state.get("response") or "未找到依据。",
             "sources": final_state.get("sources") or [],
@@ -223,6 +267,8 @@ class LegalGraphAgent:
             "missing_info": final_state.get("missing_info") or [],
             "route_intent": str(final_state.get("route_intent") or "GENERAL_CONSULT").upper(),
             "case_summary": final_state.get("case_summary") or case_summary or "",
+            "case_state_snapshot": _case_state_snapshot,
+            "case_type": _case_type,
         }
 
 
