@@ -158,7 +158,7 @@ def _extract_months(text: str) -> int | None:
         except ValueError:
             pass
 
-    month_match = re.search(r"(\d+)\s*个月", text)
+    month_match = re.search(r"(\d+)\s*个月(?!工资|薪资|薪水|工资的|薪的)", text)
     if month_match:
         try:
             return max(int(month_match.group(1)), 0)
@@ -186,7 +186,8 @@ def _extract_owed_wages(text: str, monthly_salary: float | None = None) -> float
         return val
 
     month_match = re.search(
-        r"(?:拖欠|欠)\s*(\d+|[一二三四五六七八九十两]+)\s*(?:个?月|个月的?)\s*(?:工资|薪)?",
+        r"(?:拖欠|欠)[^\d一二三四五六七八九十两]{0,3}"
+        r"(\d+|[一二三四五六七八九十两]+)\s*(?:个?月|个月的?)\s*(?:工资|薪)?",
         text,
     )
     if not month_match:
