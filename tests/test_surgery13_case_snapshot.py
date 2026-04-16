@@ -1,6 +1,7 @@
 """Surgery #13: 案件快照持久化 + 案件类型推断 测试。"""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -221,3 +222,74 @@ class TestCaseStateMergeFallback:
         snapshot = cs.model_dump()
         assert snapshot["monthly_salary"] is None
         assert snapshot["claim_total"] == 0.0
+
+
+class TestFactUpdaterMonthlyWageCarryForward:
+    """Fix 2 root cause: saved_case_state.monthly_salary 应回灌进新摘要。"""
+
+    def test_saved_wage_is_restored_into_case_summary(self) -> None:
+        from app.agent.nodes.fact_updater import fact_updater_node
+
+        class DummyAgent:
+            summary_llm = object()
+
+            async def _chat_model(self, llm, messages):
+                return json.dumps(
+                    {
+                        "case_summary": "2024年3月公司把我辞退了，说是业绩不达标，没有出示任何证据"
+                    },
+                    ensure_ascii=False,
+                )
+
+            def _safe_json_load(self, content, default):
+                return json.loads(content)
+
+            def _patched_build_tool_calls_for_intent(self, intent, retrieval_query):
+                return []
+
+        result = asyncio.run(
+            fact_updater_node(
+                DummyAgent(),
+                {
+                    "case_summary": "",
+                    "question": "2024年3月公司把我辞退了，说是业绩不达标，没有出示任何证据",
+                    "saved_case_state": {"monthly_salary": 15000.0},
+                },
+            )
+        )
+
+        assert "月薪15000元" in result["case_summary"]
+        assert "15000" in result["current_query"]
+
+    def test_saved_wage_not_duplicated_when_summary_already_contains_it(self) -> None:
+        from app.agent.nodes.fact_updater import fact_updater_node
+
+        class DummyAgent:
+            summary_llm = object()
+
+            async def _chat_model(self, llm, messages):
+                return json.dumps(
+                    {
+                        "case_summary": "2024年3月公司把我辞退了，月薪15000元，公司未出示任何证据"
+                    },
+                    ensure_ascii=False,
+                )
+
+            def _safe_json_load(self, content, default):
+                return json.loads(content)
+
+            def _patched_build_tool_calls_for_intent(self, intent, retrieval_query):
+                return []
+
+        result = asyncio.run(
+            fact_updater_node(
+                DummyAgent(),
+                {
+                    "case_summary": "",
+                    "question": "2024年3月公司把我辞退了，公司未出示任何证据",
+                    "saved_case_state": {"monthly_salary": 15000.0},
+                },
+            )
+        )
+
+        assert result["case_summary"].count("15000") == 1
