@@ -39,6 +39,18 @@ class Conversation(Base):
     session_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     case_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    case_state_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+        default=None,
+        comment="CaseState Pydantic 模型的 JSON 序列化快照",
+    )
+    case_type: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        default=None,
+        comment="案件类型: 劳动争议/刑事/民事/行政/知识产权/其他",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,

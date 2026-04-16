@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, inspect, select, text
+from sqlalchemy import delete, inspect, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.database.mysql_db import Base, engine
@@ -69,6 +69,26 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
             "WHERE case_summary IS NULL"
         )
     )
+
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "case_state_json" not in columns:
+        dialect = sync_conn.dialect.name
+        if dialect == "sqlite":
+            sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN case_state_json TEXT"))
+        elif dialect == "postgresql":
+            sync_conn.execute(
+                text("ALTER TABLE conversations ADD COLUMN case_state_json JSONB DEFAULT NULL")
+            )
+        else:
+            sync_conn.execute(
+                text("ALTER TABLE conversations ADD COLUMN case_state_json JSON DEFAULT NULL")
+            )
+
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "case_type" not in columns:
+        sync_conn.execute(
+            text("ALTER TABLE conversations ADD COLUMN case_type VARCHAR(100) DEFAULT NULL")
+        )
 
 
 async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
@@ -198,6 +218,28 @@ async def update_conversation_case_summary(
     return conversation
 
 
+async def update_conversation_case_state(
+    db: AsyncSession,
+    conversation: Conversation,
+    case_state_dict: dict[str, Any],
+) -> Conversation:
+    """Surgery #13: 持久化 CaseState 的完整 JSON 快照。"""
+    conversation.case_state_json = case_state_dict
+    await touch_conversation(db, conversation=conversation)
+    return conversation
+
+
+async def update_conversation_case_type(
+    db: AsyncSession,
+    conversation: Conversation,
+    case_type: str,
+) -> Conversation:
+    """Surgery #13: 更新案件类型标签。"""
+    conversation.case_type = (case_type or "").strip() or None
+    await touch_conversation(db, conversation=conversation)
+    return conversation
+
+
 async def store_message(
     db: AsyncSession,
     conversation_id: int,
@@ -264,6 +306,44 @@ async def load_conversation_case_summary(
     return (conversation.case_summary or "").strip()
 
 
+async def load_conversation_case_state(
+    db: AsyncSession,
+    conversation_id: int,
+) -> dict[str, Any] | None:
+    """Surgery #13: 加载上次保存的 CaseState JSON 快照。"""
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        return None
+    return conversation.case_state_json
+
+
+async def search_user_cases(
+    db: AsyncSession,
+    user_id: int,
+    case_type: str | None = None,
+    keyword: str | None = None,
+    limit: int = 10,
+) -> list[Conversation]:
+    """Surgery #13: 按类型或关键词检索用户的历史案件。"""
+    query = select(Conversation).where(
+        Conversation.user_id == user_id,
+        Conversation.case_summary.is_not(None),
+        Conversation.case_summary != "",
+    )
+    if case_type:
+        query = query.where(Conversation.case_type == case_type)
+    if keyword:
+        query = query.where(
+            or_(
+                Conversation.case_summary.contains(keyword),
+                Conversation.title.contains(keyword),
+            )
+        )
+    query = query.order_by(Conversation.updated_at.desc()).limit(limit)
+    result = await db.scalars(query)
+    return list(result)
+
+
 def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
     return {
         "id": conversation.id,
@@ -271,6 +351,8 @@ def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
         "session_id": conversation.session_id,
         "title": conversation.title,
         "case_summary": conversation.case_summary or "",
+        "case_type": getattr(conversation, "case_type", None) or "",
+        "case_state": getattr(conversation, "case_state_json", None),
         "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
     }
