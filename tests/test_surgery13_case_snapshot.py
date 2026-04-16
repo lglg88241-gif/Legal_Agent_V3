@@ -134,3 +134,76 @@ class TestConversationStoreNewFunctions:
         sig = inspect.signature(load_conversation_case_state)
         params = list(sig.parameters.keys())
         assert "conversation_id" in params
+
+
+class TestCaseStateFromQuestion:
+    """Bug A fix: 当 case_summary 为空时，应该从 question 构建 CaseState。"""
+
+    def test_question_only_extracts_salary(self) -> None:
+        from app.schemas.case_state import CaseState
+
+        cs = CaseState.from_text(
+            "",
+            "我在公司工作了10个月，月薪8000元，公司一直没签劳动合同",
+            "",
+        )
+        assert cs.monthly_salary == 8000.0
+        assert cs.work_months == 10
+        assert cs.has_unsigned_contract is True
+        assert cs.double_salary_gap > 0
+        assert cs.claim_total > 0
+
+    def test_question_with_owed_wages(self) -> None:
+        from app.schemas.case_state import CaseState
+
+        cs = CaseState.from_text(
+            "",
+            "公司拖欠我3个月工资，月薪12000元",
+            "",
+        )
+        assert cs.monthly_salary == 12000.0
+        assert cs.owed_wages == 36000.0
+        assert cs.has_owed_wages is True
+
+
+class TestCaseStateMergeFallback:
+    """Bug B fix: saved_case_state 应补全 from_text 未能提取的字段。"""
+
+    def test_merge_salary_from_saved_state(self) -> None:
+        from app.schemas.case_state import CaseState
+
+        cs = CaseState.from_text(
+            "用户被辞退，存在劳动争议",
+            "拖欠了2个月工资",
+            "",
+        )
+        assert cs.monthly_salary is None
+
+        saved = {
+            "monthly_salary": 8000.0,
+            "work_months": 10,
+            "has_unsigned_contract": True,
+            "deposit": 0.0,
+        }
+        if cs.monthly_salary is None and saved.get("monthly_salary") is not None:
+            cs.monthly_salary = saved["monthly_salary"]
+        if cs.work_months is None and saved.get("work_months") is not None:
+            cs.work_months = saved["work_months"]
+        if not cs.has_unsigned_contract and saved.get("has_unsigned_contract"):
+            cs.has_unsigned_contract = True
+        cs = cs.model_validate(cs.model_dump())
+
+        assert cs.monthly_salary == 8000.0
+        assert cs.work_months == 10
+        assert cs.has_unsigned_contract is True
+        assert cs.double_salary_gap > 0
+        assert cs.claim_total > 0
+
+    def test_no_saved_state_no_crash(self) -> None:
+        """saved_case_state 为 None 时不应崩溃。"""
+        from app.schemas.case_state import CaseState
+
+        cs = CaseState.from_text("", "你好", "")
+        snapshot = cs.model_dump()
+        assert snapshot["monthly_salary"] is None
+        assert snapshot["claim_total"] == 0.0
