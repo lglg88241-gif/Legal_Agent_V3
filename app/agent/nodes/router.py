@@ -425,7 +425,7 @@ async def route_decision(
             ]
         content = await self._chat_model_with_fallback(
             self.router_llm,
-            self.router_fallback_llm,
+            self._router_llm_fallback,
             messages,
         )
         parsed = self._safe_json_load(content, {"route_intent": fallback_intent})

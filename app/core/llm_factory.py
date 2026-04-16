@@ -189,11 +189,7 @@ def create_router_llm() -> ChatOpenAI | ChatZhipuAI:
 
 def create_query_expansion_llm() -> ChatOpenAI | ChatZhipuAI:
     """Query expansion LLM — prefer local vLLM, otherwise use cloud."""
-    if settings.LOCAL_LLM_ENABLED:
-        logger.info("Query expansion LLM -> local vLLM (%s)", settings.LLM_MODEL_NAME)
-        return create_local_llm(temperature=0.3, max_tokens=512)
-
-    logger.info("Query expansion LLM -> cloud ZhipuAI (LOCAL_LLM_ENABLED=false)")
+    logger.info("Query expansion LLM -> cloud ZhipuAI")
     return create_cloud_llm(temperature=0.3, max_tokens=512)
 
 
