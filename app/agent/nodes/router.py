@@ -58,6 +58,14 @@ _FOREIGN_LAW_KEYWORDS = (
     "仲裁",
     "法条",
     "交通法规",
+    "离婚法",
+    "婚姻法",
+    "民法",
+    "刑法",
+    "税法",
+    "移民法",
+    "诉讼法",
+    "证据法",
 )
 _NON_LEGAL_PATTERNS = (
     "帮我写代码",
@@ -68,25 +76,48 @@ _NON_LEGAL_PATTERNS = (
     "javascript代码",
     "帮我写python",
     "帮我写java",
+    "改代码",
+    "写程序",
+    "写函数",
+    "调试代码",
+    "debug",
     "编程",
     "明天股票会涨吗",
     "股票会涨吗",
+    "股票走势",
     "推荐股票",
+    "推荐一只股票",
     "基金会涨吗",
     "推荐基金",
+    "基金怎么买",
     "帮我翻译",
     "翻译一段",
     "翻译成英文",
     "翻译成中文",
+    "翻成英文",
+    "翻成中文",
     "今天天气",
     "明天天气",
     "天气怎么样",
+    "天气预报",
+    "气温多少",
     "会下雨吗",
     "帮我写作文",
     "帮我做作业",
+    "写作业",
     "菜谱",
+    "怎么做饭",
     "减肥计划",
+    "怎么减肥",
 )
+_CHINESE_LEGAL_KEYWORDS = {
+    "劳动合同", "劳动仲裁", "劳动争议", "工资", "加班费", "辞退", "解雇",
+    "赔偿", "补偿金", "工伤", "社保", "公积金", "仲裁", "诉讼",
+    "合同纠纷", "离婚", "抚养", "继承", "遗产", "房产", "租赁",
+    "借款", "欠款", "担保", "侵权", "交通事故", "刑事", "取保候审",
+    "拘留", "逮捕", "起诉", "上诉", "法院", "检察院", "律师",
+    "民法典", "刑法", "劳动法", "婚姻法", "公司法",
+}
 
 
 def _normalize_question(text: str) -> str:
@@ -146,6 +177,11 @@ def detect_out_of_scope_reason(question: str) -> str | None:
     if looks_like_non_legal_request(question):
         return "NON_LEGAL"
     return None
+
+
+def _contains_chinese_legal_keyword(text: str) -> bool:
+    """检查文本是否包含明显的中国法律关键词"""
+    return any(kw in text for kw in _CHINESE_LEGAL_KEYWORDS)
 
 
 # ======================================================================
@@ -458,6 +494,18 @@ async def route_decision(
             and question_looks_like_brief_followup(cleaned_question)
         ):
             route_intent = "CASE_UPDATE"
+        # --- OOS guardrail: 若确定性规则未命中，则不接受 LLM 直接判 OOS ---
+        if (
+            route_intent == OUT_OF_SCOPE_INTENT
+            and detect_out_of_scope_reason(cleaned_question) is None
+        ):
+            logger.warning(
+                "OOS guardrail triggered: LLM said OUT_OF_SCOPE but deterministic "
+                "OOS detector found no reason. Overriding to GENERAL_CONSULT. "
+                "question=%s",
+                cleaned_question[:120],
+            )
+            route_intent = "GENERAL_CONSULT"
     except Exception as exc:
         logger.warning("Triple-track routing failed, fallback to heuristic route: %s", exc)
         route_intent = fallback_intent

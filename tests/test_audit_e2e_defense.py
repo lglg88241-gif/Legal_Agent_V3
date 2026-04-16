@@ -99,10 +99,14 @@ def router_module():
     "question",
     [
         "美国加州的劳动法怎么规定的",
+        "美国加州离婚法怎么规定的",
+        "英国婚姻法怎么规定",
         "帮我写一段Python代码",
+        "帮我改一段Python代码",
         "你觉得明天股票会涨吗",
         "日本的交通法规和中国有什么区别",
         "帮我翻译一段英文",
+        "翻成英文",
     ],
 )
 def test_out_of_scope_questions_are_intercepted(router_module, question: str) -> None:
@@ -117,6 +121,7 @@ def test_out_of_scope_questions_are_intercepted(router_module, question: str) ->
         "打架反击算正当防卫吗",
         "劳动仲裁需要什么材料",
         "个人信息泄露怎么维权",
+        "离婚后孩子抚养权怎么判",
     ],
 )
 def test_chinese_legal_questions_are_not_intercepted(router_module, question: str) -> None:
