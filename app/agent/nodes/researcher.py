@@ -9,7 +9,10 @@ from typing import Any
 
 from app.agent.graph import AgentState
 from app.agent.nodes._llm import LAW_TOOL, CASE_TOOL
-from app.services.graph_extractor import format_graph_memory, get_user_cases_graph_overview
+from app.services import graph_extractor as _graph_extractor
+
+format_graph_memory = _graph_extractor.format_graph_memory
+get_user_cases_graph_overview = getattr(_graph_extractor, "get_user_cases_graph_overview", None)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,7 @@ async def vector_researcher_node(self, state: AgentState) -> AgentState:
         tool_results = await retrieval_task
 
     user_id = state.get("user_id")
-    if user_id and conversation_id:
+    if user_id and conversation_id and get_user_cases_graph_overview is not None:
         try:
             user_cases = await get_user_cases_graph_overview(int(user_id))
             history_cases = [case for case in user_cases if case.get("case_id") != int(conversation_id)]

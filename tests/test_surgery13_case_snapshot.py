@@ -6,6 +6,8 @@ import os
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("USE_TORCH", "0")
 
 if "json_repair" not in sys.modules:
@@ -17,6 +19,18 @@ if "app.agent.tools" not in sys.modules:
     fake_tools = ModuleType("app.agent.tools")
     fake_tools.AGENT_TOOLS = [SimpleNamespace(name="search_law_articles")]
     sys.modules["app.agent.tools"] = fake_tools
+
+_GRAPH_RELOAD_MODULES = (
+    "app.services.graph_extractor",
+    "app.agent.nodes.researcher",
+    "app.services.legal_agent",
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_graph_related_modules():
+    for module_name in _GRAPH_RELOAD_MODULES:
+        sys.modules.pop(module_name, None)
 
 
 class TestCaseTypeInference:
