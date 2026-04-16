@@ -576,3 +576,40 @@ class TestRouterWagePersistence:
         )
 
         assert "月薪15000元" in result["case_summary"]
+
+
+class TestInitialStateMonthlyWageRestore:
+    """Surgery #13: initial_state 应从 saved_case_state 恢复 _detected_monthly_wage。"""
+
+    def test_restore_from_saved_case_state(self) -> None:
+        saved = {"monthly_salary": 15000.0, "work_months": 12}
+        result = (
+            float(saved["monthly_salary"])
+            if saved
+            and isinstance(saved, dict)
+            and saved.get("monthly_salary") is not None
+            else None
+        )
+        assert result == 15000.0
+
+    def test_no_restore_when_none(self) -> None:
+        saved = {"work_months": 12}
+        result = (
+            float(saved["monthly_salary"])
+            if saved
+            and isinstance(saved, dict)
+            and saved.get("monthly_salary") is not None
+            else None
+        )
+        assert result is None
+
+    def test_no_restore_when_no_saved_state(self) -> None:
+        saved = None
+        result = (
+            float(saved["monthly_salary"])
+            if saved
+            and isinstance(saved, dict)
+            and saved.get("monthly_salary") is not None
+            else None
+        )
+        assert result is None

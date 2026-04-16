@@ -230,6 +230,13 @@ class LegalGraphAgent:
             "graph_focus": "",
             "is_final": False,
             "saved_case_state": saved_case_state,
+            "_detected_monthly_wage": (
+                float(saved_case_state["monthly_salary"])
+                if saved_case_state
+                and isinstance(saved_case_state, dict)
+                and saved_case_state.get("monthly_salary") is not None
+                else None
+            ),
         }
 
         final_state = await self.graph.ainvoke(

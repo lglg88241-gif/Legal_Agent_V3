@@ -37,6 +37,7 @@ class AgentState(TypedDict, total=False):
     reflection_analysis: str
     clarification_questions: list[str]
     graph_focus: str
+    saved_case_state: dict[str, Any] | None
     _detected_monthly_wage: Optional[float]
 
 
@@ -122,4 +123,8 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
     graph.add_edge("clarifier", END)
     graph.add_edge("legal_advisor", END)
 
-    return graph.compile()
+    try:
+        from app.memory.redis_mgr import memory_mgr
+    except Exception:
+        return graph.compile()
+    return graph.compile(checkpointer=memory_mgr)
