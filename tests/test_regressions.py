@@ -498,3 +498,81 @@ class TestAdvisorMonthlyWageBridge:
 
         assert captured["monthly_salary"] is None
         assert result["response"] == "测试回答"
+
+
+class TestRouterWagePersistence:
+    """router 层应在每轮检测到月薪时写入 _detected_monthly_wage。"""
+
+    def test_router_detects_wage_from_question(self) -> None:
+        from app.agent.nodes import router as router_module
+
+        class DummyAgent:
+            async def _patched_route_decision(self, current_query, chat_history="", case_summary="", is_precise_mode=False):
+                return {"route_intent": "GENERAL_CONSULT", "tool_calls": []}
+
+        result = asyncio.run(
+            router_module.tool_router_node(
+                DummyAgent(),
+                {
+                    "question": "我月薪15000在深圳上班",
+                    "current_query": "我月薪15000在深圳上班",
+                    "chat_history": "",
+                    "case_summary": "",
+                },
+            )
+        )
+
+        assert result["_detected_monthly_wage"] == 15000.0
+        assert result["route_intent"] == "GENERAL_CONSULT"
+
+    def test_router_does_not_overwrite_existing_wage(self) -> None:
+        from app.agent.nodes import router as router_module
+
+        class DummyAgent:
+            async def _patched_route_decision(self, current_query, chat_history="", case_summary="", is_precise_mode=False):
+                return {"route_intent": "GENERAL_CONSULT", "tool_calls": []}
+
+        result = asyncio.run(
+            router_module.tool_router_node(
+                DummyAgent(),
+                {
+                    "question": "帮我算一下赔偿",
+                    "current_query": "帮我算一下赔偿",
+                    "chat_history": "",
+                    "case_summary": "",
+                    "_detected_monthly_wage": 15000.0,
+                },
+            )
+        )
+
+        assert result["_detected_monthly_wage"] == 15000.0
+
+    def test_fact_updater_reads_state_wage(self) -> None:
+        from app.agent.nodes.fact_updater import fact_updater_node
+
+        class DummyAgent:
+            summary_llm = object()
+
+            async def _chat_model(self, llm, messages):
+                return '{"case_summary":"2024年3月公司因业绩辞退我"}'
+
+            def _safe_json_load(self, content, default):
+                import json
+
+                return json.loads(content)
+
+            def _patched_build_tool_calls_for_intent(self, intent, retrieval_query):
+                return []
+
+        result = asyncio.run(
+            fact_updater_node(
+                DummyAgent(),
+                {
+                    "question": "2024年3月公司因业绩辞退我",
+                    "case_summary": "",
+                    "_detected_monthly_wage": 15000.0,
+                },
+            )
+        )
+
+        assert "月薪15000元" in result["case_summary"]

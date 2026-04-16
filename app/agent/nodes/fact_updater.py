@@ -70,7 +70,13 @@ async def fact_updater_node(self, state: AgentState) -> AgentState:
         _saved_wage = _saved_case_state.get("monthly_salary")
         if isinstance(_saved_wage, (int, float)):
             existing_wage = float(_saved_wage)
-    carried_wage = _extract_monthly_wage(question) or _extract_monthly_wage(previous_summary) or (existing_wage or None)
+    _state_wage = state.get("_detected_monthly_wage")
+    carried_wage = (
+        _extract_monthly_wage(question)
+        or _extract_monthly_wage(previous_summary)
+        or (_state_wage if _state_wage and _state_wage > 0 else None)
+        or (existing_wage or None)
+    )
     preserved_fact_block = ""
     if carried_wage is not None and _extract_monthly_wage(previous_summary) is None:
         preserved_fact_block = f"\n\n已保存结构化事实：月薪{_format_wage_value(carried_wage)}元"

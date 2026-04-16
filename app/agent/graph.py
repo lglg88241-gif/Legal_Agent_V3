@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from langgraph.graph import END, StateGraph
 from typing_extensions import TypedDict
@@ -37,6 +37,7 @@ class AgentState(TypedDict, total=False):
     reflection_analysis: str
     clarification_questions: list[str]
     graph_focus: str
+    _detected_monthly_wage: Optional[float]
 
 
 def route_after_tool_router(state: AgentState) -> str:

@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from app.agent.graph import AgentState
+from app.agent.nodes.fact_updater import _extract_monthly_wage
 from app.agent.nodes._llm import (
     CHITCHAT_INTENT,
     GRAPH_TOOL,
@@ -528,6 +529,14 @@ async def tool_router_node(self, state: AgentState) -> AgentState:
     current_query = state.get("current_query") or state["question"]
     chat_history = state.get("chat_history", "")
     case_summary = state.get("case_summary", "")
+    _question = state.get("question") or ""
+    _wage_from_question = _extract_monthly_wage(_question)
+    _existing_wage = state.get("_detected_monthly_wage")
+    _wage_to_persist = (
+        _wage_from_question
+        if (_wage_from_question is not None and _wage_from_question > 0)
+        else _existing_wage
+    )
     decision = await self._patched_route_decision(
         current_query,
         chat_history=chat_history,
@@ -539,4 +548,5 @@ async def tool_router_node(self, state: AgentState) -> AgentState:
         "routed_query": current_query,
         "route_intent": decision["route_intent"],
         "tool_calls": decision["tool_calls"],
+        **({"_detected_monthly_wage": _wage_to_persist} if _wage_to_persist else {}),
     }
