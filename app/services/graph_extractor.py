@@ -84,6 +84,30 @@ ORDER BY name
 LIMIT 500
 """
 
+FETCH_USER_CASES_QUERY = """
+MATCH (n:DynamicCaseEntity {user_id: $user_id})
+WITH DISTINCT n.conversation_id AS case_id
+MATCH (a:DynamicCaseEntity {user_id: $user_id, conversation_id: case_id})-[r:CASE_RELATION]-(b:DynamicCaseEntity {user_id: $user_id, conversation_id: case_id})
+RETURN case_id,
+       collect(DISTINCT a.name) AS source_names,
+       collect(DISTINCT b.name) AS target_names,
+       count(DISTINCT r) AS relation_count
+ORDER BY case_id DESC
+LIMIT 20
+"""
+
+FETCH_CROSS_CASE_ENTITIES_QUERY = """
+MATCH (n:DynamicCaseEntity {user_id: $user_id})
+WHERE n.name IS NOT NULL
+WITH n.name AS shared_entity,
+     n.category AS entity_category,
+     collect(DISTINCT n.conversation_id) AS cases
+WHERE size(cases) > 1
+RETURN shared_entity, entity_category, cases
+ORDER BY size(cases) DESC
+LIMIT 20
+"""
+
 DELETE_GRAPH_QUERY = """
 MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
 DETACH DELETE n
@@ -343,19 +367,23 @@ def _cleanup_orphans(session, conversation_id: int) -> None:
     ).consume()
 
 
-def _merge_fact(session, conversation_id: int, fact: dict[str, str]) -> None:
+def _merge_fact(session, conversation_id: int, fact: dict[str, str], user_id: int = 0) -> None:
     session.run(
         """
         MERGE (source:DynamicCaseEntity {conversation_id: $conversation_id, name: $source})
-        ON CREATE SET source.created_at = datetime()
+        ON CREATE SET source.created_at = datetime(),
+                      source.user_id = $user_id
         SET source.updated_at = datetime(),
             source.category = $source_category,
-            source.node_type = $source_category
+            source.node_type = $source_category,
+            source.user_id = $user_id
         MERGE (target:DynamicCaseEntity {conversation_id: $conversation_id, name: $target})
-        ON CREATE SET target.created_at = datetime()
+        ON CREATE SET target.created_at = datetime(),
+                      target.user_id = $user_id
         SET target.updated_at = datetime(),
             target.category = $target_category,
-            target.node_type = $target_category
+            target.node_type = $target_category,
+            target.user_id = $user_id
         MERGE (source)-[rel:CASE_RELATION {
             conversation_id: $conversation_id,
             relation: $relation,
@@ -363,10 +391,12 @@ def _merge_fact(session, conversation_id: int, fact: dict[str, str]) -> None:
             target_name: $target
         }]->(target)
         ON CREATE SET rel.created_at = datetime()
-        SET rel.updated_at = datetime()
+        SET rel.updated_at = datetime(),
+            rel.user_id = $user_id
         """,
         {
             "conversation_id": conversation_id,
+            "user_id": user_id,
             "source": fact["source"],
             "source_category": fact["source_category"],
             "relation": fact["relation"],
@@ -423,7 +453,11 @@ def _delete_node(session, conversation_id: int, target_name: str) -> None:
     ).consume()
 
 
-def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, str]]) -> dict[str, Any]:
+def _execute_graph_actions_sync(
+    conversation_id: int,
+    actions: list[dict[str, str]],
+    user_id: int = 0,
+) -> dict[str, Any]:
     driver = _build_driver()
     applied = 0
 
@@ -442,6 +476,7 @@ def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, st
                             "target": action["target"],
                             "target_category": action["target_category"],
                         },
+                        user_id=user_id,
                     )
                     applied += 1
                 elif action_type == "UPDATE":
@@ -462,6 +497,7 @@ def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, st
                             "target": action["target"],
                             "target_category": action["target_category"],
                         },
+                        user_id=user_id,
                     )
                     applied += 1
                 elif action_type == "DELETE":
@@ -536,6 +572,28 @@ def _fetch_case_graph_node_names_sync(conversation_id: int) -> list[str]:
         seen.add(name)
         names.append(name)
     return names
+
+
+def _fetch_user_cases_sync(user_id: int) -> list[dict[str, Any]]:
+    """获取某用户所有案件的图谱概览。"""
+    driver = _build_driver()
+    try:
+        with driver.session() as session:
+            records = session.run(FETCH_USER_CASES_QUERY, {"user_id": user_id}).data()
+    finally:
+        driver.close()
+    return records
+
+
+def _fetch_cross_case_entities_sync(user_id: int) -> list[dict[str, Any]]:
+    """发现跨案件共享实体。"""
+    driver = _build_driver()
+    try:
+        with driver.session() as session:
+            records = session.run(FETCH_CROSS_CASE_ENTITIES_QUERY, {"user_id": user_id}).data()
+    finally:
+        driver.close()
+    return records
 
 
 def _delete_obsolete_nodes_sync(conversation_id: int, obsolete_nodes: list[str]) -> int:
@@ -618,6 +676,28 @@ async def get_case_graph_node_names(conversation_id: int) -> list[str]:
         return await asyncio.to_thread(_fetch_case_graph_node_names_sync, conversation_id)
     except Exception as exc:
         logger.warning("Failed to load case graph node names for conversation %s: %s", conversation_id, exc)
+        return []
+
+
+async def get_user_cases_graph_overview(user_id: int) -> list[dict[str, Any]]:
+    """获取用户所有案件的图谱概览（异步）。"""
+    if not user_id:
+        return []
+    try:
+        return await asyncio.to_thread(_fetch_user_cases_sync, user_id)
+    except Exception as exc:
+        logger.warning("Failed to load user cases graph for user %s: %s", user_id, exc)
+        return []
+
+
+async def get_cross_case_entities(user_id: int) -> list[dict[str, Any]]:
+    """发现用户跨案件的共享实体（异步）。"""
+    if not user_id:
+        return []
+    try:
+        return await asyncio.to_thread(_fetch_cross_case_entities_sync, user_id)
+    except Exception as exc:
+        logger.warning("Failed to find cross-case entities for user %s: %s", user_id, exc)
         return []
 
 
@@ -743,7 +823,11 @@ async def plan_graph_gc(case_summary: str, current_nodes: list[str], current_gra
     return {"obsolete_nodes": [], "obsolete_edges": []}
 
 
-async def execute_graph_actions(conversation_id: int, actions: list[dict[str, str]]) -> dict[str, Any]:
+async def execute_graph_actions(
+    conversation_id: int,
+    actions: list[dict[str, str]],
+    user_id: int = 0,
+) -> dict[str, Any]:
     if not actions:
         return {
             "conversation_id": conversation_id,
@@ -752,7 +836,7 @@ async def execute_graph_actions(conversation_id: int, actions: list[dict[str, st
         }
 
     try:
-        return await asyncio.to_thread(_execute_graph_actions_sync, conversation_id, actions)
+        return await asyncio.to_thread(_execute_graph_actions_sync, conversation_id, actions, user_id)
     except Exception as exc:
         logger.warning("Graph action execution failed for conversation %s: %s", conversation_id, exc)
         return {
@@ -763,7 +847,7 @@ async def execute_graph_actions(conversation_id: int, actions: list[dict[str, st
         }
 
 
-async def upsert_case_graph(conversation_id: int, triples: list[dict[str, str]]) -> int:
+async def upsert_case_graph(conversation_id: int, triples: list[dict[str, str]], user_id: int = 0) -> int:
     add_actions = [
         {
             "action": "ADD",
@@ -776,18 +860,23 @@ async def upsert_case_graph(conversation_id: int, triples: list[dict[str, str]])
         }
         for triple in triples
     ]
-    result = await execute_graph_actions(conversation_id, add_actions)
+    result = await execute_graph_actions(conversation_id, add_actions, user_id=user_id)
     return int(result.get("actions_applied", 0))
 
 
-async def sync_case_graph_from_history(conversation_id: int, chat_history: str) -> int:
+async def sync_case_graph_from_history(conversation_id: int, chat_history: str, user_id: int = 0) -> int:
     triples = await extract_case_triples(chat_history)
     if not triples:
         return 0
-    return await upsert_case_graph(conversation_id, triples)
+    return await upsert_case_graph(conversation_id, triples, user_id=user_id)
 
 
-async def refresh_case_graph(conversation_id: int, user_input: str, case_summary: str = "") -> dict[str, Any]:
+async def refresh_case_graph(
+    conversation_id: int,
+    user_input: str,
+    case_summary: str = "",
+    user_id: int = 0,
+) -> dict[str, Any]:
     add_actions = await extract_incremental_graph_actions(user_input)
 
     if not add_actions:
@@ -805,7 +894,7 @@ async def refresh_case_graph(conversation_id: int, user_input: str, case_summary
             for triple in triples
         ]
 
-    add_result = await execute_graph_actions(conversation_id, add_actions)
+    add_result = await execute_graph_actions(conversation_id, add_actions, user_id=user_id)
     current_nodes = await get_case_graph_node_names(conversation_id)
     current_graph = await format_current_graph_state(conversation_id)
     gc_result = await plan_graph_gc(case_summary, current_nodes, current_graph)

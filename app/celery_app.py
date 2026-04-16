@@ -173,7 +173,7 @@ async def _persist_dialog_turn_async(
 
 
 @celery_app.task(name="update_graph_task")
-def update_graph_task(conversation_id: int):
+def update_graph_task(conversation_id: int, user_id: int = 0):
     try:
         async def _run():
             celery_engine, session_factory = _create_celery_session_factory()
@@ -200,6 +200,7 @@ def update_graph_task(conversation_id: int):
                 conversation_id=conversation_id,
                 user_input=latest_user_input,
                 case_summary=case_summary,
+                user_id=user_id,
             )
 
         update_result = asyncio.run(_run())
@@ -329,7 +330,7 @@ def ask_agent_task(
             )
 
         if route_intent == "CASE_UPDATE":
-            update_graph_task.delay(conversation_id)
+            update_graph_task.delay(conversation_id, user_id)
 
         return result
 
