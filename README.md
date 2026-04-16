@@ -14,9 +14,10 @@
 | 知识图谱 | Neo4j 实时三元组提取，会话级子图，全局图谱查询 |
 | 路由安全 | 四轨路由（GREETING/GENERAL_CONSULT/CASE_UPDATE/OUT_OF_SCOPE）+ 本地模型 guardrail |
 | 用户数据 | MySQL 会话历史 + 案件快照（CaseState JSON）+ 案件类型自动推断 + 检索 API |
+| 用户个性化图谱 | Neo4j user_id 隔离 + 跨案件共享实体发现 + 历史案件上下文注入 |
 | 可解释性 | CalculationTrace 白盒契约，VERBATIM 超额纠错注入 |
 | 架构瘦身 | 主编排器 1903→239 行（-87%），关注点分离到 7 个节点 |
-| 测试覆盖 | 217 个确定性断言，零 LLM/IO/网络依赖 |
+| 测试覆盖 | 233 个确定性断言，零 LLM/IO/网络依赖 |
 
 ## 技术栈
 
@@ -64,6 +65,9 @@ graph TB
 
 ```text
 app/                          # 主应用 (6769行, 45个Python文件)
+├── core/
+│   ├── llm_factory.py        # Surgery #12: 本地/云端双轨 LLM 工厂
+│   └── ...
 ├── agent/
 │   ├── graph.py              # LangGraph StateGraph (124行)
 │   ├── tools.py              # RAG 混合检索 (372行)
@@ -74,7 +78,7 @@ app/                          # 主应用 (6769行, 45个Python文件)
 │   │   ├── router.py         # 四轨路由 + guardrail (466行)
 │   │   ├── fact_updater.py   # 案情更新
 │   │   ├── reflector.py      # 反思节点
-│   │   ├── researcher.py     # 向量检索 + 图谱加载
+│   │   ├── researcher.py     # 向量检索 + 图谱加载 + 用户历史案件实体
 │   │   └── clarifier.py      # 澄清节点
 │   └── prompts/              # Prompt 统一管理
 ├── schemas/
@@ -84,7 +88,7 @@ app/                          # 主应用 (6769行, 45个Python文件)
 ├── services/
 │   ├── legal_agent.py        # 薄壳编排器 (239行, 从1903行瘦身87%)
 │   ├── conversation_store.py # 会话+案件快照持久化 (288行+)
-│   └── graph_extractor.py    # 图谱三元组提取 (917行)
+│   └── graph_extractor.py    # Surgery #14: user_id 写入 + 用户图谱查询
 ├── database/
 │   ├── mysql_db.py           # 异步 SQLAlchemy 引擎
 │   ├── chroma_mgr.py         # ChromaDB 管理
@@ -94,19 +98,20 @@ app/                          # 主应用 (6769行, 45个Python文件)
 ├── api/                      # FastAPI 路由
 │   ├── dialog.py             # 对话接口
 │   ├── conversations.py      # 会话CRUD + 案件搜索
-│   ├── graph.py              # 图谱API
+│   ├── graph.py              # Surgery #14: 用户图谱 API
 │   └── auth.py               # JWT认证
 └── celery_app.py             # 任务调度 (326行)
 
 scripts/
-└── warmup.py                 # 服务预热脚本
+├── warmup.py                 # 服务预热脚本
+└── backfill_graph_user_id.py # Surgery #14: 图谱 user_id 回填
 
 docs/
 ├── latency_analysis.md       # 延迟分析 + Mermaid 时序图
 └── confidence_score_diagnosis.md
 
 e2e_tests/                    # 端到端测试套件
-tests/                        # 单元测试 (217 passed)
+tests/                        # 单元测试 (233 passed)
 ```
 
 ## 快速启动
@@ -154,6 +159,8 @@ python scripts/warmup.py
 | GET | `/conversations/{id}/messages` | 获取会话消息历史 |
 | GET | `/conversations/{id}/graph` | 获取会话知识图谱 |
 | GET | `/graph/subgraph?query=` | 全局图谱查询 |
+| GET | `/graph/user/{user_id}/cases` | 用户案件图谱概览 |
+| GET | `/graph/user/{user_id}/cross-case-entities` | 跨案件共享实体发现 |
 
 ## 测试
 
@@ -161,7 +168,7 @@ python scripts/warmup.py
 D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 ```
 
-**当前基线**: 217 passed, 0 failed
+**当前基线**: 233 passed, 0 failed
 
 所有测试为确定性断言，零 LLM、零 IO、零网络依赖。
 
@@ -175,6 +182,7 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 | Confidence | 启发式四档 + reflector 不覆盖 |
 | 案件类型推断 | 7类 + 空输入 |
 | 案件快照 | JSON roundtrip + 序列化 |
+| 用户图谱隔离 | user_id 透传 + API 路由 + 查询常量 |
 
 ## 开发历程
 
@@ -193,6 +201,28 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 | #11 | Confidence 启发式补丁 | 功能完善 |
 | #12/12A | 本地 Qwen 3B 路由 + guardrail | 多模型协作 |
 | #13 | 案件快照持久化 + 类型推断 + 搜索 API | 用户数据 |
+| #14 | Neo4j 用户个性化图谱 | 数据 |
+
+### Surgery #12/12A: 本地 vLLM 多模型协作
+- 本地 Qwen2.5-3B-Instruct-AWQ 接管 `router_llm`（意图路由）
+- 云端智谱 GLM-4 继续负责 `expert_llm`（法律推理）和 `summary_llm`（案情合并）
+- 新增 `app/core/llm_factory.py` 统一模型工厂，支持本地/云端双轨
+- 查询扩展 LLM 支持本地优先 + 云端 fallback
+- Router guardrail：本地小模型路由结果校验
+
+### Surgery #13: MySQL 用户数据层补全
+- `conversations` 表新增 `case_state_json`（CaseState Pydantic 序列化）和 `case_type`（自动推断）
+- 持久化结构化案件快照，支持跨会话恢复
+- 新增案件搜索 API: `GET /conversations/search?case_type=&keyword=`
+- 多轮场景下 `saved_case_state` fallback 已接入 advisor 节点
+
+### Surgery #14: Neo4j 用户个性化图谱
+- 所有 `DynamicCaseEntity` 节点和 `CASE_RELATION` 关系写入时携带 `user_id`
+- 新增用户案件图谱概览 API: `GET /graph/user/{user_id}/cases`
+- 新增跨案件共享实体发现 API: `GET /graph/user/{user_id}/cross-case-entities`
+- `researcher` 节点增强：自动加载用户历史案件实体到图谱上下文
+- 回填脚本: `scripts/backfill_graph_user_id.py`
+- 静态知识图谱（Law/Case/Party）保持全局共享不变
 
 ## 端到端基准测试
 
@@ -203,8 +233,9 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 | 超范围拦截成功率 | 100% (5/5) |
 | 总防御率 | 70%（Surgery #8 前为 27.3%） |
 | 平均端到端延迟 | ~17-22s |
+| 单元测试 | 233 passed, 0 failed |
 
-> 详细数据与分析见 `e2e_tests/results/` 和 `docs/latency_analysis.md`
+> 详细数据见 `e2e_tests/results/`
 
 ## 研究与工程成果
 
@@ -213,6 +244,7 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 - 建立 Prompt 守卫 + 后处理守卫 + 结构化快照持久化三层质量闭环。
 - 引入本地 3B 路由模型承担低成本分类任务，云端模型集中用于高质量法律推理。
 - 将用户会话从纯文本历史升级为“消息 + 摘要 + CaseState JSON 快照 + 案件类型标签”的持久化数据层。
+- 建立 Neo4j 用户级动态图谱隔离，并支持跨案件共享实体发现与历史案件实体上下文注入。
 
 ## 演示建议
 
@@ -226,8 +258,9 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 - 本地开发建议先启动 Redis、MySQL、Neo4j，再启动 FastAPI 与 Celery Worker。
 - Windows 环境下 Celery/模型加载容易受编码与显存环境影响，建议先执行预热脚本。
 - 端到端验证脚本位于 `e2e_tests/`，适合在服务全部启动后单独执行。
+- 图谱相关调试可直接访问 `/graph/user/{user_id}/cases` 与 `/graph/user/{user_id}/cross-case-entities`。
 
 ## 许可证与说明
 
 - 本项目面向中文法律智能问答研究与工程实践展示。
-- README 中的测试基线、架构图和目录结构已同步至 Surgery #13 完成状态。
+- README 中的测试基线、架构图和目录结构已同步至 Surgery #14 完成状态。
