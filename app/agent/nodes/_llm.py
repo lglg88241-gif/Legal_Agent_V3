@@ -10,9 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
+os.environ.setdefault("USE_TORCH", "0")
+
 from json_repair import repair_json
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agent.graph import AgentState
@@ -33,6 +37,37 @@ OUT_OF_SCOPE_RESPONSE = (
     "抱歉，我是专注于中国法律领域的智能助手，暂时无法回答该类问题。"
     "如果您有中国法律相关的疑问，例如劳动争议、合同纠纷、刑事案件等，我很乐意为您提供帮助。"
 )
+def create_local_router_llm() -> ChatOpenAI:
+    """
+    Surgery #12: 本地 vLLM 路由模型工厂。
+    用于 router_llm，承担四轨意图分类任务。
+    本地 Qwen2.5-3B-Instruct，OpenAI 兼容接口。
+    """
+    from app.core.config import settings
+
+    return ChatOpenAI(
+        model=settings.LLM_MODEL_NAME,
+        api_key=settings.API_KEY,
+        base_url=settings.BASE_URL,
+        temperature=0.1,
+        max_tokens=64,
+        timeout=15,
+    )
+
+
+def create_cloud_llm(model: str = "glm-4-flash") -> "ChatZhipuAI":
+    """
+    Surgery #12: 智谱云端模型工厂。
+    用于 expert_llm / summary_llm 等需要推理质量的任务。
+    """
+    from langchain_community.chat_models import ChatZhipuAI
+    from app.core.config import settings
+
+    return ChatZhipuAI(
+        model=model,
+        api_key=settings.ZHIPUAI_API_KEY,
+        temperature=0.1,
+    )
 
 
 async def chat_model(self, llm, messages: list[dict[str, str]]) -> str:
@@ -51,16 +86,14 @@ async def chat_model(self, llm, messages: list[dict[str, str]]) -> str:
 
 
 async def chat_model_with_fallback(self, primary_llm, fallback_llm, messages: list[dict[str, str]]) -> str:
-    """Try the primary chat model first and fall back to the secondary model."""
+    """
+    Surgery #12: 带 fallback 的 LLM 调用。
+    primary_llm 失败时自动降级到 fallback_llm。
+    """
     try:
         return await self._chat_model(primary_llm, messages)
     except Exception as exc:
-        logger.warning(
-            "Primary LLM failed (%s), falling back to %s: %s",
-            type(primary_llm).__name__,
-            type(fallback_llm).__name__,
-            exc,
-        )
+        logger.warning("Primary LLM failed, falling back to cloud LLM: %s", exc)
         return await self._chat_model(fallback_llm, messages)
 
 
