@@ -262,6 +262,11 @@ class LegalGraphAgent:
                 if saved_case_state and isinstance(saved_case_state, dict):
                     if _cs.monthly_salary is None and saved_case_state.get("monthly_salary") is not None:
                         _cs.monthly_salary = saved_case_state["monthly_salary"]
+                    # Fix 2: 从 fact_updater 检测到的月薪填充（优先级低于 saved_case_state）
+                    if _cs.monthly_salary is None:
+                        _detected = final_state.get("_detected_monthly_wage")
+                        if isinstance(_detected, (int, float)) and _detected > 0:
+                            _cs.monthly_salary = float(_detected)
                     if _cs.work_months is None and saved_case_state.get("work_months") is not None:
                         _cs.work_months = saved_case_state["work_months"]
                     if not _cs.has_unsigned_contract and saved_case_state.get("has_unsigned_contract"):

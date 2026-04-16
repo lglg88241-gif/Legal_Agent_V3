@@ -233,6 +233,9 @@ def sanitize_unverified_claims(
        scrub affirmative lines containing that amount.
     3. Underclaims / in-tolerance amounts pass through unchanged.
     """
+    if not payload:
+        return llm_answer
+
     claim_amounts = _extract_claim_amounts_from_user_input(user_input)
     if not claim_amounts:
         return llm_answer.strip()

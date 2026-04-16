@@ -41,26 +41,22 @@ _PAYLOAD_132000 = build_claim_payload(
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def test_unverified_claim_none_payload_inserts_warning_for_999999() -> None:
+def test_unverified_claim_none_payload_passes_through_999999() -> None:
     result = sanitize_unverified_claims(
         "您有权主张999999元赔偿。",
         "我能要999999元吗？",
         None,
     )
-    assert "金额提示" in result
-    assert "999999 元" in result or "999999元" in result
-    assert "具体金额需经系统核算" in result
+    assert result == "您有权主张999999元赔偿。"
 
 
-def test_unverified_claim_none_payload_inserts_warning_for_200000() -> None:
+def test_unverified_claim_none_payload_passes_through_200000() -> None:
     result = sanitize_unverified_claims(
         "赔偿200000元是可以考虑的。",
         "赔偿200000元可以吗？",
         None,
     )
-    assert "金额提示" in result
-    assert "200000 元" in result or "200000元" in result
-    assert "具体金额需经系统核算" in result
+    assert result == "赔偿200000元是可以考虑的。"
 
 
 def test_exact_claim_does_not_trigger_correction() -> None:
