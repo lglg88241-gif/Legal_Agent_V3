@@ -382,9 +382,17 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         (state.get("graph_context") or "").strip()
         or (state.get("graph_memory") or "").strip()
     )
-    layered_payload = build_claim_payload(
-        CaseState.from_text(case_summary, state["question"], graph_context)
-    )
+    _cs_for_payload = CaseState.from_text(case_summary, state["question"], graph_context)
+    # Fix 2: 从 fact_updater 检测到的月薪补充（from_text 无法从首轮摘要解析时使用）
+    if _cs_for_payload.monthly_salary is None:
+        _wage = state.get("_detected_monthly_wage")
+        if isinstance(_wage, (int, float)) and _wage > 0:
+            _cs_for_payload.monthly_salary = float(_wage)
+            logger.debug(
+                "Fix2: monthly_salary补充自_detected_monthly_wage: %.0f",
+                _cs_for_payload.monthly_salary,
+            )
+    layered_payload = build_claim_payload(_cs_for_payload)
     rag_context = retrieved_docs or "无有效检索结果"
 
     advisor_system_prompt = build_advisor_system_prompt(

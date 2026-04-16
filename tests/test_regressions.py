@@ -383,3 +383,118 @@ def test_clarifier_uses_sandwich_style_when_core_fields_missing() -> None:
     assert "有法律价值" in question
     assert "足以先帮你判断" in question
     assert "为了把金额和请求做得更准" in question
+
+
+class TestAdvisorMonthlyWageBridge:
+    """Fix 2: advisor 节点从 state._detected_monthly_wage 补充月薪。"""
+
+    def test_detected_wage_fills_none_monthly_salary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_backend_import_stubs()
+        sys.modules.pop("app.services.legal_agent", None)
+        from app.services import legal_agent
+        from app.agent.nodes import advisor as advisor_module
+
+        agent = legal_agent.LegalGraphAgent()
+        original_build_claim_payload = advisor_module.build_claim_payload
+        captured: dict[str, object] = {}
+
+        def spy_build_claim_payload(case_state):
+            captured["monthly_salary"] = case_state.monthly_salary
+            return original_build_claim_payload(case_state)
+
+        async def fake_chat_model(*args, **kwargs):
+            return '{"answer":"测试回答","sources":[]}'
+
+        monkeypatch.setattr(advisor_module, "build_claim_payload", spy_build_claim_payload)
+        monkeypatch.setattr(agent, "_chat_model", fake_chat_model)
+
+        result = asyncio.run(
+            agent._generate_final_answer(
+                {
+                    "question": "帮我算赔偿",
+                    "case_summary": "",
+                    "graph_context": "",
+                    "graph_memory": "",
+                    "_detected_monthly_wage": 15000.0,
+                    "tool_results": [],
+                    "confidence_score": 0.0,
+                }
+            )
+        )
+
+        assert captured["monthly_salary"] == 15000.0
+        assert result["response"] == "测试回答"
+
+    def test_detected_wage_not_overwrite_existing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_backend_import_stubs()
+        sys.modules.pop("app.services.legal_agent", None)
+        from app.services import legal_agent
+        from app.agent.nodes import advisor as advisor_module
+
+        agent = legal_agent.LegalGraphAgent()
+        original_build_claim_payload = advisor_module.build_claim_payload
+        captured: dict[str, object] = {}
+
+        def spy_build_claim_payload(case_state):
+            captured["monthly_salary"] = case_state.monthly_salary
+            return original_build_claim_payload(case_state)
+
+        async def fake_chat_model(*args, **kwargs):
+            return '{"answer":"测试回答","sources":[]}'
+
+        monkeypatch.setattr(advisor_module, "build_claim_payload", spy_build_claim_payload)
+        monkeypatch.setattr(agent, "_chat_model", fake_chat_model)
+
+        result = asyncio.run(
+            agent._generate_final_answer(
+                {
+                    "question": "测试",
+                    "case_summary": "月薪12000元，工作6个月",
+                    "graph_context": "",
+                    "graph_memory": "",
+                    "_detected_monthly_wage": 15000.0,
+                    "tool_results": [],
+                    "confidence_score": 0.0,
+                }
+            )
+        )
+
+        assert captured["monthly_salary"] == 12000.0
+        assert result["response"] == "测试回答"
+
+    def test_invalid_wage_not_applied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_backend_import_stubs()
+        sys.modules.pop("app.services.legal_agent", None)
+        from app.services import legal_agent
+        from app.agent.nodes import advisor as advisor_module
+
+        agent = legal_agent.LegalGraphAgent()
+        original_build_claim_payload = advisor_module.build_claim_payload
+        captured: dict[str, object] = {}
+
+        def spy_build_claim_payload(case_state):
+            captured["monthly_salary"] = case_state.monthly_salary
+            return original_build_claim_payload(case_state)
+
+        async def fake_chat_model(*args, **kwargs):
+            return '{"answer":"测试回答","sources":[]}'
+
+        monkeypatch.setattr(advisor_module, "build_claim_payload", spy_build_claim_payload)
+        monkeypatch.setattr(agent, "_chat_model", fake_chat_model)
+
+        result = asyncio.run(
+            agent._generate_final_answer(
+                {
+                    "question": "测试",
+                    "case_summary": "",
+                    "graph_context": "",
+                    "graph_memory": "",
+                    "_detected_monthly_wage": 0,
+                    "tool_results": [],
+                    "confidence_score": 0.0,
+                }
+            )
+        )
+
+        assert captured["monthly_salary"] is None
+        assert result["response"] == "测试回答"
