@@ -181,6 +181,14 @@ def is_valid_expansion(content: str) -> bool:
     return all(item.strip() for item in queries)
 
 
+def _truncate_debug_response(content: str, limit: int = 500) -> str:
+    """Keep raw local query-expansion logs short and safe to print."""
+    text = (content or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "...<truncated>"
+
+
 class QueryExpansionLLM:
     """Local-first query expansion wrapper with cloud fallback."""
 
@@ -199,6 +207,11 @@ class QueryExpansionLLM:
         if self.local_llm is not None:
             try:
                 local_response = self.local_llm.invoke(messages)
+                if local_response:
+                    logger.debug(
+                        "Local query expansion raw response: %s",
+                        _truncate_debug_response(local_response.content),
+                    )
                 if local_response and is_valid_expansion(local_response.content):
                     logger.info("Query expansion path: local")
                     return local_response
@@ -216,6 +229,11 @@ class QueryExpansionLLM:
                     self.local_llm.ainvoke(messages),
                     timeout=self.local_timeout,
                 )
+                if local_response:
+                    logger.debug(
+                        "Local query expansion raw response: %s",
+                        _truncate_debug_response(local_response.content),
+                    )
                 if local_response and is_valid_expansion(local_response.content):
                     logger.info("Query expansion path: local")
                     return local_response
