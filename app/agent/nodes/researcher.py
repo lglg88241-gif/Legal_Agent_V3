@@ -36,6 +36,7 @@ async def vector_researcher_node(self, state: AgentState) -> AgentState:
         enriched_tool_calls.append({"name": call["name"], "arguments": arguments})
 
     graph_context = (state.get("graph_context") or "").strip() or (state.get("graph_memory") or "").strip()
+    historical_reference = (state.get("historical_reference") or "").strip()
     retrieval_task = self._execute_tool_calls(enriched_tool_calls)
     graph_task = None
     if conversation_id:
@@ -65,9 +66,8 @@ async def vector_researcher_node(self, state: AgentState) -> AgentState:
                     all_entities = list(dict.fromkeys([*sources, *targets]))[:8]
                     history_lines.append(f"  案件#{case_id}: {', '.join(all_entities)}")
                 if history_lines:
-                    graph_context = (
-                        f"{graph_context}\n\n"
-                        f"用户历史案件实体（可能与当前案件相关）：\n"
+                    historical_reference = (
+                        "用户历史案件实体（仅供参考，不得作为当前案件事实参与计算）：\n"
                         + "\n".join(history_lines)
                     )
         except Exception as exc:
@@ -81,4 +81,5 @@ async def vector_researcher_node(self, state: AgentState) -> AgentState:
         "tool_results": self._merge_tool_results([], tool_results),
         "graph_context": graph_context,
         "graph_memory": graph_context,
+        "historical_reference": historical_reference,
     }

@@ -224,6 +224,7 @@ def build_advisor_system_prompt(
     rag_context: str,
     payload: PayloadResult,
     question: str = "",
+    historical_reference: str = "",
 ) -> str:
     """
     Build the full advisor system prompt.
@@ -371,6 +372,10 @@ def build_advisor_system_prompt(
 <context>
 案件摘要：{case_summary or "无案件摘要"}
 图谱上下文：{graph_context or "无图谱上下文"}
+<historical_reference>
+{historical_reference or "无历史案件参考"}
+</historical_reference>
+历史案件参考只可作为背景提示，严禁当作当前案件事实参与计算、抽取月薪、工龄或案型。
 <rag_context>
 {rag_context}
 </rag_context>
@@ -406,7 +411,13 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         (state.get("graph_context") or "").strip()
         or (state.get("graph_memory") or "").strip()
     )
-    _cs_for_payload = CaseState.from_text(case_summary, state["question"], graph_context)
+    historical_reference = (state.get("historical_reference") or "").strip()
+    _cs_for_payload = CaseState.from_text(
+        case_summary,
+        state["question"],
+        graph_context,
+        historical_reference=historical_reference,
+    )
     # Fix 2: 从 fact_updater 检测到的月薪补充（from_text 无法从首轮摘要解析时使用）
     if _cs_for_payload.monthly_salary is None:
         _wage = state.get("_detected_monthly_wage")
@@ -434,6 +445,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         question=state["question"],
         case_summary=display_case_summary,
         graph_context=graph_context,
+        historical_reference=historical_reference,
         rag_context=rag_context,
         payload=layered_payload,
     )

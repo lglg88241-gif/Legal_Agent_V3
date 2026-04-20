@@ -215,6 +215,7 @@ class LegalGraphAgent:
             "case_summary": case_summary,
             "graph_context": graph_memory,
             "graph_memory": graph_memory,
+            "historical_reference": "",
             "current_query": question,
             "route_intent": "GENERAL_CONSULT",
             "loop_count": 0,

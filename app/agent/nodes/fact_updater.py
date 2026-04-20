@@ -62,7 +62,10 @@ def _merge_monthly_wage_into_summary(case_summary: str, wage: float | None) -> s
 
 async def fact_updater_node(self, state: AgentState) -> AgentState:
     previous_summary = (state.get("case_summary") or "").strip()
+    historical_reference = (state.get("historical_reference") or "").strip()
     question = " ".join((state.get("question") or "").strip().split())
+    user_id = state.get("user_id")
+    conversation_id = state.get("conversation_id")
     fallback_summary = previous_summary or question
     _saved_case_state = state.get("saved_case_state")
     existing_wage = 0.0
@@ -81,6 +84,30 @@ async def fact_updater_node(self, state: AgentState) -> AgentState:
     if carried_wage is not None and _extract_monthly_wage(previous_summary) is None:
         preserved_fact_block = f"\n\n已保存结构化事实：月薪{_format_wage_value(carried_wage)}元"
 
+    if not historical_reference and user_id and conversation_id:
+        try:
+            from app.services import graph_extractor as _graph_extractor
+
+            get_user_cases_graph_overview = getattr(_graph_extractor, "get_user_cases_graph_overview", None)
+            if get_user_cases_graph_overview is None:
+                raise AttributeError("get_user_cases_graph_overview unavailable")
+            user_cases = await get_user_cases_graph_overview(int(user_id))
+            history_cases = [case for case in user_cases if case.get("case_id") != int(conversation_id)]
+            history_lines: list[str] = []
+            for case in history_cases[:5]:
+                case_id = case.get("case_id", "?")
+                sources = case.get("source_names", [])
+                targets = case.get("target_names", [])
+                all_entities = list(dict.fromkeys([*sources, *targets]))[:8]
+                history_lines.append(f"  案件#{case_id}: {', '.join(all_entities)}")
+            if history_lines:
+                historical_reference = (
+                    "用户历史案件实体（仅供参考，不得作为当前案件事实参与计算）：\n"
+                    + "\n".join(history_lines)
+                )
+        except Exception as exc:
+            logger.warning("Fact updater failed to load historical reference: %s", exc)
+
     try:
         content = await self._chat_model(
             self.summary_llm,
@@ -91,6 +118,7 @@ async def fact_updater_node(self, state: AgentState) -> AgentState:
                     "content": (
                         f"旧摘要：{previous_summary or '无'}"
                         f"{preserved_fact_block}\n\n"
+                        f"<historical_reference>\n{historical_reference or '无'}\n</historical_reference>\n\n"
                         f"用户最新输入：{question}"
                     ),
                 },
@@ -117,5 +145,6 @@ async def fact_updater_node(self, state: AgentState) -> AgentState:
         "current_query": retrieval_query,
         "routed_query": "",
         "tool_calls": self._patched_build_tool_calls_for_intent("CASE_UPDATE", retrieval_query),
+        "historical_reference": historical_reference,
         **_extra,
     }

@@ -209,6 +209,29 @@ def _merged_text(cs: CaseState) -> str:
     ).strip()
 
 
+def _sanitize_historical_fact_sources(cs: CaseState) -> CaseState:
+    """
+    Drop numeric facts that came only from historical references.
+
+    Historical case entities may be useful for advisor context, but they must
+    never participate in current-case calculations.
+    """
+    updates: dict[str, Any] = {}
+    if cs.monthly_salary_source == "historical":
+        updates["monthly_salary"] = None
+    if cs.work_months_source == "historical":
+        updates["work_months"] = None
+    if cs.service_years_source == "historical":
+        updates["service_years"] = None
+
+    if not updates:
+        return cs
+
+    payload = cs.model_dump()
+    payload.update(updates)
+    return CaseState.model_validate(payload)
+
+
 # ======================================================================
 # Keyword detectors (pure, no IO)
 # ======================================================================
@@ -372,6 +395,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     It produces structured PayloadResult output consumed by all nodes.
     Surgery 7 adds a CalculationTrace for white-box LLM context.
     """
+    cs = _sanitize_historical_fact_sources(cs)
     merged = _merged_text(cs)
     scenario = _detect_scenario(cs)
     facts = _split_fact_lines(cs.case_summary, cs.question, cs.graph_context)
@@ -380,6 +404,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     strategy_lines: list[str] = []
     action_lines: list[str] = []
     unknowns: list[str] = []
+    effective_owed_wages = round(float(cs.owed_wages or 0.0), 2)
 
     # --- Trace steps accumulator ---
     steps: list[CalculationStep] = []
@@ -422,8 +447,54 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
             if cs.work_months is None:
                 unknowns.append("未签合同持续月数")
 
+    # --- Illegal dismissal / notice substitution ---
+    if cs.illegal_dismissal_compensation > 0:
+        calculation_lines.append(
+            f"违法辞退赔偿金（2N）：月工资 {cs.monthly_salary:.0f} 元 × N值 {cs.n_value} × 2"
+            f" = 约 {cs.illegal_dismissal_compensation:.0f} 元。"
+            "依据《劳动合同法》第八十七条，用人单位违法解除劳动合同的，应按经济补偿标准的二倍支付赔偿金。"
+        )
+        steps.append(CalculationStep(
+            item="违法辞退赔偿金",
+            formula=f"月工资 {cs.monthly_salary:.0f} × N值 {cs.n_value} × 2",
+            result=cs.illegal_dismissal_compensation,
+            cap_rule="N按工作年限计算，满一年算一个月，六个月以上不满一年按一年算，不满六个月按半个月算",
+            legal_basis="《劳动合同法》第八十七条",
+        ))
+
+    if cs.notice_substitution_pay > 0:
+        calculation_lines.append(
+            f"代通知金：1 个月工资 = {cs.notice_substitution_pay:.0f} 元。"
+            "依据《劳动合同法》第四十条，用人单位未提前30天书面通知解除劳动合同的，应额外支付一个月工资。"
+        )
+        steps.append(CalculationStep(
+            item="代通知金",
+            formula=f"月工资 {cs.monthly_salary:.0f} × 1 个月",
+            result=cs.notice_substitution_pay,
+            cap_rule=None,
+            legal_basis="《劳动合同法》第四十条",
+        ))
+
     # --- Owed wages ---
-    if cs.owed_wages > 0:
+    if cs.owed_months is not None and cs.monthly_salary is not None and cs.owed_wages is None:
+        effective_owed_wages = round(cs.monthly_salary * cs.owed_months, 2)
+        calculation_lines.append(
+            f"拖欠工资部分：{cs.monthly_salary:.0f} 元/月 × {cs.owed_months} 个月 = 约 {effective_owed_wages:.0f} 元。"
+        )
+        steps.append(CalculationStep(
+            item="拖欠工资",
+            formula=f"月工资 {cs.monthly_salary:.0f} 元 × 拖欠月数 {cs.owed_months}",
+            result=round(effective_owed_wages, 2),
+            cap_rule=None,
+            legal_basis="《劳动合同法》第三十条（工资支付义务）",
+        ))
+    elif cs.owed_months is not None and cs.monthly_salary is None:
+        calculation_lines.append(
+            f"已知拖欠 {cs.owed_months} 个月工资，需要您提供月工资标准才能精确计算欠薪总额。"
+        )
+        if "月工资标准" not in unknowns:
+            unknowns.append("月工资标准")
+    elif (cs.owed_wages or 0) > 0:
         calculation_lines.append(f"拖欠工资部分：约 {cs.owed_wages:.0f} 元。")
         steps.append(CalculationStep(
             item="拖欠工资",
@@ -458,7 +529,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
         parts: list[str] = []
         if cs.double_salary_gap > 0:
             parts.append(f"二倍工资差额 {cs.double_salary_gap:.0f} 元")
-        if cs.owed_wages > 0:
+        if (cs.owed_wages or 0) > 0:
             parts.append(f"拖欠工资 {cs.owed_wages:.0f} 元")
         if cs.deposit > 0:
             parts.append(f"押金退还 {cs.deposit:.0f} 元")

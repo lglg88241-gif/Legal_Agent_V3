@@ -22,6 +22,7 @@ class AgentState(TypedDict, total=False):
     case_summary: str
     graph_context: str
     graph_memory: str
+    historical_reference: str
     current_query: str
     routed_query: str
     route_intent: str
