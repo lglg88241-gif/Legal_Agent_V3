@@ -254,7 +254,7 @@ def _has_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(tok in text for tok in tokens)
 
 
-def _detect_scenario(cs: CaseState) -> str:
+def _detect_scenario(cs: CaseState, case_type: str | None = None) -> str:
     """
     Detect one primary scenario for checklist generation.
 
@@ -266,10 +266,23 @@ def _detect_scenario(cs: CaseState) -> str:
     5. general
     """
     merged = _merged_text(cs)
+    raw_case_type = (case_type or cs.case_type or "").strip()
     labor_keywords = ("劳动", "辞退", "工资", "仲裁", "社保")
     loan_keywords = ("借款", "借条", "欠款", "还款", "利息")
     divorce_keywords = ("离婚", "婚前", "夫妻共同", "财产分割")
     criminal_keywords = ("刑法", "故意伤害", "量刑", "缓刑", "拘留", "逮捕")
+    work_injury_keywords = ("工伤", "工伤认定", "伤残", "劳动能力鉴定")
+
+    if "工伤" in raw_case_type or any(tok in merged for tok in work_injury_keywords):
+        return "work_injury"
+    if any(tok in raw_case_type for tok in ("劳动争议", "劳动")):
+        return "labor_arbitration"
+    if "借贷" in raw_case_type:
+        return "loan_dispute"
+    if any(tok in raw_case_type for tok in ("离婚", "婚姻家庭")):
+        return "divorce"
+    if "刑事" in raw_case_type:
+        return "criminal"
 
     if (
         cs.has_unsigned_contract
@@ -294,7 +307,7 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
     覆盖：证据收集（按优先级）、维权路径（仲裁/诉讼）、时限管理。
     """
     checklist: list[str] = []
-    scenario = _detect_scenario(cs)
+    scenario = _detect_scenario(cs, case_type=cs.case_type)
 
     if scenario == "labor_arbitration":
         checklist.append(
@@ -349,6 +362,10 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
         )
     elif scenario == "criminal":
         checklist.append(
+            "建议尽快委托刑事辩护律师介入，先完成会见、阅卷和是否申请取保候审的判断。"
+        )
+        return checklist
+        checklist.append(
             "**刑事辩护材料清单**：\n"
             "  1. 立案决定书、拘留通知书、逮捕通知书\n"
             "  2. 起诉书（案件移送审查起诉后）\n"
@@ -362,7 +379,19 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
             "  - **可争取的从宽情节**：自首、坦白、立功、认罪认罚、积极赔偿取得谅解\n"
             "  - **取保候审**：可能判处管制、拘役或独立适用附加刑的，可申请取保候审"
         )
+    elif scenario == "work_injury":
+        checklist.append(
+            "**工伤维权路径**：\n"
+            "  1. 先确认是否在事故发生后 1 年内申请工伤认定\n"
+            "  2. 工伤认定后，尽快申请劳动能力鉴定，确定伤残等级\n"
+            "  3. 根据伤残等级、本人工资和是否解除劳动关系，计算一次性伤残补助金、医疗补助金和就业补助金\n"
+            "  4. 同时固定病历、住院记录、工伤事故经过和工资流水"
+        )
     else:
+        checklist.append(
+            "建议先把现有材料按“时间线、关键人物、直接证据、期望结果”四类归档，后续再根据争议类型选择协商、调解或正式程序。"
+        )
+        return checklist
         checklist.append(
             "**风险提示**：\n"
             "  - 所有证据建议保留原件，复印件加盖\"与原件一致\"印章\n"

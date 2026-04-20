@@ -19,6 +19,7 @@ class CaseState(BaseModel):
     question: str = ""
     graph_context: str = ""
     historical_reference: str = ""
+    case_type: str | None = Field(default=None, description="案件类型")
 
     # Extracted numeric fields
     monthly_salary: float | None = Field(default=None, ge=0, description="月工资/月薪（元）")
@@ -112,6 +113,7 @@ class CaseState(BaseModel):
         question: str = "",
         graph_context: str = "",
         historical_reference: str = "",
+        case_type: str | None = None,
     ) -> "CaseState":
         """Build a CaseState by running all extractors on merged text."""
         case_summary = case_summary or ""
@@ -125,6 +127,7 @@ class CaseState(BaseModel):
             part for part in [case_summary, question, graph_context] if part
         ).strip()
         historical_merged = historical_reference.strip()
+        inferred_case_type = (case_type or "").strip() or _infer_case_type(current_merged)
 
         salary = _extract_salary(current_merged)
         salary_source = "current"
@@ -202,6 +205,7 @@ class CaseState(BaseModel):
             question=question,
             graph_context=graph_context,
             historical_reference=historical_reference,
+            case_type=inferred_case_type,
             monthly_salary=salary,
             monthly_salary_source=salary_source,
             work_months=months,
@@ -269,6 +273,27 @@ def _extract_months(text: str) -> int | None:
         except ValueError:
             pass
 
+    return None
+
+
+def _infer_case_type(text: str) -> str | None:
+    """Infer a coarse case type for deterministic routing."""
+    if not text:
+        return None
+
+    if "工伤" in text:
+        return "工伤"
+    if any(token in text for token in ("离婚", "婚前", "夫妻共同", "财产分割", "婚姻")):
+        return "离婚"
+    if any(token in text for token in ("借款", "借条", "欠款", "还款", "利息", "民间借贷")):
+        return "借贷"
+    if any(token in text for token in ("刑法", "故意伤害", "量刑", "缓刑", "拘留", "逮捕", "刑事")):
+        return "刑事"
+    if any(
+        token in text
+        for token in ("劳动合同", "工资", "辞退", "仲裁", "社保", "未签合同", "解雇", "竞业")
+    ):
+        return "劳动争议"
     return None
 
 
