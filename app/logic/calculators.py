@@ -12,6 +12,10 @@ audit trail (steps, totals, correction notices) so the Advisor node can
 feed the LLM the *why* behind each number without giving it license to
 recalculate.
 """
+# TODO(P3): case_type=='工伤' 时按《工伤保险条例》第三十七条计算
+#   一次性伤残补助金 = 本人工资 × 等级系数(十级=7, 九级=9, ...)
+#   一次性工伤医疗补助金/伤残就业补助金按省标准
+#   暂不接入劳动合同法 2N / 代通知金分支
 from __future__ import annotations
 
 import re
@@ -425,6 +429,23 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     Surgery 7 adds a CalculationTrace for white-box LLM context.
     """
     cs = _sanitize_historical_fact_sources(cs)
+    if (cs.case_type or "").strip() == "工伤":
+        explanation = (
+            "工伤赔偿需依据《工伤保险条例》及伤残等级单独计算，建议人工核算。"
+        )
+        return PayloadResult(
+            answer=(
+                "已知事实：\n- 您当前属于工伤赔偿场景。\n\n"
+                "算账与确权层：\n- 工伤赔偿需依据《工伤保险条例》及伤残等级单独计算。\n\n"
+                "高风险执行层：\n- 先核对是否已经完成工伤认定和劳动能力鉴定。\n\n"
+                "下一步落地动作：\n- 建议准备工伤认定书、劳动能力鉴定结论、工资流水后再人工核算。"
+            ),
+            needs_core_followup=False,
+            followup="",
+            constructive_next_step=explanation,
+            unknowns=[],
+            trace=CalculationTrace(total=0.0),
+        )
     merged = _merged_text(cs)
     scenario = _detect_scenario(cs)
     facts = _split_fact_lines(cs.case_summary, cs.question, cs.graph_context)

@@ -48,10 +48,11 @@ def test_action_checklist_route_criminal() -> None:
 
 def test_action_checklist_route_work_injury() -> None:
     answer = _answer("工伤", "我在工厂受伤后被认定工伤十级，想问赔偿路径。")
-    assert "工伤维权路径" in answer
+    assert "工伤赔偿需依据《工伤保险条例》及伤残等级单独计算" in answer
     assert "工伤认定" in answer
     assert "劳动能力鉴定" in answer
     assert "劳动仲裁流程" not in answer
+    assert "2N" not in answer
 
 
 def test_action_checklist_route_general() -> None:
