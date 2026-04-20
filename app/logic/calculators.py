@@ -231,6 +231,39 @@ def _has_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(tok in text for tok in tokens)
 
 
+def _detect_scenario(cs: CaseState) -> str:
+    """
+    Detect one primary scenario for checklist generation.
+
+    Priority:
+    1. labor_arbitration
+    2. loan_dispute
+    3. divorce
+    4. criminal
+    5. general
+    """
+    merged = _merged_text(cs)
+    labor_keywords = ("劳动", "辞退", "工资", "仲裁", "社保")
+    loan_keywords = ("借款", "借条", "欠款", "还款", "利息")
+    divorce_keywords = ("离婚", "婚前", "夫妻共同", "财产分割")
+    criminal_keywords = ("刑法", "故意伤害", "量刑", "缓刑", "拘留", "逮捕")
+
+    if (
+        cs.has_unsigned_contract
+        or cs.has_owed_wages
+        or _has_any(merged, _DISMISSAL_TOKENS)
+        or any(tok in merged for tok in labor_keywords)
+    ):
+        return "labor_arbitration"
+    if any(tok in merged for tok in loan_keywords) and not any(tok in merged for tok in labor_keywords):
+        return "loan_dispute"
+    if any(tok in merged for tok in divorce_keywords):
+        return "divorce"
+    if any(tok in merged for tok in criminal_keywords):
+        return "criminal"
+    return "general"
+
+
 def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
     """
     Surgery Q-2: 根据案件类型生成具体的行动清单。
@@ -238,13 +271,9 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
     覆盖：证据收集（按优先级）、维权路径（仲裁/诉讼）、时限管理。
     """
     checklist: list[str] = []
+    scenario = _detect_scenario(cs)
 
-    if (
-        cs.has_unsigned_contract
-        or _has_any(merged, _OWED_TOKENS)
-        or _has_any(merged, _DISMISSAL_TOKENS)
-        or _has_any(merged, _LABOR_RELATION_TOKENS)
-    ):
+    if scenario == "labor_arbitration":
         checklist.append(
             "**证据收集清单**（按优先级排序）：\n"
             "  1. **核心证据**：劳动合同（如有）、入职登记表、工牌/工服\n"
@@ -262,8 +291,7 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
             "  - **办理时长**：一般 45 天内审结，复杂案件可延长 15 天\n"
             "  - **所需材料**：仲裁申请书（一式三份）、身份证复印件、证据材料目录、证据复印件"
         )
-
-    if any(tok in merged for tok in ("借款", "借条", "欠款", "还钱", "本金", "利息")):
+    elif scenario == "loan_dispute":
         checklist.append(
             "**借贷纠纷材料清单**：\n"
             "  1. 借条/借款合同原件\n"
@@ -279,8 +307,7 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
             "  - **诉讼费**：标的额 1 万以下 50 元；超过部分按比例（详见诉讼费缴纳办法）\n"
             "  - **建议**：金额较小可考虑小额诉讼程序（一审终审，标的额低于当地年平均工资 30%）"
         )
-
-    if any(tok in merged for tok in ("离婚", "夫妻", "婚前", "婚后", "共同财产", "财产分割")):
+    elif scenario == "divorce":
         checklist.append(
             "**财产分割材料清单**：\n"
             "  1. 结婚证、身份证\n"
@@ -297,8 +324,7 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
             "  - **协议路径**：双方达成一致 → 民政局协议离婚（30 天冷静期）\n"
             "  - **诉讼路径**：协商不成 → 起诉至原告住所地或被告住所地法院"
         )
-
-    if any(tok in merged for tok in ("故意伤害", "醉驾", "危险驾驶", "正当防卫", "刑事", "判刑", "量刑")):
+    elif scenario == "criminal":
         checklist.append(
             "**刑事辩护材料清单**：\n"
             "  1. 立案决定书、拘留通知书、逮捕通知书\n"
@@ -313,8 +339,16 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
             "  - **可争取的从宽情节**：自首、坦白、立功、认罪认罚、积极赔偿取得谅解\n"
             "  - **取保候审**：可能判处管制、拘役或独立适用附加刑的，可申请取保候审"
         )
+    else:
+        checklist.append(
+            "**风险提示**：\n"
+            "  - 所有证据建议保留原件，复印件加盖\"与原件一致\"印章\n"
+            "  - 电子证据（微信、邮件）需公证或当庭演示原始载体\n"
+            "  - 录音录像证据需本人在场且不违反法律强制性规定\n"
+            "  - 注意各项时效，超过时效将丧失胜诉权"
+        )
 
-    if checklist:
+    if checklist and scenario != "general":
         checklist.append(
             "**风险提示**：\n"
             "  - 所有证据建议保留原件，复印件加盖\"与原件一致\"印章\n"
@@ -339,6 +373,7 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     Surgery 7 adds a CalculationTrace for white-box LLM context.
     """
     merged = _merged_text(cs)
+    scenario = _detect_scenario(cs)
     facts = _split_fact_lines(cs.case_summary, cs.question, cs.graph_context)
 
     calculation_lines: list[str] = []
@@ -512,6 +547,56 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
         "如果你愿意，我下一步可以直接帮你起草《劳动仲裁申请书》草稿，"
         "或者把证据目录整理成可提交版本。"
     )
+
+    if not unknowns:
+        if scenario == "loan_dispute":
+            sandwich_followup = (
+                "你现有的信息已经能支持初步判断债务维权路径了。"
+                "按现在的案情，借条、转账凭证和催款记录是最值得先固定的材料。"
+                "如果你愿意，我接下来可以帮你整理民事起诉材料清单，或者起草催款函、起诉状草稿。"
+            )
+        elif scenario == "divorce":
+            sandwich_followup = (
+                "你现有的信息已经足以先判断财产分割的基本方向。"
+                "按现在的案情，先区分婚前个人财产和婚后共同财产是最关键的一步。"
+                "如果你愿意，我接下来可以帮你整理财产清单、证据目录，或者按协议离婚和诉讼离婚两条路径分别拆开。"
+            )
+        elif scenario == "criminal":
+            sandwich_followup = (
+                "你现有的信息已经足以先判断刑事应对的基本方向。"
+                "按现在的案情，先固定案卷材料、鉴定意见和从宽情节证据，会直接影响后续辩护策略。"
+                "如果你愿意，我接下来可以帮你列阶段性应对清单，或者把需要尽快调取的材料先拆出来。"
+            )
+        elif scenario == "general":
+            sandwich_followup = (
+                "你现有的信息已经足以先做初步判断。"
+                "按现在的案情，先把事实时间线、关键证据和对方主体信息固定下来，后面的处理路径就会更清楚。"
+                "如果你愿意，我接下来可以帮你把手头材料整理成一份可执行的处理清单。"
+            )
+
+    if scenario == "loan_dispute":
+        constructive_next_step = (
+            "目前债权基础和维权方向已经基本清楚。接下来你可以先固定借条、转账凭证和催款记录，"
+            "再根据标的额选择催款协商、调解或直接提起民事诉讼。"
+            "如果你愿意，我下一步可以直接帮你整理起诉材料清单，或者起草催款函、起诉状草稿。"
+        )
+    elif scenario == "divorce":
+        constructive_next_step = (
+            "目前财产分割的基本方向已经比较清楚。接下来你可以先把房产、车辆、存款和其他财产按“婚前、婚后”分类整理，"
+            "再决定是先协商分割还是直接走离婚诉讼路径。"
+            "如果你愿意，我下一步可以直接帮你列财产清单和证据目录，或者按两条路径拆开处理步骤。"
+        )
+    elif scenario == "criminal":
+        constructive_next_step = (
+            "目前案件的基本应对目标已经可以往前推进。接下来你可以先固定案卷材料、鉴定意见和从宽情节证据，"
+            "同时尽快评估是否需要申请取保候审或提前准备谅解、赔偿工作。"
+            "如果你愿意，我下一步可以直接帮你拆出辩护材料清单和阶段性应对顺序。"
+        )
+    elif scenario == "general":
+        constructive_next_step = (
+            "目前可以先把事实时间线、关键证据和对方主体信息整理出来，再根据争议类型选择协商、调解或正式程序推进。"
+            "如果你愿意，我下一步可以帮你把手头材料整理成一份可执行的处理清单。"
+        )
 
     # --- Assemble answer ---
     answer_parts: list[str] = []
