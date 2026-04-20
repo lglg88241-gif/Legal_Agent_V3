@@ -128,4 +128,7 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
         from app.memory.redis_mgr import memory_mgr
     except Exception:
         return graph.compile()
-    return graph.compile(checkpointer=memory_mgr)
+    try:
+        return graph.compile(checkpointer=memory_mgr)
+    except TypeError:
+        return graph.compile()

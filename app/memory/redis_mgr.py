@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Optional, Dict, Any
@@ -32,10 +33,17 @@ class AsyncRedisSaver(BaseCheckpointSaver):
         super().__init__()
         self.redis_url = settings.REDIS_URL
         self._client: redis.Redis | None = None
+        self._client_loop_id: int | None = None
         self.ttl = 3600
 
     async def _get_client(self) -> redis.Redis:
-        if self._client is None:
+        loop_id = id(asyncio.get_running_loop())
+        if self._client is None or self._client_loop_id != loop_id:
+            if self._client is not None:
+                try:
+                    await self._client.aclose()
+                except Exception:
+                    pass
             self._client = redis.from_url(
                 self.redis_url,
                 decode_responses=True,
@@ -43,7 +51,13 @@ class AsyncRedisSaver(BaseCheckpointSaver):
                 socket_timeout=3,
                 retry_on_timeout=False,
             )
+            self._client_loop_id = loop_id
         return self._client
+
+    def reset_client_for_new_loop(self) -> None:
+        """Forget any cached client so the next loop creates its own Redis handle."""
+        self._client = None
+        self._client_loop_id = None
 
     async def aget_tuple(self, config: RunnableConfig) -> Optional[CheckpointTuple]:
         try:
@@ -111,3 +125,14 @@ class AsyncRedisSaver(BaseCheckpointSaver):
 
 
 memory_mgr = AsyncRedisSaver()
+
+
+def get_redis_saver_for_current_loop() -> AsyncRedisSaver:
+    """
+    Return the shared checkpoint saver after clearing any stale loop binding.
+
+    Celery tasks use ``asyncio.run(...)`` repeatedly, so a Redis client created in
+    a previous event loop must never be reused in the next one.
+    """
+    memory_mgr.reset_client_for_new_loop()
+    return memory_mgr

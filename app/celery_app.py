@@ -175,6 +175,10 @@ async def _persist_dialog_turn_async(
 @celery_app.task(name="update_graph_task")
 def update_graph_task(conversation_id: int, user_id: int = 0):
     try:
+        from app.memory.redis_mgr import get_redis_saver_for_current_loop
+
+        get_redis_saver_for_current_loop()
+
         async def _run():
             celery_engine, session_factory = _create_celery_session_factory()
             try:
@@ -238,6 +242,9 @@ def ask_agent_task(
     start_time = time.time()
 
     try:
+        from app.memory.redis_mgr import get_redis_saver_for_current_loop
+
+        get_redis_saver_for_current_loop()
         # 所有 IO 合并到单一事件循环，避免多次 asyncio.run() 的开销
         context = asyncio.run(_run_task_async(conversation_id))
         chat_history = context["chat_history"]
