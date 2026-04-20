@@ -17,7 +17,7 @@
 | 用户个性化图谱 | Neo4j user_id 隔离 + 跨案件共享实体发现 + 历史案件上下文注入 |
 | 可解释性 | CalculationTrace 白盒契约，VERBATIM 超额纠错注入 |
 | 架构瘦身 | 主编排器 1903→239 行（-87%），关注点分离到 7 个节点 |
-| 测试覆盖 | 233 个确定性断言，零 LLM/IO/网络依赖 |
+| 测试覆盖 | 274 个确定性断言，零 LLM/IO/网络依赖 |
 
 ## 技术栈
 
@@ -111,7 +111,7 @@ docs/
 └── confidence_score_diagnosis.md
 
 e2e_tests/                    # 端到端测试套件
-tests/                        # 单元测试 (233 passed)
+tests/                        # 单元测试 (274 passed)
 ```
 
 ## 快速启动
@@ -168,7 +168,7 @@ python scripts/warmup.py
 D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 ```
 
-**当前基线**: 233 passed, 0 failed
+**当前基线**: 274 passed, 0 failed
 
 所有测试为确定性断言，零 LLM、零 IO、零网络依赖。
 
@@ -202,12 +202,17 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 | #12/12A | 本地 Qwen 3B 路由 + guardrail | 多模型协作 |
 | #13 | 案件快照持久化 + 类型推断 + 搜索 API | 用户数据 |
 | #14 | Neo4j 用户个性化图谱 | 数据 |
+| #Q1 | 双倍工资 cap_rule 显式化 | 回答质量 |
+| #Q2 | 场景化行动清单生成器 | 回答质量 |
+| #Q3/Q4 | RAG 法条引用激励 + 程序性指导解禁 | 回答质量 |
 
 ### Surgery #12/12A: 本地 vLLM 多模型协作
 - 本地 Qwen2.5-3B-Instruct-AWQ 接管 `router_llm`（意图路由）
 - 云端智谱 GLM-4 继续负责 `expert_llm`（法律推理）和 `summary_llm`（案情合并）
 - 新增 `app/core/llm_factory.py` 统一模型工厂，支持本地/云端双轨
 - 查询扩展 LLM 支持本地优先 + 云端 fallback
+- 查询扩展双轨调用已改为短路模式：本地扩展在 5 秒内返回有效 JSON 时直接采用，只有超时/异常/无效结果才回落云端
+- 新增 `Query expansion path: local / cloud_fallback` 日志打点，便于定位检索链路延迟来源
 - Router guardrail：本地小模型路由结果校验
 
 ### Surgery #13: MySQL 用户数据层补全
@@ -224,18 +229,29 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 - 回填脚本: `scripts/backfill_graph_user_id.py`
 - 静态知识图谱（Law/Case/Party）保持全局共享不变
 
+### Surgery Q-1 ~ Q-4: 回答质量增强
+- Q-1：在 `build_claim_payload()` 的 answer 文本中显式注入二倍工资计算规则，补充“首月不计入 / 11 个月上限 / 次月起算”。
+- Q-2：新增 `_build_action_checklist()`，按劳动争议、借贷、离婚、刑事等场景生成证据清单、流程步骤、时效与风险提示。
+- Q-3：advisor prompt 明确鼓励在 `<rag_context>` 存在条文编号时主动引用真实法条，提高法条真实性与专业感。
+- Q-4：advisor prompt 解禁程序性指导，允许保留并润色证据清单、流程说明、费用/管辖/时效等操作性内容。
+
 ## 端到端基准测试
 
 | 指标 | 值 |
 |------|-----|
-| 标准问题命中率 | 100% (8/8) |
-| 平均 confidence_score | 0.52 |
-| 超范围拦截成功率 | 100% (5/5) |
-| 总防御率 | 70%（Surgery #8 前为 27.3%） |
-| 平均端到端延迟 | ~17-22s |
-| 单元测试 | 233 passed, 0 failed |
+| Fix 2 多轮月薪连贯专项 | 100% (8/8) |
+| 全面质量基准总分 | 55/80 (68%) |
+| D1 金额计算 | 46% |
+| D2 法条真实性 | 60% |
+| D3 多轮案情连贯性 | 90% |
+| D4 回答完整性 | 75% |
+| D5 回答可操作性 | 72% |
+| D6 幻觉抑制 | 72% |
+| D7 案例引用质量 | 80% |
+| D8 系统健康 | 60% |
+| 单元测试 | 274 passed, 0 failed |
 
-> 详细数据见 `e2e_tests/results/`
+> 详细数据见 `e2e_tests/results/e2e_fix_validation.json` 与 `e2e_tests/results/quality_benchmark_report.json`
 
 ## 研究与工程成果
 
@@ -263,4 +279,4 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 ## 许可证与说明
 
 - 本项目面向中文法律智能问答研究与工程实践展示。
-- README 中的测试基线、架构图和目录结构已同步至 Surgery #14 完成状态。
+- README 中的测试基线与质量指标已同步至 Surgery Q1~Q4 完成状态。

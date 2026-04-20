@@ -14,12 +14,15 @@ Surgery #12: 双模型工厂 — 本地 vLLM + 云端智谱协作。
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 import requests
+from json_repair import repair_json
 
 from app.core.config import settings
 
@@ -149,6 +152,81 @@ class ChatZhipuAI(ChatOpenAI):
         )
 
 
+def _parse_expansion_queries(content: str) -> list[str] | None:
+    """Best-effort parse of query-expansion JSON payload."""
+    if not isinstance(content, str) or not content.strip():
+        return None
+    try:
+        parsed = json.loads(repair_json(content))
+    except Exception:
+        return None
+
+    if isinstance(parsed, dict):
+        queries = parsed.get("queries", [])
+    elif isinstance(parsed, list):
+        queries = parsed
+    else:
+        return None
+
+    if not isinstance(queries, list):
+        return None
+    return [item for item in queries if isinstance(item, str)]
+
+
+def is_valid_expansion(content: str) -> bool:
+    """A valid expansion must contain at least 2 non-empty strings."""
+    queries = _parse_expansion_queries(content)
+    if not queries or len(queries) < 2:
+        return False
+    return all(item.strip() for item in queries)
+
+
+class QueryExpansionLLM:
+    """Local-first query expansion wrapper with cloud fallback."""
+
+    def __init__(
+        self,
+        local_llm: ChatOpenAI | None,
+        cloud_llm: ChatZhipuAI,
+        *,
+        local_timeout: float = 5.0,
+    ) -> None:
+        self.local_llm = local_llm
+        self.cloud_llm = cloud_llm
+        self.local_timeout = local_timeout
+
+    def invoke(self, messages: list[Any]) -> _ChatResponse:
+        if self.local_llm is not None:
+            try:
+                local_response = self.local_llm.invoke(messages)
+                if local_response and is_valid_expansion(local_response.content):
+                    logger.info("Query expansion path: local")
+                    return local_response
+                logger.warning("Local query expansion returned invalid payload, fallback to cloud")
+            except Exception as exc:
+                logger.warning("Local query expansion failed, fallback to cloud: %s", exc)
+
+        logger.info("Query expansion path: cloud_fallback")
+        return self.cloud_llm.invoke(messages)
+
+    async def ainvoke(self, messages: list[Any]) -> _ChatResponse:
+        if self.local_llm is not None:
+            try:
+                local_response = await asyncio.wait_for(
+                    self.local_llm.ainvoke(messages),
+                    timeout=self.local_timeout,
+                )
+                if local_response and is_valid_expansion(local_response.content):
+                    logger.info("Query expansion path: local")
+                    return local_response
+                logger.warning("Local query expansion returned invalid payload, fallback to cloud")
+            except (asyncio.TimeoutError, Exception) as exc:
+                logger.warning("Local query expansion failed, fallback to cloud: %s", exc)
+
+        logger.info("Query expansion path: cloud_fallback")
+        return await self.cloud_llm.ainvoke(messages)
+
+
 def create_local_llm(
     temperature: float = 0.1,
     max_tokens: int = 512,
@@ -187,10 +265,38 @@ def create_router_llm() -> ChatOpenAI | ChatZhipuAI:
     return create_cloud_llm(temperature=0.1, max_tokens=256)
 
 
-def create_query_expansion_llm() -> ChatOpenAI | ChatZhipuAI:
-    """Query expansion LLM — prefer local vLLM, otherwise use cloud."""
-    logger.info("Query expansion LLM -> cloud ZhipuAI")
-    return create_cloud_llm(temperature=0.3, max_tokens=512)
+def create_query_expansion_llm() -> QueryExpansionLLM:
+    """Query expansion LLM: local-first with cloud fallback."""
+    local_llm: ChatOpenAI | None = None
+
+    if settings.LOCAL_LLM_ENABLED:
+        try:
+            local_llm = ChatOpenAI(
+                model=settings.LLM_MODEL_NAME,
+                api_key=settings.API_KEY,
+                base_url=settings.BASE_URL,
+                temperature=0.3,
+                max_tokens=512,
+                timeout=5.0,
+            )
+            logger.info(
+                "Query expansion LLM -> local-first vLLM (%s)",
+                settings.LLM_MODEL_NAME,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize local query expansion LLM, use cloud fallback only: %s",
+                exc,
+            )
+
+    cloud_llm = create_cloud_llm(temperature=0.3, max_tokens=512)
+    if local_llm is None:
+        logger.info("Query expansion LLM -> cloud-only fallback")
+    return QueryExpansionLLM(
+        local_llm=local_llm,
+        cloud_llm=cloud_llm,
+        local_timeout=5.0,
+    )
 
 
 def create_expert_llm(model: str = "glm-4-flash") -> ChatZhipuAI:
