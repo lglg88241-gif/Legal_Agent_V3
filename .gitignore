@@ -18,3 +18,4 @@ runtime_chroma_data/
 e2e_tests/results/
 e2e_tests/results/*.json
 e2e_tests/results/*.md
+runtime_logs/
