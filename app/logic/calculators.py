@@ -231,7 +231,6 @@ def _has_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(tok in text for tok in tokens)
 
 
-# ======================================================================
 # Core builder
 # ======================================================================
 
@@ -262,11 +261,18 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
             "也可以先主张未签书面劳动合同的二倍工资差额。"
         )
         if cs.monthly_salary is not None and cs.work_months is not None:
+            # Surgery Q-1: 显式化 cap_rule，让规则进入 answer 文本而非仅在 trace
             calculation_lines.append(
                 f"按现有信息，计算公式可以先写为：月工资 {cs.monthly_salary:.0f} 元"
                 f" × 可主张月数 {cs.compensable_months}"
                 f" = 二倍工资差额约 {cs.double_salary_gap:.0f} 元。"
             )
+            rule_explanation = (
+                f"（计算规则说明：根据《劳动合同法》第八十二条，二倍工资差额自实际用工"
+                f"满一个月的次日起算，首月不计入；法定可主张上限为 11 个月。"
+                f"您实际工作 {cs.work_months} 个月，可主张月数为 {cs.compensable_months} 个月。）"
+            )
+            calculation_lines.append(rule_explanation)
             steps.append(CalculationStep(
                 item="二倍工资差额",
                 formula=(
