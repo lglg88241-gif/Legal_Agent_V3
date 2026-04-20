@@ -231,6 +231,101 @@ def _has_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(tok in text for tok in tokens)
 
 
+def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
+    """
+    Surgery Q-2: 根据案件类型生成具体的行动清单。
+    返回一个清单列表，每项都是具体的、可执行的指导。
+    覆盖：证据收集（按优先级）、维权路径（仲裁/诉讼）、时限管理。
+    """
+    checklist: list[str] = []
+
+    if (
+        cs.has_unsigned_contract
+        or _has_any(merged, _OWED_TOKENS)
+        or _has_any(merged, _DISMISSAL_TOKENS)
+        or _has_any(merged, _LABOR_RELATION_TOKENS)
+    ):
+        checklist.append(
+            "**证据收集清单**（按优先级排序）：\n"
+            "  1. **核心证据**：劳动合同（如有）、入职登记表、工牌/工服\n"
+            "  2. **工资证据**：银行工资流水（最关键，建议打印近12个月）、工资条、个税APP记录\n"
+            "  3. **考勤证据**：打卡记录、排班表、加班审批单\n"
+            "  4. **沟通证据**：与HR/上级的微信/钉钉/邮件聊天记录（截图+导出原文件）\n"
+            "  5. **辞退证据**（如适用）：辞退通知书、解除劳动合同证明、谈话录音\n"
+            "  6. **社保证据**：社保缴纳记录（可在\"国家社会保险公共服务平台\"查询）"
+        )
+        checklist.append(
+            "**劳动仲裁流程**：\n"
+            "  - **管辖机构**：用人单位所在地或劳动合同履行地的劳动人事争议仲裁委员会\n"
+            "  - **时效限制**：自知道权利被侵害之日起 1 年内必须申请仲裁（拖欠工资为劳动关系存续期间+终止后1年）\n"
+            "  - **仲裁费用**：劳动仲裁不收费\n"
+            "  - **办理时长**：一般 45 天内审结，复杂案件可延长 15 天\n"
+            "  - **所需材料**：仲裁申请书（一式三份）、身份证复印件、证据材料目录、证据复印件"
+        )
+
+    if any(tok in merged for tok in ("借款", "借条", "欠款", "还钱", "本金", "利息")):
+        checklist.append(
+            "**借贷纠纷材料清单**：\n"
+            "  1. 借条/借款合同原件\n"
+            "  2. 转账凭证（银行流水、微信/支付宝转账截图，证明实际交付）\n"
+            "  3. 催款记录（短信、微信聊天、电话录音）\n"
+            "  4. 借款人身份信息\n"
+            "  5. 担保材料（如有保证人或抵押物）"
+        )
+        checklist.append(
+            "**民事诉讼路径**：\n"
+            "  - **管辖法院**：被告住所地或合同履行地基层人民法院\n"
+            "  - **诉讼时效**：3 年（自约定还款期届满之日起算）\n"
+            "  - **诉讼费**：标的额 1 万以下 50 元；超过部分按比例（详见诉讼费缴纳办法）\n"
+            "  - **建议**：金额较小可考虑小额诉讼程序（一审终审，标的额低于当地年平均工资 30%）"
+        )
+
+    if any(tok in merged for tok in ("离婚", "夫妻", "婚前", "婚后", "共同财产", "财产分割")):
+        checklist.append(
+            "**财产分割材料清单**：\n"
+            "  1. 结婚证、身份证\n"
+            "  2. 房产证（区分婚前/婚后取得）、购房合同、按揭还款记录\n"
+            "  3. 车辆登记证、行驶证、购车发票\n"
+            "  4. 银行流水（双方名下，建议提供近 3 年）\n"
+            "  5. 投资账户、股票、基金对账单\n"
+            "  6. 公司股权（如有）、营业执照"
+        )
+        checklist.append(
+            "**财产分割原则**：\n"
+            "  - **婚前个人财产**：归个人所有，不参与分割（《民法典》第一千零六十三条）\n"
+            "  - **婚后共同财产**：原则上均等分割（《民法典》第一千零八十七条）\n"
+            "  - **协议路径**：双方达成一致 → 民政局协议离婚（30 天冷静期）\n"
+            "  - **诉讼路径**：协商不成 → 起诉至原告住所地或被告住所地法院"
+        )
+
+    if any(tok in merged for tok in ("故意伤害", "醉驾", "危险驾驶", "正当防卫", "刑事", "判刑", "量刑")):
+        checklist.append(
+            "**刑事辩护材料清单**：\n"
+            "  1. 立案决定书、拘留通知书、逮捕通知书\n"
+            "  2. 起诉书（案件移送审查起诉后）\n"
+            "  3. 相关物证、书证、证人证言\n"
+            "  4. 鉴定意见（如伤情鉴定、酒精检测报告）\n"
+            "  5. 自首/立功/认罪认罚等从轻情节证据"
+        )
+        checklist.append(
+            "**刑事程序要点**：\n"
+            "  - **辩护人介入时机**：侦查阶段即可委托律师（建议尽早）\n"
+            "  - **可争取的从宽情节**：自首、坦白、立功、认罪认罚、积极赔偿取得谅解\n"
+            "  - **取保候审**：可能判处管制、拘役或独立适用附加刑的，可申请取保候审"
+        )
+
+    if checklist:
+        checklist.append(
+            "**风险提示**：\n"
+            "  - 所有证据建议保留原件，复印件加盖\"与原件一致\"印章\n"
+            "  - 电子证据（微信、邮件）需公证或当庭演示原始载体\n"
+            "  - 录音录像证据需本人在场且不违反法律强制性规定\n"
+            "  - 注意各项时效，超过时效将丧失胜诉权"
+        )
+
+    return checklist
+
+
 # Core builder
 # ======================================================================
 
@@ -387,6 +482,9 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
             "后续维权路径就能快速落地。"
         )
 
+    # Surgery Q-2: 追加结构化行动清单
+    action_checklist = _build_action_checklist(cs, merged)
+
     # --- Follow-up decision ---
     needs_core_followup = False
     if cs.has_unsigned_contract and (cs.monthly_salary is None or cs.work_months is None):
@@ -427,7 +525,11 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
             "但已经足以先明确可主张的权利方向，不需要整体停住。"
         )
     answer_parts.append("高风险执行层：\n- " + "\n- ".join(strategy_lines))
-    answer_parts.append("下一步落地动作：\n- " + "\n- ".join(action_lines))
+    # Surgery Q-2: 合并 action_lines 和 action_checklist
+    combined_actions = action_lines.copy()
+    if action_checklist:
+        combined_actions.extend(action_checklist)
+    answer_parts.append("下一步落地动作：\n\n" + "\n\n".join(combined_actions))
     if needs_core_followup:
         answer_parts.append("柔性追问：\n- " + sandwich_followup)
     else:
