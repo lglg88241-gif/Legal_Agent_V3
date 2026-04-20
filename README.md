@@ -17,7 +17,7 @@
 | 用户个性化图谱 | Neo4j user_id 隔离 + 跨案件共享实体发现 + 历史案件上下文注入 |
 | 可解释性 | CalculationTrace 白盒契约，VERBATIM 超额纠错注入 |
 | 架构瘦身 | 主编排器 1903→239 行（-87%），关注点分离到 7 个节点 |
-| 测试覆盖 | 274 个确定性断言，零 LLM/IO/网络依赖 |
+| 测试覆盖 | 283 个确定性断言，零 LLM/IO/网络依赖 |
 
 ## 技术栈
 
@@ -111,7 +111,7 @@ docs/
 └── confidence_score_diagnosis.md
 
 e2e_tests/                    # 端到端测试套件
-tests/                        # 单元测试 (274 passed)
+tests/                        # 单元测试 (283 passed)
 ```
 
 ## 快速启动
@@ -168,7 +168,7 @@ python scripts/warmup.py
 D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 ```
 
-**当前基线**: 274 passed, 0 failed
+**当前基线**: 283 passed, 0 failed
 
 所有测试为确定性断言，零 LLM、零 IO、零网络依赖。
 
@@ -249,7 +249,7 @@ D:/Dev/python310/python.exe -m pytest tests/ -v --tb=long
 | D6 幻觉抑制 | 72% |
 | D7 案例引用质量 | 80% |
 | D8 系统健康 | 60% |
-| 单元测试 | 274 passed, 0 failed |
+| 单元测试 | 283 passed, 0 failed |
 
 > 详细数据见 `e2e_tests/results/e2e_fix_validation.json` 与 `e2e_tests/results/quality_benchmark_report.json`
 
