@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -152,12 +153,39 @@ class ChatZhipuAI(ChatOpenAI):
         )
 
 
+def _extract_expansion_array_payload(content: str) -> str:
+    """Strip markdown fences and isolate the first JSON array payload."""
+    cleaned = (content or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+def _coerce_expansion_queries(items: list[Any]) -> list[str]:
+    queries: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            queries.append(item)
+            continue
+        if isinstance(item, dict):
+            value = item.get("query") or item.get("text") or item.get("content")
+            if isinstance(value, str):
+                queries.append(value)
+    return queries
+
+
 def _parse_expansion_queries(content: str) -> list[str] | None:
     """Best-effort parse of query-expansion JSON payload."""
     if not isinstance(content, str) or not content.strip():
         return None
     try:
-        parsed = json.loads(repair_json(content))
+        parsed = json.loads(repair_json(_extract_expansion_array_payload(content)))
     except Exception:
         return None
 
@@ -170,7 +198,7 @@ def _parse_expansion_queries(content: str) -> list[str] | None:
 
     if not isinstance(queries, list):
         return None
-    return [item for item in queries if isinstance(item, str)]
+    return _coerce_expansion_queries(queries)
 
 
 def is_valid_expansion(content: str) -> bool:

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import threading
 from typing import Any
 
@@ -54,6 +55,46 @@ _query_expansion_llm: Any | None = None
 _query_expansion_llm_lock = threading.Lock()
 _query_expansion_fallback_llm: Any | None = None
 _query_expansion_fallback_llm_lock = threading.Lock()
+_ARTICLE_NUMBER_QUERY_PATTERN = re.compile(r"第[一二三四五六七八九十百零\d]+条")
+
+
+def _extract_query_array_payload(content: str) -> str:
+    """Normalize fenced or chatty LLM output into a JSON array payload."""
+    cleaned = (content or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+def _coerce_expansion_queries(items: list[Any]) -> list[str]:
+    queries: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            queries.append(item)
+            continue
+        if isinstance(item, dict):
+            value = item.get("query") or item.get("text") or item.get("content")
+            if isinstance(value, str):
+                queries.append(value)
+    return queries
+
+
+def _parse_expansion_queries(content: str) -> list[str]:
+    payload = _extract_query_array_payload(content)
+    parsed = json.loads(repair_json(payload))
+    if isinstance(parsed, dict):
+        queries = parsed.get("queries", [])
+    elif isinstance(parsed, list):
+        queries = parsed
+    else:
+        queries = []
+    return _coerce_expansion_queries(queries)
 
 
 def _serialize_reranked_documents(
@@ -146,6 +187,18 @@ def _normalize_query_list(original_query: str, queries: list[Any]) -> list[str]:
     return normalized or [original_query]
 
 
+def _sanitize_expanded_queries(original_query: str, queries: list[str]) -> list[str]:
+    """Drop expanded queries that hallucinate article numbers."""
+    filtered = [
+        query for query in queries
+        if not _ARTICLE_NUMBER_QUERY_PATTERN.search(query)
+    ]
+    filtered = _normalize_query_list(original_query, filtered)
+    if len(filtered) < 2:
+        return [original_query]
+    return filtered
+
+
 def _expand_queries(query: str, chat_history: str = "") -> list[str]:
     normalized_query = query.strip()
     if not normalized_query:
@@ -172,16 +225,11 @@ def _expand_queries(query: str, chat_history: str = "") -> list[str]:
             logger.warning("Primary query expansion LLM failed, fallback to cloud: %s", exc)
             response = _get_query_expansion_fallback_llm().invoke(messages)
         content = response.content if isinstance(response.content, str) else str(response.content)
-        parsed = json.loads(repair_json(content))
-
-        if isinstance(parsed, dict):
-            queries = parsed.get("queries", [])
-        elif isinstance(parsed, list):
-            queries = parsed
-        else:
-            queries = []
-
-        expanded_queries = _normalize_query_list(normalized_query, queries)
+        queries = _parse_expansion_queries(content)
+        expanded_queries = _sanitize_expanded_queries(
+            normalized_query,
+            _normalize_query_list(normalized_query, queries),
+        )
         logger.info("Expanded query [%s] into %s", normalized_query, expanded_queries)
         return expanded_queries
     except Exception as exc:
