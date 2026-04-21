@@ -15,6 +15,7 @@ Guard under test:
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -87,11 +88,13 @@ class TestDetectNumberDiscrepancy:
         llm = "您的工龄是7个月，仲裁时效为1年（12个月）。"
         assert detect_number_discrepancy(llm, payload_empty) is False
 
-    def test_sanitize_reverts_to_payload_on_discrepancy(self) -> None:
-        """sanitize_llm_answer must return payload.answer when number is wrong."""
+    def test_sanitize_reverts_to_payload_on_discrepancy(self, caplog) -> None:
+        """sanitize_llm_answer must warn when number is wrong without replacing the answer."""
         llm = "您可以主张约 56000 元的赔偿。"
-        result = sanitize_llm_answer(llm, _PAYLOAD, "")
-        assert result == _PAYLOAD.answer
+        with caplog.at_level(logging.WARNING, logger="app.agent.guards"):
+            result = sanitize_llm_answer(llm, _PAYLOAD, "")
+        assert "detected numbers absent from payload/RAG" in caplog.text
+        assert result.strip() != _PAYLOAD.answer.strip()
 
     def test_sanitize_keeps_llm_answer_when_numbers_match(self) -> None:
         """Clean LLM answer with correct numbers must pass through unchanged."""
@@ -158,19 +161,21 @@ class TestDetectPhantomArticleNumbers:
 
 class TestSanitizeLlmAnswerIntegration:
 
-    def test_wrong_number_causes_full_payload_fallback(self) -> None:
+    def test_wrong_number_causes_full_payload_fallback(self, caplog) -> None:
         """
         A fabricated number (56000) in an otherwise well-structured answer
-        must trigger full revert to payload.answer, not partial repair.
+        must trigger a warning while preserving the raw answer text.
         """
         llm = (
             "根据《劳动合同法》相关规定，"
             "您可以主张二倍工资差额约 56000 元，"
             "加上拖欠工资 16000 元，合计约 72000 元。"
         )
-        result = sanitize_llm_answer(llm, _PAYLOAD, _RAG_WITHOUT_ARTICLE)
-        assert result == _PAYLOAD.answer
-        assert "56000" not in result
+        with caplog.at_level(logging.WARNING, logger="app.agent.guards"):
+            result = sanitize_llm_answer(llm, _PAYLOAD, _RAG_WITHOUT_ARTICLE)
+        assert "detected numbers absent from payload/RAG" in caplog.text
+        assert result.strip() != _PAYLOAD.answer.strip()
+        assert "56000" in result
 
     def test_phantom_citation_stripped_numbers_preserved(self) -> None:
         """

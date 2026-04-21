@@ -22,9 +22,28 @@ text (user_claimed, legal_limit) is never mistakenly flagged.
 """
 from __future__ import annotations
 
+import logging
 import re
 
 from app.logic.calculators import PayloadResult, _OVERCLAIM_TOLERANCE
+
+logger = logging.getLogger(__name__)
+
+
+LAW_MAX_ARTICLES = {
+    "劳动合同法": 98,
+    "劳动法": 107,
+    "民法典": 1260,
+    "刑法": 452,
+    "民事诉讼法": 284,
+    "刑事诉讼法": 308,
+}
+
+_FABRICATED_STATUTE_PATTERN = re.compile(
+    r"《?(劳动合同法|劳动法|民法典|刑法|民事诉讼法|刑事诉讼法)》?"
+    r"第([\u4e00-\u9fa5零一二三四五六七八九十百千两〇\d]+)条"
+)
+_LATEST_REVISION_PATTERN = re.compile(r"(20\d{2}年)?(?:最新修订|最新颁布)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,8 +54,8 @@ from app.logic.calculators import PayloadResult, _OVERCLAIM_TOLERANCE
 # numbers within a small range) to be reliably attributed to calculations.
 _SIGNIFICANT_NUMBER_THRESHOLD = 1000
 
-# Pattern for "第N条" style article citations (N is one or more digits).
-_ARTICLE_PATTERN = re.compile(r"第\s*\d+\s*条")
+# Pattern for "第N条" style article citations, supporting both Arabic and Chinese numerals.
+_ARTICLE_PATTERN = re.compile(r"第\s*(?:\d+|[零〇一二两三四五六七八九十百千]+)\s*条")
 
 # Pattern for extracting all integers / floats from a string.
 _NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
@@ -53,7 +72,9 @@ _CASE_NUMBER_PATTERN = re.compile(
 # Year pattern: bare four-digit year followed by 年
 _YEAR_PATTERN = re.compile(r"(\d{4})年")
 _LAW_NAME_PATTERN = re.compile(r"《[^》]{1,40}》")
-_LAW_ARTICLE_REF_PATTERN = re.compile(r"(《[^》]{1,40}》)(?:第\s*(\d+)\s*条)?")
+_LAW_ARTICLE_REF_PATTERN = re.compile(
+    r"(《[^》]{1,40}》)(?:第\s*([0-9零〇一二两三四五六七八九十百千]+)\s*条)?"
+)
 _AMOUNT_PATTERN = re.compile(r"\d+(?:[,，]\d{3})*(?:\.\d+)?")
 
 _CLAIM_AMOUNT_CONTEXT_TOKENS = (
@@ -100,6 +121,24 @@ _KNOWN_EFFECTIVE_LAWS = {
     "《商标法》",
     "《专利法》",
     "《反不正当竞争法》",
+}
+
+_LAW_ARTICLE_MAX = {
+    "《劳动合同法》": 98,
+    "《劳动法》": 107,
+    "《劳动争议调解仲裁法》": 54,
+    "《社会保险法》": 98,
+    "《工伤保险条例》": 67,
+    "《民法典》": 1260,
+    "《刑法》": 452,
+    "《民事诉讼法》": 284,
+    "《刑事诉讼法》": 308,
+    "《行政诉讼法》": 103,
+    "《公司法》": 218,
+    "《消费者权益保护法》": 64,
+    "《个人信息保护法》": 74,
+    "《道路交通安全法》": 124,
+    "《治安管理处罚法》": 119,
 }
 
 
@@ -163,55 +202,53 @@ def sanitize_llm_answer(
     """
     Apply all hallucination guards and return a safe answer string.
 
-    Strategy:
-    1. Number discrepancy → revert entirely to payload.answer (hard reset).
-       Rationale: a wrong number anywhere poisons the whole response.
-       Surgery 7: correction_notice numbers are whitelisted — verbatim
-       reproductions of the Python-generated correction text are allowed.
-       Surgery 8: case-number spans and year tokens in the LLM answer are
-       exempted so RAG-cited case numbers are never misidentified as
-       fabricated monetary amounts.
-    2. Phantom article citations → strip only the fabricated "第N条" tokens,
-       preserving the surrounding prose and the law name.
-       Rationale: removing one citation is surgical; the rest of the answer
-       may still be valuable.
-
-    Returns the (possibly modified) answer string.
+    Current strategy:
+    1. Strip markdown code fences from the final answer text.
+    2. Check whether the LLM introduced significant numbers outside payload/RAG;
+       if so, emit a warning but do not hard-reset the whole answer.
+    3. Strip phantom "第N条" citations that are absent from strict law-header RAG,
+       payload text, and correction notices.
     """
+    result = _strip_markdown_code_fences(llm_answer)
+
     # Step 1: check numbers against payload, rag_context, AND correction notices.
     rag_numbers = _extract_significant_numbers(rag_context)
     payload_numbers = _extract_significant_numbers(payload.answer)
     notice_numbers = _extract_notice_numbers(payload)
     allowed_numbers = payload_numbers | rag_numbers | notice_numbers
 
-    llm_numbers = _extract_significant_numbers(llm_answer)
+    llm_numbers = _extract_significant_numbers(result)
     if payload_numbers:  # Only enforce when payload has authoritative numbers.
         # Surgery 8: subtract numbers that live inside case-number / year spans.
-        exempt = _extract_exempt_numbers(llm_answer)
+        exempt = _extract_exempt_numbers(result)
         fabricated_numbers = llm_numbers - allowed_numbers - exempt
         if fabricated_numbers:
-            return payload.answer
+            logger.warning(
+                "sanitize_llm_answer detected numbers absent from payload/RAG: %s",
+                sorted(fabricated_numbers),
+            )
 
     # Step 2: strip phantom article citations.
-    # A citation is allowed if it appears in RAG context OR in payload answer
-    # OR in any correction notice explanation.
     notice_citations: set[str] = set()
     for notice in payload.trace.correction_notices:
         notice_citations |= _extract_article_citations(notice.explanation)
 
     allowed_citations = (
-        _extract_article_citations(rag_context)
+        _extract_strict_law_citations(rag_context)
         | _extract_article_citations(payload.answer)
         | notice_citations
     )
-    llm_citations = _extract_article_citations(llm_answer)
+    llm_citations = _extract_article_citations(result)
     phantom_citations = [c for c in llm_citations if c not in allowed_citations]
-
-    result = llm_answer
+    if phantom_citations:
+        logger.warning(
+            "stripped phantom citations: %s, allowed: %s",
+            phantom_citations,
+            sorted(allowed_citations),
+        )
     for phantom in phantom_citations:
         result = result.replace(phantom, "")
 
-    # Clean up any double spaces left by removal.
     result = re.sub(r"  +", " ", result).strip()
     return result
 
@@ -295,6 +332,14 @@ def sanitize_hallucinated_statutes(
     rag_laws = {_canonical_law_name(name) for name in _LAW_NAME_PATTERN.findall(rag_text)}
 
     warnings: list[str] = []
+    impossible_refs = _detect_impossible_article_numbers(user_input)
+    for law_name, article_num in impossible_refs:
+        warnings.append(
+            f"⚠️ **法条编号纠错**：您提到的{law_name}第{article_num}条不存在。"
+            f"该法律现行有效版本共{_LAW_ARTICLE_MAX[law_name]}条，您引用的条号超出实际范围，"
+            "可能是记忆有误或受到了误导。建议通过国家法律法规数据库 flk.npc.gov.cn 核验。"
+        )
+
     for law_name in _extract_law_names(user_input):
         canonical = _canonical_law_name(law_name)
         if canonical in rag_laws:
@@ -319,6 +364,60 @@ def sanitize_hallucinated_statutes(
     if warnings:
         result = _prepend_notice(result, "\n".join(warnings))
     return result.strip()
+
+
+def _strip_markdown_code_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json|markdown|text)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def detect_fabricated_statute(text: str) -> dict:
+    """
+    Detect a user-cited statute/article pair that exceeds the real article cap.
+    """
+    clean_text = text or ""
+    match = _FABRICATED_STATUTE_PATTERN.search(clean_text)
+    if not match:
+        return {
+            "is_fabricated": False,
+            "reason": "",
+            "suggested_correction": "",
+        }
+
+    law_name = match.group(1)
+    article_num = _parse_chinese_or_arabic_number(match.group(2))
+    max_articles = LAW_MAX_ARTICLES.get(law_name)
+    if article_num is None or max_articles is None or article_num <= max_articles:
+        return {
+            "is_fabricated": False,
+            "reason": "",
+            "suggested_correction": "",
+        }
+
+    revision_hint = ""
+    if _LATEST_REVISION_PATTERN.search(clean_text):
+        revision_hint = "；同时“最新修订/最新颁布”的说法也需要通过官方数据库核验"
+
+    suggested_correction = "建议通过国家法律法规数据库核对具体法条名称和条号。"
+    if law_name == "劳动合同法" and any(
+        token in clean_text for token in ("无固定期限劳动合同", "无限期劳动合同")
+    ):
+        suggested_correction = "如果您想了解的是无固定期限劳动合同，相关规定见《劳动合同法》第十四条。"
+
+    return {
+        "is_fabricated": True,
+        "reason": (
+            f"《{law_name}》现行有效版本共有{max_articles}条，"
+            f"第{article_num}条超出实际条文范围{revision_hint}。"
+        ),
+        "suggested_correction": suggested_correction,
+        "law_name": law_name,
+        "article_num": article_num,
+        "max_articles": max_articles,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +464,24 @@ def _extract_article_citations(text: str) -> set[str]:
     for match in _ARTICLE_PATTERN.finditer(text):
         normalised = re.sub(r"\s+", "", match.group())
         citations.add(normalised)
+    return citations
+
+
+def _extract_strict_law_citations(text: str) -> set[str]:
+    """
+    Extract article citations only from law-header style RAG lines.
+
+    This deliberately ignores citations mentioned inside case chunks, so
+    citations are only whitelisted when they appear as retrieved law headers
+    (e.g. "1. 中华人民共和国劳动合同法第八十七条：...").
+    """
+    citations: set[str] = set()
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        header = re.split(r"[：:]", line, maxsplit=1)[0]
+        citations |= _extract_article_citations(header)
     return citations
 
 
@@ -525,13 +642,133 @@ def _extract_law_article_references(text: str) -> list[tuple[str, str | None]]:
     seen: set[tuple[str, str | None]] = set()
     for match in _LAW_ARTICLE_REF_PATTERN.finditer(text or ""):
         law_name = _canonical_law_name(match.group(1))
-        article = f"第{match.group(2)}条" if match.group(2) else None
+        article_num = _parse_article_number(match.group(2))
+        article = f"第{article_num}条" if article_num is not None else None
         item = (law_name, article)
         if item in seen:
             continue
         seen.add(item)
         refs.append(item)
     return refs
+
+
+def _parse_article_number(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    stripped = re.sub(r"\s+", "", raw)
+    if not stripped:
+        return None
+    if stripped.isdigit():
+        return int(stripped)
+    return _chinese_to_arabic(stripped)
+
+
+def _parse_chinese_or_arabic_number(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    stripped = re.sub(r"\s+", "", raw)
+    if not stripped:
+        return None
+    if stripped.isdigit():
+        return int(stripped)
+    return _simple_chinese_to_arabic(stripped)
+
+
+def _simple_chinese_to_arabic(raw: str) -> int | None:
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    units = {"十": 10, "百": 100, "千": 1000}
+
+    total = 0
+    current = 0
+    has_token = False
+    for char in raw:
+        if char in digits:
+            current = digits[char]
+            has_token = True
+            continue
+        if char in units:
+            total += (current or 1) * units[char]
+            current = 0
+            has_token = True
+            continue
+        return None
+
+    if not has_token:
+        return None
+    return total + current
+
+
+def _chinese_to_arabic(raw: str) -> int | None:
+    digits = {
+        "零": 0,
+        "〇": 0,
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    units = {"十": 10, "百": 100, "千": 1000}
+
+    if not raw:
+        return None
+
+    total = 0
+    current = 0
+    has_digit = False
+    for char in raw:
+        if char in digits:
+            current = digits[char]
+            has_digit = True
+            continue
+        if char in units:
+            unit = units[char]
+            total += (current or 1) * unit
+            current = 0
+            has_digit = True
+            continue
+        return None
+
+    if not has_digit:
+        return None
+    return total + current
+
+
+def _detect_impossible_article_numbers(user_input: str) -> list[tuple[str, int]]:
+    impossible: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for match in _LAW_ARTICLE_REF_PATTERN.finditer(user_input or ""):
+        law_name = _canonical_law_name(match.group(1))
+        article_num = _parse_article_number(match.group(2))
+        if article_num is None:
+            continue
+        max_articles = _LAW_ARTICLE_MAX.get(law_name)
+        if max_articles is None or article_num <= max_articles:
+            continue
+        item = (law_name, article_num)
+        if item in seen:
+            continue
+        seen.add(item)
+        impossible.append(item)
+    return impossible
 
 
 def _canonical_law_name(law_name: str) -> str:

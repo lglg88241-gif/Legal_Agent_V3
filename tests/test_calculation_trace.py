@@ -10,6 +10,7 @@ All 12 tests are deterministic — zero LLM calls, zero IO, zero network.
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -204,7 +205,7 @@ class TestPromptInjectionAndGuard:
         assert result != _OVERCLAIM_PAYLOAD.answer
         assert "132000" in result
 
-    def test_guard_still_blocks_unrelated_fabricated_numbers(self) -> None:
+    def test_guard_still_blocks_unrelated_fabricated_numbers(self, caplog) -> None:
         """
         Even with correction notices whitelisted, an LLM inventing a new
         unrelated number (e.g. 200000) must still trigger the guard.
@@ -212,8 +213,10 @@ class TestPromptInjectionAndGuard:
         llm_answer = (
             "您可以主张 200000 元的赔偿，超过法定上限。"
         )
-        result = sanitize_llm_answer(llm_answer, _OVERCLAIM_PAYLOAD, "")
-        assert result == _OVERCLAIM_PAYLOAD.answer
+        with caplog.at_level(logging.WARNING, logger="app.agent.guards"):
+            result = sanitize_llm_answer(llm_answer, _OVERCLAIM_PAYLOAD, "")
+        assert "detected numbers absent from payload/RAG" in caplog.text
+        assert result.strip() != _OVERCLAIM_PAYLOAD.answer.strip()
 
     def test_legal_basis_demotion_guard_in_prompt(self) -> None:
         """

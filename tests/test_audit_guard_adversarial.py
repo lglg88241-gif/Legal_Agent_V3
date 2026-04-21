@@ -5,6 +5,7 @@ Audit B2: sanitize_llm_answer() 守卫对抗性测试。
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -63,14 +64,16 @@ def test_exact_payload_numbers_pass_through() -> None:
 # B2-2: 差 1 元（132001 vs 132000）→ 应被检测为异常
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_off_by_one_triggers_discrepancy() -> None:
+def test_off_by_one_triggers_discrepancy(caplog) -> None:
     """
     _OVERCLAIM_PAYLOAD 的 legal_limit 是 132000。
-    LLM 写成 132001 → 不在白名单，应触发守卫回退。
+    LLM 写成 132001 → 不在白名单，应触发 warning。
     """
     llm_answer = "按法律规定，您可以主张 132001 元的二倍工资差额。"
-    result = sanitize_llm_answer(llm_answer, _OVERCLAIM_PAYLOAD, "")
-    assert result == _OVERCLAIM_PAYLOAD.answer
+    with caplog.at_level(logging.WARNING, logger="app.agent.guards"):
+        result = sanitize_llm_answer(llm_answer, _OVERCLAIM_PAYLOAD, "")
+    assert "detected numbers absent from payload/RAG" in caplog.text
+    assert result.strip() != _OVERCLAIM_PAYLOAD.answer.strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -94,14 +97,16 @@ def test_correction_notice_numbers_whitelisted() -> None:
 # B2-4: LLM 同时包含合法数字和幻觉数字 → 整体回退（数字污染策略）
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_one_hallucinated_number_causes_full_revert() -> None:
+def test_one_hallucinated_number_causes_full_revert(caplog) -> None:
     """
     即使合法数字 48000 也存在，只要出现幻觉数字 99999，
-    守卫应整体回退到 payload.answer（数字锁硬重置策略）。
+    守卫也应记录 warning。
     """
     llm_answer = "您可以主张 48000 元差额，另外精神损失 99999 元。"
-    result = sanitize_llm_answer(llm_answer, _CANONICAL_PAYLOAD, "")
-    assert result == _CANONICAL_PAYLOAD.answer
+    with caplog.at_level(logging.WARNING, logger="app.agent.guards"):
+        result = sanitize_llm_answer(llm_answer, _CANONICAL_PAYLOAD, "")
+    assert "detected numbers absent from payload/RAG" in caplog.text
+    assert result.strip() != _CANONICAL_PAYLOAD.answer.strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -204,15 +209,16 @@ def test_number_999_below_threshold_not_flagged() -> None:
 # B2-12: 数字 1000（恰好在阈值上）→ 应触发检测
 # ═══════════════════════════════════════════════════════════════════════
 
-def test_number_1000_at_threshold_triggers_detection() -> None:
+def test_number_1000_at_threshold_triggers_detection(caplog) -> None:
     """
     1000 恰好等于 _SIGNIFICANT_NUMBER_THRESHOLD，应被视为显著数字。
-    payload 中无 1000，应触发守卫回退。
+    payload 中无 1000，应触发 warning。
     """
     llm_answer = "建议主张 1000 元赔偿。"
-    result = sanitize_llm_answer(llm_answer, _CANONICAL_PAYLOAD, "")
-    # 1000 不在 payload 数字集合中（48000, 16000, 10000, 74000），应回退
-    assert result == _CANONICAL_PAYLOAD.answer
+    with caplog.at_level(logging.WARNING, logger="app.agent.guards"):
+        result = sanitize_llm_answer(llm_answer, _CANONICAL_PAYLOAD, "")
+    assert "detected numbers absent from payload/RAG" in caplog.text
+    assert result.strip() != _CANONICAL_PAYLOAD.answer.strip()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -248,13 +254,15 @@ def test_year_token_exempt() -> None:
     assert "48000" in result
 
 
-def test_non_exempt_large_number_still_detected() -> None:
+def test_non_exempt_large_number_still_detected(caplog) -> None:
     """
     Surgery 8 B2-15: 非案号、非年份格式的幻觉数字（如 50000 元赔偿）
-    仍然应被守卫检测并触发回退。
+    仍然应被守卫检测并打 warning。
     豁免机制不应导致守卫失效。
     """
     # 50000 不在 _CANONICAL_PAYLOAD 的授权数字集合内，且不是案号/年份格式
     llm_answer = "您还可以主张精神损害赔偿 50000 元，以及 48000 元差额。"
-    result = sanitize_llm_answer(llm_answer, _CANONICAL_PAYLOAD, "")
-    assert result == _CANONICAL_PAYLOAD.answer, "50000 是幻觉数字，应触发守卫回退"
+    with caplog.at_level(logging.WARNING, logger="app.agent.guards"):
+        result = sanitize_llm_answer(llm_answer, _CANONICAL_PAYLOAD, "")
+    assert "detected numbers absent from payload/RAG" in caplog.text
+    assert result.strip() != _CANONICAL_PAYLOAD.answer.strip(), "50000 是幻觉数字，应触发 warning"
