@@ -69,7 +69,7 @@ QUERY_EXPANSION_SYSTEM_PROMPT = """
 
 CHROMA_RECALL_K = 10
 BM25_RECALL_K = 10
-LAW_TOP_K = 3
+LAW_TOP_K = 6
 CASE_TOP_K = 2
 
 _query_expansion_llm: Any | None = None

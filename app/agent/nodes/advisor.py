@@ -155,7 +155,7 @@ def _split_rag_by_type(tool_results: list[dict[str, Any]]) -> dict[str, list[dic
     grouped["laws"].sort(key=lambda item: item.get("score", float("-inf")), reverse=True)
     grouped["cases"].sort(key=lambda item: item.get("score", float("-inf")), reverse=True)
     grouped["others"].sort(key=lambda item: item.get("score", float("-inf")), reverse=True)
-    grouped["laws"] = grouped["laws"][:5]
+    grouped["laws"] = grouped["laws"][:8]
     grouped["cases"] = grouped["cases"][:3]
     grouped["others"] = grouped["others"][:_MAX_OTHER_REFERENCE_ITEMS]
     return grouped
