@@ -97,8 +97,83 @@ def _parse_expansion_queries(content: str) -> list[str]:
     return _coerce_expansion_queries(queries)
 
 
+def _multi_query_rerank_with_rrf(
+    queries: list[str],
+    candidates: list[dict[str, Any]],
+    top_k: int,
+    rrf_k: int = 60,
+) -> list[dict[str, Any]]:
+    """
+    Per-query rerank + Reciprocal Rank Fusion.
+
+    Why: joining multiple expanded queries into one long string dilutes
+    the cross-encoder's attention. Each expansion typically captures one
+    sub-intent; reranking them independently and fusing by reciprocal
+    rank preserves each sub-intent's top hits.
+
+    RRF formula: score(d) = Σ 1 / (rrf_k + rank_q(d))
+    rrf_k=60 is the standard TREC choice.
+    """
+    if not candidates or not queries:
+        return []
+
+    reranker = BGEReranker()
+    documents = [candidate["content"] for candidate in candidates]
+    total_candidates = len(candidates)
+
+    fused_scores: dict[int, float] = {
+        index: 0.0 for index in range(total_candidates)
+    }
+    best_rerank_score: dict[int, float] = {
+        index: float("-inf") for index in range(total_candidates)
+    }
+    used_queries = 0
+
+    for query in queries:
+        normalized_query = query.strip()
+        if not normalized_query:
+            continue
+        used_queries += 1
+        ranked = reranker.rerank_with_scores(
+            normalized_query,
+            documents,
+            top_k=total_candidates,
+        )
+        for rank, item in enumerate(ranked, start=1):
+            candidate_index = item["index"]
+            fused_scores[candidate_index] += 1.0 / (rrf_k + rank)
+            if item["score"] > best_rerank_score[candidate_index]:
+                best_rerank_score[candidate_index] = item["score"]
+
+    if used_queries == 0:
+        return []
+
+    ordered_indexes = sorted(
+        range(total_candidates),
+        key=lambda index: (
+            fused_scores[index],
+            best_rerank_score[index],
+            -index,
+        ),
+        reverse=True,
+    )
+
+    ranked_results: list[dict[str, Any]] = []
+    for candidate_index in ordered_indexes[:top_k]:
+        score_value = best_rerank_score[candidate_index]
+        ranked_results.append(
+            {
+                "index": candidate_index,
+                "candidate": candidates[candidate_index],
+                "fused_score": fused_scores[candidate_index],
+                "rerank_score": 0.0 if score_value == float("-inf") else score_value,
+            }
+        )
+    return ranked_results
+
+
 def _serialize_reranked_documents(
-    query: str,
+    queries: list[str],
     candidates: list[dict[str, Any]],
     top_k: int,
 ) -> str:
@@ -106,22 +181,18 @@ def _serialize_reranked_documents(
         return json.dumps([], ensure_ascii=False)
 
     try:
-        reranker = BGEReranker()
-        ranked = reranker.rerank_with_scores(
-            query=query,
-            documents=[candidate["content"] for candidate in candidates],
-            top_k=top_k,
-        )
+        ranked = _multi_query_rerank_with_rrf(queries, candidates, top_k=top_k)
         payload = []
         for item in ranked:
-            candidate = candidates[item["index"]]
+            candidate = item["candidate"]
             metadata = candidate.get("metadata") or {}
             payload.append(
                 {
                     "content": candidate["content"],
                     "source": metadata.get("source", ""),
                     "metadata": metadata,
-                    "score": item["score"],
+                    "score": item["rerank_score"],
+                    "fused_score": item["fused_score"],
                     "coarse_score": candidate.get("score"),
                     "retrieval": candidate.get("retrieval"),
                     "candidate_id": candidate.get("candidate_id"),
@@ -397,8 +468,8 @@ def search_law_articles(query: str, chat_history: str = "") -> str:
         corpus="law",
         chat_history=chat_history,
     )
-    rerank_query = " ".join(expanded_queries).strip() or query.strip()
-    return _serialize_reranked_documents(rerank_query, candidates, top_k=LAW_TOP_K)
+    queries = expanded_queries or [query.strip()]
+    return _serialize_reranked_documents(queries, candidates, top_k=LAW_TOP_K)
 
 
 @tool
@@ -410,8 +481,8 @@ def search_case_text(query: str, chat_history: str = "") -> str:
         corpus="case",
         chat_history=chat_history,
     )
-    rerank_query = " ".join(expanded_queries).strip() or query.strip()
-    return _serialize_reranked_documents(rerank_query, candidates, top_k=CASE_TOP_K)
+    queries = expanded_queries or [query.strip()]
+    return _serialize_reranked_documents(queries, candidates, top_k=CASE_TOP_K)
 
 
 @tool
