@@ -13,13 +13,23 @@ Legal Agent V3 — 全面回答质量基准测试
 """
 from __future__ import annotations
 
+import io
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import requests
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace"
+    )
+    sys.stderr = io.TextIOWrapper(
+        sys.stderr.buffer, encoding="utf-8", errors="replace"
+    )
 
 # ── 配置 ────────────────────────────────────────────────────────
 BASE_URL = "http://127.0.0.1:8000"
@@ -599,7 +609,7 @@ def main():
     total_p = total_t = 0
     for dim, (p, t) in sorted(dim_scores.items()):
         pct = 100 * p // t if t else 0
-        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        bar = "#" * (pct // 10) + "-" * (10 - pct // 10)
         print(f"  {dim:<20} {bar} {p}/{t} ({pct}%)")
         total_p += p
         total_t += t
