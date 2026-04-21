@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from app.agent.graph import AgentState
@@ -185,6 +186,70 @@ def _contains_chinese_legal_keyword(text: str) -> bool:
     return any(kw in text for kw in _CHINESE_LEGAL_KEYWORDS)
 
 
+LAW_INTENT_KEYWORDS = (
+    "法条", "法律", "法规", "量刑", "依据", "民法典", "刑法",
+    "劳动合同法", "赔偿", "算不算", "怎么判", "如何认定", "是否构成", "工伤",
+    "权益", "权利", "主张", "能要", "能不能要", "可以要",
+    "清单", "违法解除", "违法辞退", "违法开除", "未签", "没签",
+    "经济补偿", "代通知金", "试用期", "无固定期限",
+    "社保", "公积金", "加班费", "年假",
+)
+
+CASE_INTENT_KEYWORDS = (
+    "案例", "类案", "判决", "案情", "指导案例", "裁判",
+    "有没有案例", "实际案例", "相似案例", "判例", "怎么判", "法院判",
+    "先例", "类似案件",
+)
+
+GRAPH_INTENT_KEYWORDS = (
+    "案由", "纠纷", "罪名", "原告", "被告", "公司",
+    "劳动争议", "逃税", "合同纠纷", "entity", "case",
+)
+
+_GRAPH_ENTITY_PATTERNS = (
+    re.compile(r"([A-Za-z0-9\u4e00-\u9fa5]{2,40}(?:公司|集团|学校|医院|银行|事务所|工厂|厂|店))"),
+    re.compile(r"(?:原告|被告|申请人|被申请人|上诉人|被上诉人|老板|对方)[:：]?\s*([A-Za-z0-9\u4e00-\u9fa5]{2,20})"),
+)
+_GRAPH_ENTITY_REJECT_TOKENS = (
+    "我在", "我被", "请告诉我", "告诉我", "拖欠工资", "违法辞退", "违法解除",
+    "没签", "未签", "月薪", "工作", "能主张", "法律条文", "典型案例",
+)
+_GRAPH_ENTITY_PUNCTUATION = "，。！？?；;：:"
+
+
+def _hit_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _extract_graph_entity_name(query: str) -> str | None:
+    cleaned = " ".join((query or "").strip().split())
+    if not cleaned:
+        return None
+
+    for pattern in _GRAPH_ENTITY_PATTERNS:
+        match = pattern.search(cleaned)
+        if not match:
+            continue
+        candidate = match.group(1).strip()
+        if (
+            candidate
+            and candidate not in {"公司", "老板", "对方", "原告", "被告"}
+            and not any(token in candidate for token in _GRAPH_ENTITY_REJECT_TOKENS)
+            and not any(punct in candidate for punct in _GRAPH_ENTITY_PUNCTUATION)
+        ):
+            return candidate
+
+    bare = cleaned.strip(_GRAPH_ENTITY_PUNCTUATION + " ")
+    if (
+        bare
+        and len(bare) <= 12
+        and not any(token in bare for token in _GRAPH_ENTITY_REJECT_TOKENS)
+        and not any(punct in bare for punct in _GRAPH_ENTITY_PUNCTUATION)
+    ):
+        return bare
+    return None
+
+
 # ======================================================================
 # Pure-Python intent detectors (no LLM, no IO)
 # ======================================================================
@@ -243,21 +308,9 @@ def looks_like_chitchat(self, question: str, chat_history: str = "") -> bool:
 
 def detect_intents(self, question: str, chat_history: str = "") -> dict[str, bool]:
     lowered = question.lower()
-    law_keywords = [
-        "法条", "法律", "法规", "量刑", "依据", "民法典", "刑法",
-        "劳动合同法", "赔偿", "算不算", "怎么判", "如何认定", "是否构成", "工伤",
-    ]
-    case_keywords = [
-        "案例", "类案", "判决", "案情", "指导案例", "裁判",
-        "有没有案例", "实际案例", "相似案例",
-    ]
-    graph_keywords = [
-        "案由", "纠纷", "罪名", "原告", "被告", "公司",
-        "劳动争议", "逃税", "合同纠纷", "entity", "case",
-    ]
-    has_law_intent = any(keyword in question for keyword in law_keywords)
-    has_case_intent = any(keyword in question for keyword in case_keywords)
-    has_graph_intent = any(keyword in question for keyword in graph_keywords) or "case" in lowered
+    has_law_intent = _hit_any(question, LAW_INTENT_KEYWORDS)
+    has_case_intent = _hit_any(question, CASE_INTENT_KEYWORDS)
+    has_graph_intent = _hit_any(question, GRAPH_INTENT_KEYWORDS) or "case" in lowered
     is_chitchat = self._looks_like_chitchat(question, chat_history=chat_history)
     is_out_of_scope = detect_out_of_scope_reason(question) is not None
     return {
@@ -281,8 +334,9 @@ def fallback_route_decision(self, question: str, chat_history: str = "") -> dict
         routes.append({"name": LAW_TOOL, "arguments": {"query": question}})
     if intents["has_case_intent"]:
         routes.append({"name": CASE_TOOL, "arguments": {"query": question}})
-    if intents["has_graph_intent"]:
-        routes.append({"name": GRAPH_TOOL, "arguments": {"entity_name": question}})
+    graph_entity = _extract_graph_entity_name(question) if intents["has_graph_intent"] else None
+    if graph_entity:
+        routes.append({"name": GRAPH_TOOL, "arguments": {"entity_name": graph_entity}})
     if intents["is_composite"]:
         if not any(route["name"] == LAW_TOOL for route in routes):
             routes.append({"name": LAW_TOOL, "arguments": {"query": question}})
@@ -320,8 +374,9 @@ def enforce_composite_routes(self, question: str, tool_calls: list[dict[str, Any
             enforced.append({"name": LAW_TOOL, "arguments": {"query": question}})
         if CASE_TOOL not in names:
             enforced.append({"name": CASE_TOOL, "arguments": {"query": question}})
-        if intents["has_graph_intent"] and GRAPH_TOOL not in names:
-            enforced.append({"name": GRAPH_TOOL, "arguments": {"entity_name": question}})
+        graph_entity = _extract_graph_entity_name(question) if intents["has_graph_intent"] else None
+        if graph_entity and GRAPH_TOOL not in names:
+            enforced.append({"name": GRAPH_TOOL, "arguments": {"entity_name": graph_entity}})
     return self._dedupe_tool_calls(enforced)
 
 
@@ -405,9 +460,21 @@ def build_tool_calls_for_intent(self, route_intent: str, query: str) -> list[dic
             {"name": LAW_TOOL, "arguments": {"query": cleaned_query}},
             {"name": CASE_TOOL, "arguments": {"query": cleaned_query}},
         ]
-        if any(token in cleaned_query for token in ["公司", "老板", "对方", "原告", "被告", "案由", "罪名"]):
-            routes.append({"name": GRAPH_TOOL, "arguments": {"entity_name": cleaned_query}})
+        graph_entity = _extract_graph_entity_name(cleaned_query)
+        if graph_entity:
+            routes.append({"name": GRAPH_TOOL, "arguments": {"entity_name": graph_entity}})
         return self._dedupe_tool_calls(routes)
+    if route_intent == "GENERAL_CONSULT":
+        intents = self._detect_intents(cleaned_query)
+        routes: list[dict[str, Any]] = []
+        if intents["has_law_intent"] or intents["has_case_intent"]:
+            routes.append({"name": LAW_TOOL, "arguments": {"query": cleaned_query}})
+            routes.append({"name": CASE_TOOL, "arguments": {"query": cleaned_query}})
+        graph_entity = _extract_graph_entity_name(cleaned_query) if intents["has_graph_intent"] else None
+        if graph_entity:
+            routes.append({"name": GRAPH_TOOL, "arguments": {"entity_name": graph_entity}})
+        if routes:
+            return self._dedupe_tool_calls(routes)
     fallback = self._fallback_route_decision(cleaned_query)
     return fallback.get("tool_calls", [])
 

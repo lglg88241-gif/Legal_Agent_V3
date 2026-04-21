@@ -1,24 +1,17 @@
 """
-Advisor node: layered legal analysis with LLM polishing.
+Advisor node: grounded legal answer generation.
 
 The deterministic calculation pipeline lives in app/logic/calculators.py.
-This module contains only the LLM interaction wrapper and the post-generation
-hallucination guard (sanitize_llm_answer).
+This module is responsible for:
+  - converting retrieval output into structured law / case grounding blocks,
+  - building the final grounded generation prompt,
+  - applying last-mile hallucination guards to the LLM output.
 
 Architecture contract:
-  - build_claim_payload() produces the authoritative answer skeleton + trace.
-  - The LLM's only job is to improve readability (role: text editor, not lawyer).
-  - build_advisor_system_prompt() is extracted as a pure function for testability.
-  - sanitize_llm_answer() acts as a last-mile firewall:
-      * Any fabricated significant number → full revert to payload skeleton.
-      * Any phantom "第N条" citation absent from RAG → surgical strip.
-
-Surgery 7: VERBATIM correction_notice block injected when overclaim detected.
-
-Surgery 11:
-- GENERAL_CONSULT 路径默认不会经过 reflector，因此原先 confidence_score 会沿用 0.0。
-- 现在在 advisor 返回前补一层启发式 confidence：
-  0源+无payload=0.35，1-2源=0.55，3+源+payload=0.78，其余=0.65。
+  - build_claim_payload() still produces authoritative numeric conclusions.
+  - The LLM is allowed to rewrite narrative explanation, but must not change
+    authoritative amounts or cite law articles outside retrieved material.
+  - build_advisor_system_prompt() remains a pure function for testability.
 """
 from __future__ import annotations
 
@@ -33,6 +26,7 @@ if TYPE_CHECKING:
 from app.schemas.case_state import CaseState
 from app.logic.calculators import PayloadResult, build_claim_payload
 from app.agent.guards import (
+    detect_fabricated_statute,
     sanitize_hallucinated_statutes,
     sanitize_llm_answer,
     sanitize_unverified_claims,
@@ -42,6 +36,20 @@ logger = logging.getLogger(__name__)
 
 _QUESTION_AMOUNT_PATTERN = re.compile(r"(\d+(?:[,，]\d{3})*(?:\.\d+)?)\s*元")
 _USER_STATUTE_PATTERN = re.compile(r"(《[^》]{1,40}》)(?:第\s*(\d+)\s*条)?")
+_PAYLOAD_FACT_KEYWORDS = (
+    "赔偿金",
+    "差额",
+    "代通知金",
+    "欠薪",
+    "总额",
+    "共计",
+    "补助金",
+    "补偿金",
+    "一次性伤残补助金",
+    "经济补偿",
+)
+_RAG_PREVIEW_LIMIT = 350
+_MAX_OTHER_REFERENCE_ITEMS = 5
 
 
 def _normalize_number_token(raw: str) -> str:
@@ -63,6 +71,181 @@ def _extract_question_amounts(question: str) -> list[str]:
         seen.add(normalized)
         amounts.append(normalized)
     return amounts
+
+
+def _truncate_rag_text(text: str, limit: int = _RAG_PREVIEW_LIMIT) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _coerce_rag_score(entry: dict[str, Any]) -> float:
+    for key in ("score", "coarse_score"):
+        value = entry.get(key)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return float("-inf")
+
+
+def _clean_rag_snippet(snippet: str, *prefixes: str) -> str:
+    result = snippet.strip()
+    for prefix in prefixes:
+        cleaned_prefix = (prefix or "").strip()
+        if cleaned_prefix and result.startswith(cleaned_prefix):
+            result = result[len(cleaned_prefix):].lstrip("：:，,;；。 \n")
+    return result.strip()
+
+
+def _split_rag_by_type(tool_results: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {"laws": [], "cases": [], "others": []}
+    seen: set[str] = set()
+
+    for item in tool_results:
+        result = item.get("result")
+        if not isinstance(result, str):
+            continue
+        try:
+            parsed = json.loads(result)
+        except Exception:
+            continue
+        if not isinstance(parsed, list):
+            continue
+
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+            content = _truncate_rag_text(str(entry.get("content") or ""))
+            if not content:
+                continue
+
+            source = str(entry.get("source") or metadata.get("source") or "").strip()
+            candidate_id = str(entry.get("candidate_id") or "").strip()
+            dedupe_key = candidate_id or json.dumps(
+                {
+                    "source": source,
+                    "content": content,
+                    "metadata": metadata,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            normalized_entry = {
+                "content": content,
+                "source": source,
+                "metadata": metadata,
+                "score": _coerce_rag_score(entry),
+                "candidate_id": candidate_id,
+            }
+
+            if metadata.get("article") or metadata.get("law_title"):
+                grouped["laws"].append(normalized_entry)
+            elif metadata.get("case_name"):
+                grouped["cases"].append(normalized_entry)
+            else:
+                grouped["others"].append(normalized_entry)
+
+    grouped["laws"].sort(key=lambda item: item.get("score", float("-inf")), reverse=True)
+    grouped["cases"].sort(key=lambda item: item.get("score", float("-inf")), reverse=True)
+    grouped["others"].sort(key=lambda item: item.get("score", float("-inf")), reverse=True)
+    grouped["laws"] = grouped["laws"][:5]
+    grouped["cases"] = grouped["cases"][:3]
+    grouped["others"] = grouped["others"][:_MAX_OTHER_REFERENCE_ITEMS]
+    return grouped
+
+
+def _format_laws_block(law_entries: list[dict[str, Any]]) -> str:
+    if not law_entries:
+        return "无"
+
+    lines: list[str] = []
+    for index, entry in enumerate(law_entries, start=1):
+        metadata = entry.get("metadata") or {}
+        law_title = str(metadata.get("law_title") or "").strip()
+        article = str(metadata.get("article") or "").strip()
+        source = str(entry.get("source") or "").strip()
+        snippet = _clean_rag_snippet(entry.get("content") or "", law_title, article)
+        header = f"{law_title}{article}".strip() or source or f"法条材料{index}"
+        lines.append(f"{index}. {header}：{snippet or entry.get('content') or ''}")
+    return "\n".join(lines)
+
+
+def _format_cases_block(case_entries: list[dict[str, Any]]) -> str:
+    if not case_entries:
+        return "无"
+
+    lines: list[str] = []
+    for index, entry in enumerate(case_entries, start=1):
+        metadata = entry.get("metadata") or {}
+        case_name = str(metadata.get("case_name") or "").strip()
+        source = str(entry.get("source") or "").strip()
+        page = metadata.get("page")
+        snippet = _clean_rag_snippet(entry.get("content") or "", case_name)
+        source_hint = ""
+        if source:
+            source_hint = f"（来源：{source}"
+            if page:
+                source_hint += f" 第{page}页"
+            source_hint += "）"
+        header = case_name or source or f"案例材料{index}"
+        lines.append(f"{index}. {header}{source_hint} — 裁判要点：{snippet or entry.get('content') or ''}")
+    return "\n".join(lines)
+
+
+def _format_other_rag_context(other_entries: list[dict[str, Any]]) -> str:
+    if not other_entries:
+        return "无"
+
+    lines: list[str] = []
+    for index, entry in enumerate(other_entries, start=1):
+        source = str(entry.get("source") or "").strip() or f"其他材料{index}"
+        lines.append(f"{index}. [{source}] {entry.get('content') or ''}")
+    return "\n".join(lines)
+
+
+def _build_guard_rag_context(
+    laws_block: str,
+    cases_block: str,
+    other_rag_context: str,
+) -> str:
+    sections = [
+        section.strip()
+        for section in (laws_block, cases_block, other_rag_context)
+        if isinstance(section, str) and section.strip() and section.strip() != "无"
+    ]
+    return "\n\n".join(sections) or "无有效检索结果"
+
+
+def _extract_payload_facts(payload: PayloadResult) -> str:
+    facts: list[str] = []
+    seen: set[str] = set()
+
+    for raw_line in payload.answer.splitlines():
+        cleaned = raw_line.strip()
+        if not cleaned:
+            continue
+        normalized = cleaned.lstrip("-•").strip()
+        if not normalized:
+            continue
+        if not (
+            any(keyword in normalized for keyword in _PAYLOAD_FACT_KEYWORDS)
+            or re.search(r"《[^》]{1,40}》第[一二三四五六七八九十百零\d]+条", normalized)
+        ):
+            continue
+        bullet = f"- {normalized}"
+        if bullet in seen:
+            continue
+        seen.add(bullet)
+        facts.append(bullet)
+
+    return "\n".join(facts) if facts else "无已确认金额结论"
 
 
 def _build_amount_verification_block(question: str, payload: PayloadResult) -> str:
@@ -214,6 +397,27 @@ def _compute_heuristic_confidence(state: dict[str, Any]) -> float | None:
     return 0.65
 
 
+def _prepend_fabricated_statute_notice(answer: str, question: str) -> str:
+    detection = detect_fabricated_statute(question)
+    if not detection.get("is_fabricated"):
+        return answer.strip()
+
+    law_name = detection.get("law_name", "")
+    article_num = detection.get("article_num")
+    max_articles = detection.get("max_articles")
+    suggested_correction = detection.get("suggested_correction", "")
+    notice = (
+        f"⚠️ 您提到的\"《{law_name}》第{article_num}条\"在现行法律中并不存在"
+        f"（《{law_name}》共有{max_articles}条）。{suggested_correction}"
+    )
+    clean_answer = answer.strip()
+    if notice in clean_answer:
+        return clean_answer
+    if not clean_answer:
+        return notice
+    return f"{notice}\n\n{clean_answer}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Prompt builder (pure function — testable without LLM)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +429,9 @@ def build_advisor_system_prompt(
     payload: PayloadResult,
     question: str = "",
     historical_reference: str = "",
+    laws_block: str = "",
+    cases_block: str = "",
+    payload_facts: str = "",
 ) -> str:
     """
     Build the full advisor system prompt.
@@ -275,122 +482,97 @@ def build_advisor_system_prompt(
     amount_verification_block = _build_amount_verification_block(question, payload)
     statute_verification_block = _build_statute_verification_block(question, rag_context)
 
-    prompt = f"""
-你是一名法律文本精校员（Legal Text Editor）。你的唯一职责是：
-将下方已计算完毕的「骨架文本」改写得更温暖、更具说服力、更贴近真实律师的表达风格。
+    payload_facts = payload_facts or _extract_payload_facts(payload)
+    laws_block = laws_block or "无"
+    cases_block = cases_block or "无"
+    rag_context = rag_context or "无"
 
-你不负责计算。你不负责引用法条。你不负责补充法律知识。
+    prompt = f"""
+你不是普通的文本精校员，而是一位资深的中国法律咨询律师。请基于下面给定的事实、法条原文和参考案例，给出一段专业、有共情、可落地的回答。
 {correction_block}
 <number_lock>
 【数字锁定 — 最高优先级，任何其他规则均不得推翻此条】
-骨架文本中的所有数字（元、月数、总额）是经过程序精确计算后写入的权威值。
-你唯一允许的操作是：原样保留这些数字，在其前后调整连接文字和语气。
-严禁行为：
-- 重新计算任何数字
-- 验证或"纠正"任何数字
-- 添加乘法公式或推导过程（如"8000×6=48000"）
-- 修改任何数值，哪怕你认为更精确
-即使骨架文本中的数字与你的训练知识不一致，也必须原样保留。
+涉及金额时，必须沿用【已确认事实】中的计算结果，不得自行重算，不得改写金额，不得补充新的金额结论。
+如需解释金额，只能解释其法律意义，不能重新推导公式或替换成其他数字。
 </number_lock>
 
 <citation_lock>
 【引用锁定 — 次高优先级】
-法条条文编号（"第X条"格式）只允许出现以下两种情况之一：
-  A. 该编号已在下方 <rag_context> 中原文出现。
-  B. 该编号已在骨架文本中存在。
+法条条文编号（"第X条"格式）只允许来自【相关法条原文】或 <rag_context> 中已经出现的内容。
 任何其他情况：严禁补写任何"第X条"。
-若你想引用某部法律，只写法律名称（如《劳动合同法》），不写条文编号。
-原因：条文编号必须由检索系统提供，你的训练记忆不足以保证准确性。
+若你想引用某部法律，但材料中没有对应编号，只写法律名称，不写条文编号。
 </citation_lock>
 {legal_basis_block}
 {amount_verification_block}
 {statute_verification_block}
 <amount_guard>
-当用户主动提出具体赔偿金额（如“我能要999999元吗”）时，只有该金额已经被骨架文本或 <correction_notice> 验证，你才能正面讨论它。
-如果系统尚未产出对应的验证结果，你不得认同、背书或围绕该金额展开策略推演。
+当用户主动提出具体赔偿金额而系统尚未核验时，你不得认同、背书或围绕该金额展开策略推演。
 此时必须明确说明金额尚未核验，并引导用户补充月工资、工作时间、欠薪月数、赔偿项目等计算事实。
 </amount_guard>
 
 <statute_guard>
-当用户引用具体法律名称或条文编号时，只有在 <rag_context> 中检索到同一法律或条文后才可引用。
-如果 <rag_context> 未检索到用户提到的法律或条文，必须明确告知知识库未收录或未检索到，并建议用户通过国家法律法规数据库等官方渠道查证。
+当用户引用具体法律名称或条文编号时，只有在【相关法条原文】或 <rag_context> 中检索到同一法律或条文后才可引用。
+如果未检索到，必须明确告知知识库未检索到，并建议用户通过国家法律法规数据库等官方渠道查证。
 严禁凭训练记忆回答用户提问的具体法条内容，严禁拿其他法律条文“代答”。
 </statute_guard>
-<editor_role>
-你被允许做的事：
-1. 调整语气——让文本更温暖、更有信心、更像真正的律师在说话。
-2. 优化连接词——让各层之间过渡更自然。
-3. 适当扩展行动建议的表达——但不能添加新的金额主张。
-4. 保持原有的四层结构：已知事实 → 算账与确权层 → 高风险执行层 → 下一步落地动作。
-5. **【Surgery Q-3】积极引用 RAG 法条**：如果 <rag_context> 中出现了具体的法律名称和条文编号
-   （如《劳动合同法》第八十二条），你应当主动在算账与确权层中引用，让回答更具说服力。
-   引用格式：根据《XX法》第X条，...
-6. **【Surgery Q-4】允许补充程序性指导**：你可以补充以下类型的内容（这些不算"新法律主张"）：
-   - 证据收集的具体清单（如工资流水、考勤记录、聊天记录）
-   - 维权流程的具体步骤（如劳动仲裁/民事诉讼/刑事辩护流程）
-   - 时效、管辖、费用等程序性信息
-   - 风险提示和注意事项
-   注意：这些内容必须是法律常识层面的程序性指导，不涉及具体金额计算。
 
-你被严格禁止做的事：
-1. 修改任何数字。
-2. 添加骨架中没有的法条编号（除非该编号在 <rag_context> 中原文出现）。
-3. 删除骨架中的任何一层。
-4. 添加骨架中没有的**新赔偿项目或新的金额主张**（程序性指导不在此列）。
-</editor_role>
+【硬约束】
+1. 严禁引用未在【相关法条原文】中出现的法条编号或条文表述。
+2. 涉及金额时，必须沿用【已确认事实】中的计算结果，不得自行重算。
+3. 不得使用“算账与确权层”“高风险执行层”“下一步落地动作”这类内部分层标签。
+4. 如果【相关法条原文】为空或为“无”，直接说明“暂未检索到精确法条原文，以下基于通用规则给出方向性建议”，禁止伪造条款号。
 
 <rag_binding>
-下方 <rag_context> 是你唯一可以引用法条名称、案例名称、来源文件名的外部依据。
-若 <rag_context> 中出现了具体法律名称或案例名，可在改写时自然穿插，增加说服力。
-若 <rag_context> 没有提供编号，绝对不要自行补写编号。
+你必须优先依据【相关法条原文】和【参考案例】作答；<rag_context> 只作为补充背景材料。
+若【相关法条原文】中出现了具体法律名称和条文编号，应自然引用到回答中。
+若【参考案例】中出现了案例名称和裁判要点，应在用户询问类案时加以说明。
 </rag_binding>
 
-<rag_citation_encouragement>
-【Surgery Q-3 — 法条引用激励】
-如果 <rag_context> 中出现了具体的法律条文（如"《中华人民共和国劳动合同法》第八十二条：用人单位..."），
-你应当：
-1. 在算账与确权层主动引用该条文编号和法律名称
-2. 用"根据《XX法》第X条，..."的标准格式
-3. 不要只笼统说"根据相关法律规定"
-这能显著提升回答的专业性和可信度。但前提是：条文编号必须在 <rag_context> 中真实存在。
-</rag_citation_encouragement>
-
-<output_contract>
-0. **【可操作性强化】** 在「下一步落地动作」层，必须包含：
-   - 具体的证据清单（按优先级）
-   - 维权路径的具体步骤（管辖机构、时限、费用）
-   - 风险提示
-   骨架文本已经为你准备好了这些内容，请保留并适当润色，不要删减为简单几句话。
-1. 只返回 JSON，格式：{{"answer": "...", "sources": [...]}}
-2. answer：对骨架文本的精校版本，必须保留四层结构和全部数字。
-3. 若存在 <correction_notice>，其内容必须出现在 answer 的「算账与确权层」中。
-4. 若存在 <amount_verification_notice>，answer 必须明确说明金额尚未核验，并引导用户补充计算事实。
-5. 若存在 <statute_verification_notice>，answer 必须明确说明知识库未检索到对应法律/条文，并建议用户通过官方渠道核验。
-6. sources：只能从候选来源中选择，不能编造。
-</output_contract>
-
-<context>
+<grounded_context>
+【已确认事实】
 案件摘要：{case_summary or "无案件摘要"}
 图谱上下文：{graph_context or "无图谱上下文"}
+已确认金额与依据：
+{payload_facts}
+
+【相关法条原文】（来自向量检索 + 重排）
+{laws_block}
+
+【参考案例】（来自向量检索 + 重排）
+{cases_block}
+
+【其他参考材料】
+<rag_context>
+{rag_context}
+</rag_context>
+
 <historical_reference>
 {historical_reference or "无历史案件参考"}
 </historical_reference>
 历史案件参考只可作为背景提示，严禁当作当前案件事实参与计算、抽取月薪、工龄或案型。
-<rag_context>
-{rag_context}
-</rag_context>
-</context>
+</grounded_context>
+
+<output_contract>
+1. 只返回 JSON，格式：{{"answer": "...", "sources": [...]}}
+2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
+3. answer：必须明确引用法条编号，但仅限【相关法条原文】或 <rag_context> 中已出现的编号。
+4. answer：当【参考案例】不为“无”时，必须在回答中引用至少 1 个案件名简称（如“郑某诉霍尼韦尔案”“某途教育公司诉王某华案”），并用一句话总结裁判要点。若你判断案例与用户问题不相关，仍需在回答末尾说明“参考案例 X 与本案情形不完全相同，仅供参考”。严禁完全忽略【参考案例】段。
+5. answer：结尾给出 1 到 2 个明确的下一步行动建议。
+6. sources：只能填写检索材料中真实出现过的来源，不能编造。
+</output_contract>
 
 <examples>
-【示例：正确改写】
-骨架片段：二倍工资差额约 48000 元（8000 × 6 个月）
-正确输出：您有权主张约 48000 元的二倍工资差额
-说明：数字原样保留，仅改变表达方式，没有重新推导。
+【示例：正确回答】
+根据《劳动合同法》第八十七条，用人单位违法解除劳动合同的，应按经济补偿标准的二倍支付赔偿金。结合您已确认的月工资和工龄，现阶段可优先主张违法辞退赔偿金。下一步建议先固定解除通知、工资流水和考勤记录，再准备仲裁申请材料。
 
-【示例：错误改写（被严格禁止）】
-骨架片段：二倍工资差额约 48000 元
-错误输出：依据《劳动合同法》第82条，月薪8000 × 6 = 48000 元
-错误原因：① 脑补了"第82条"（RAG 无此编号）；② 添加了乘法公式推导过程。
+【示例：错误回答（被严格禁止）】
+依据《劳动合同法》第82条和第87条，你肯定还能再多要三个月工资。
+错误原因：① 材料中未出现的条文编号被擅自补写；② 擅自新增金额结论。
+
+【示例：正确引用案例】
+Input: “试用期违法辞退典型案例”
+cases_block 第1条：“某途教育公司诉王某华劳动争议案 — 裁判要点：试用期超过法定上限，应就违法约定试用期承担赔偿责任。”
+正确输出片段：“参考某途教育公司诉王某华案，法院认为试用期约定超过法定上限的，用人单位需承担相应赔偿责任；这类案例对判断试用期解除是否合法有直接参考价值。”
 </examples>
 """.strip()
 
@@ -404,7 +586,11 @@ def build_advisor_system_prompt(
 async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
     tool_results = state.get("tool_results", [])
     candidate_sources = self._extract_candidate_sources(tool_results)
-    retrieved_docs = self._build_context_blocks(tool_results)
+    split_rag = _split_rag_by_type(tool_results)
+    laws_block = _format_laws_block(split_rag["laws"])
+    cases_block = _format_cases_block(split_rag["cases"])
+    rag_context = _format_other_rag_context(split_rag["others"])
+    guard_rag_context = _build_guard_rag_context(laws_block, cases_block, rag_context)
     statute_guard_rag_sources = _build_statute_guard_rag_sources(tool_results, candidate_sources)
     case_summary = (state.get("case_summary") or "").strip()
     graph_context = (
@@ -428,7 +614,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
                 _cs_for_payload.monthly_salary,
             )
     layered_payload = build_claim_payload(_cs_for_payload)
-    rag_context = retrieved_docs or "无有效检索结果"
+    payload_facts = _extract_payload_facts(layered_payload)
     _wage_bridged = (
         _cs_for_payload.monthly_salary is not None
         and state.get("_detected_monthly_wage") is not None
@@ -448,6 +634,9 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         historical_reference=historical_reference,
         rag_context=rag_context,
         payload=layered_payload,
+        laws_block=laws_block,
+        cases_block=cases_block,
+        payload_facts=payload_facts,
     )
 
     fallback = {"answer": layered_payload.answer, "sources": []}
@@ -459,14 +648,9 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
             {
                 "role": "user",
                 "content": (
-                    f"用户问题：{state['question']}\n\n"
-                    f"案件摘要：{display_case_summary or '无案件摘要'}\n\n"
-                    f"候选来源：{json.dumps(candidate_sources, ensure_ascii=False)}\n\n"
-                    f"<rag_context>\n{rag_context}\n</rag_context>\n\n"
-                    "以下是已经完成的基础回答骨架。"
-                    "请严格遵守 <number_lock>、<citation_lock> 以及所有 verification notice，"
-                    "只改措辞，不改数字，不补法条编号：\n"
-                    f"{layered_payload.answer}"
+                    f"用户的问题：{state['question']}\n"
+                    "请基于 system 中的【已确认事实】【相关法条原文】【参考案例】给出回答。"
+                    "必须引用法条编号，必须有下一步建议。"
                 ),
             },
         ],
@@ -477,11 +661,9 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
 
     if not isinstance(raw_answer, str) or not raw_answer.strip():
         raw_answer = fallback["answer"]
-    if ("未找到依据" in raw_answer) or ("依据不足" in raw_answer):
-        raw_answer = fallback["answer"]
 
     # ── Post-generation hallucination guard (Surgery 6+7) ─────────────────
-    answer = sanitize_llm_answer(raw_answer, layered_payload, rag_context)
+    answer = sanitize_llm_answer(raw_answer, layered_payload, guard_rag_context)
     payload_for_claim_guard = layered_payload if _payload_has_authoritative_claims(layered_payload) else None
     answer = sanitize_unverified_claims(answer, state["question"], payload_for_claim_guard)
     answer = sanitize_hallucinated_statutes(
@@ -489,6 +671,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         state["question"],
         statute_guard_rag_sources,
     )
+    answer = _prepend_fabricated_statute_notice(answer, state["question"])
 
     heuristic_confidence = _compute_heuristic_confidence(
         {

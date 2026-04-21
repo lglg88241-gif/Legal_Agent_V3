@@ -7,6 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.logic.calculators import build_claim_payload
 from app.schemas.case_state import CaseState
 
 
@@ -33,3 +34,24 @@ def test_no_floating_point_artifacts_on_derived_amounts() -> None:
     assert result.double_salary_gap == 80000.0
     assert result.claim_total == 80000.0
     assert "80000.001" not in str(result.double_salary_gap)
+
+
+def test_parse_拖欠工资_3_个月() -> None:
+    cs = CaseState.from_text("公司拖欠工资3个月", "", "")
+    assert cs.owed_months == 3
+    assert cs.owed_wages is None
+
+
+def test_parse_拖欠_5000_元() -> None:
+    cs = CaseState.from_text("公司拖欠工资5000元", "", "")
+    assert cs.owed_wages == 5000.0
+    assert cs.owed_months is None
+
+
+def test_parse_拖欠工资_3_个月_月薪10000() -> None:
+    cs = CaseState.from_text("公司拖欠工资3个月，月薪10000元", "", "")
+    result = build_claim_payload(cs)
+    owed_step = next(step for step in result.trace.steps if step.item == "拖欠工资")
+    assert cs.owed_months == 3
+    assert cs.owed_wages is None
+    assert owed_step.result == 30000.0

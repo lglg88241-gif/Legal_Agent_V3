@@ -177,7 +177,8 @@ class TestCaseStateFromQuestion:
             "",
         )
         assert cs.monthly_salary == 12000.0
-        assert cs.owed_wages == 36000.0
+        assert cs.owed_wages is None
+        assert cs.owed_months == 3
         assert cs.has_owed_wages is True
 
 

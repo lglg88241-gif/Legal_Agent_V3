@@ -244,7 +244,8 @@ class TestCaseState:
         assert self.state.double_salary_gap == 48000.0
 
     def test_owed_wages(self) -> None:
-        assert self.state.owed_wages == 16000.0
+        assert self.state.owed_wages is None
+        assert self.state.owed_months == 2
 
     def test_deposit(self) -> None:
         assert self.state.deposit == 10000.0

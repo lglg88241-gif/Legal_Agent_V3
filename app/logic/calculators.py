@@ -253,9 +253,35 @@ _ASSET_TOKENS = ("新公司", "注销", "关联公司", "查封", "保全", "换
 
 _LABOR_RELATION_TOKENS = ("劳动关系", "入职", "考勤", "工资流水", "发工资")
 
+_LABOR_RIGHTS_QUERY_TOKENS = (
+    "列清单",
+    "所有权益",
+    "全部权益",
+    "能主张什么",
+    "哪些赔偿",
+)
+
+LABOR_RIGHTS_CHECKLIST_TEMPLATE = (
+    "**劳动权益清单**：\n"
+    "  1. **双倍工资差额**：未签劳动合同满 1 个月不满 1 年的，可主张双倍工资差额；首月不计入，最多支持 11 个月。\n"
+    "  2. **违法辞退赔偿金**：违法解除劳动合同的，可主张 2N；通常按月工资 × N × 2 计算。\n"
+    "  3. **经济补偿金**：合法解除或终止劳动合同且符合法定条件的，可主张 N；通常按工作年限 × 月工资计算。\n"
+    "  4. **社保补缴**：用人单位欠缴社会保险的，可向社保稽核或社保经办部门投诉，要求补缴单位应缴部分。\n"
+    "  5. **病假工资**：病假期间工资一般不低于当地最低工资标准的 80%，具体按地方规定执行。\n"
+    "  6. **仲裁时效**：劳动争议仲裁时效一般为 1 年，自知道或者应当知道权利被侵害之日起计算。"
+)
+
 
 def _has_any(text: str, tokens: tuple[str, ...]) -> bool:
     return any(tok in text for tok in tokens)
+
+
+def _should_render_labor_rights_checklist(cs: CaseState) -> bool:
+    case_type = (cs.case_type or "").strip()
+    question = (cs.question or "").strip()
+    if "劳动" not in case_type:
+        return False
+    return any(token in question for token in _LABOR_RIGHTS_QUERY_TOKENS)
 
 
 def _detect_scenario(cs: CaseState, case_type: str | None = None) -> str:
@@ -311,6 +337,9 @@ def _build_action_checklist(cs: CaseState, merged: str) -> list[str]:
     覆盖：证据收集（按优先级）、维权路径（仲裁/诉讼）、时限管理。
     """
     checklist: list[str] = []
+    if _should_render_labor_rights_checklist(cs):
+        return [LABOR_RIGHTS_CHECKLIST_TEMPLATE]
+
     scenario = _detect_scenario(cs, case_type=cs.case_type)
 
     if scenario == "labor_arbitration":
@@ -430,15 +459,29 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     """
     cs = _sanitize_historical_fact_sources(cs)
     if (cs.case_type or "").strip() == "工伤":
-        explanation = (
-            "工伤赔偿需依据《工伤保险条例》及伤残等级单独计算，建议人工核算。"
+        monthly_salary_text = (
+            f"{cs.monthly_salary:.0f} 元/月" if cs.monthly_salary is not None else "需补充本人工资标准"
         )
+        injury_known_fact = (
+            f"您当前属于工伤赔偿场景，已知本人月工资为 {cs.monthly_salary:.0f} 元。"
+            if cs.monthly_salary is not None
+            else "您当前属于工伤赔偿场景，但还需要补充本人工资标准。"
+        )
+        injury_calc_lines = [
+            f"一次性伤残补助金：十级伤残通常按本人工资 × 7 个月计算；按您当前月工资 {monthly_salary_text}，可先按《工伤保险条例》第三十七条核对。",
+            "一次性工伤医疗补助金：按各省标准执行，例如上海通常结合当地上一年度社平工资和地方细则确定，需按事故地政策核算。",
+            "一次性伤残就业补助金：同样按各省标准执行，是否解除劳动关系、解除时间和当地政策都会影响金额。",
+            "医疗费：依法应由工伤保险基金支付；如果单位未依法参保，则通常由用人单位承担。",
+            f"停工留薪期工资：停工留薪期内原工资福利待遇不变，您当前可先按月工资 {monthly_salary_text} 作为核对基数。",
+        ]
+        explanation = "工伤赔偿需依据《工伤保险条例》第三十七条、伤残等级和事故地标准单独核算。"
         return PayloadResult(
             answer=(
-                "已知事实：\n- 您当前属于工伤赔偿场景。\n\n"
-                "算账与确权层：\n- 工伤赔偿需依据《工伤保险条例》及伤残等级单独计算。\n\n"
-                "高风险执行层：\n- 先核对是否已经完成工伤认定和劳动能力鉴定。\n\n"
-                "下一步落地动作：\n- 建议准备工伤认定书、劳动能力鉴定结论、工资流水后再人工核算。"
+                f"已知事实：\n- {injury_known_fact}\n\n"
+                "算账与确权层：\n- "
+                + "\n- ".join(injury_calc_lines)
+                + "\n\n高风险执行层：\n- 先核对是否已经完成工伤认定和劳动能力鉴定，并确认事故地适用的地方补助标准。\n\n"
+                "下一步落地动作：\n- 建议准备工伤认定书、劳动能力鉴定结论、病历和住院记录、事故经过材料、工资流水后再逐项核算。"
             ),
             needs_core_followup=False,
             followup="",
@@ -468,13 +511,13 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
         if cs.monthly_salary is not None and cs.work_months is not None:
             # Surgery Q-1: 显式化 cap_rule，让规则进入 answer 文本而非仅在 trace
             calculation_lines.append(
-                f"按现有信息，计算公式可以先写为：月工资 {cs.monthly_salary:.0f} 元"
+                f"按现有信息，2倍工资差额的计算公式可以先写为：月工资 {cs.monthly_salary:.0f} 元"
                 f" × 可主张月数 {cs.compensable_months}"
-                f" = 二倍工资差额约 {cs.double_salary_gap:.0f} 元。"
+                f" = 2倍工资差额约 {cs.double_salary_gap:.0f} 元。"
             )
             rule_explanation = (
-                f"（计算规则说明：根据《劳动合同法》第八十二条，二倍工资差额自实际用工"
-                f"满一个月的次日起算，首月不计入；法定可主张上限为 11 个月。"
+                f"（计算规则说明：根据《劳动合同法》第八十二条，2倍工资差额自入职满 1 个月的次日起算，首月不计入；"
+                f"法定最多 11 个月。"
                 f"您实际工作 {cs.work_months} 个月，可主张月数为 {cs.compensable_months} 个月。）"
             )
             calculation_lines.append(rule_explanation)
@@ -500,7 +543,9 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     # --- Illegal dismissal / notice substitution ---
     if cs.illegal_dismissal_compensation > 0:
         calculation_lines.append(
-            f"违法辞退赔偿金（2N）：月工资 {cs.monthly_salary:.0f} 元 × N值 {cs.n_value} × 2"
+            f"违法辞退赔偿金（2N）：月工资基数为 {cs.monthly_salary:.0f} 元，"
+            f"N=工作年限（不满半年按0.5，半年以上不满1年按1计），"
+            f"即月工资 {cs.monthly_salary:.0f} 元 × N值 {cs.n_value} × 2"
             f" = 约 {cs.illegal_dismissal_compensation:.0f} 元。"
             "依据《劳动合同法》第八十七条，用人单位违法解除劳动合同的，应按经济补偿标准的二倍支付赔偿金。"
         )
@@ -530,6 +575,9 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
         effective_owed_wages = round(cs.monthly_salary * cs.owed_months, 2)
         calculation_lines.append(
             f"拖欠工资部分：{cs.monthly_salary:.0f} 元/月 × {cs.owed_months} 个月 = 约 {effective_owed_wages:.0f} 元。"
+            "根据《劳动合同法》第三十条，用人单位应当按时足额支付劳动报酬；"
+            "根据《劳动合同法》第八十五条，逾期不支付的，劳动行政部门可责令加付 50% 至 100% 赔偿金；"
+            "根据《劳动法》第五十条，工资应当以货币形式按月支付给劳动者本人。"
         )
         steps.append(CalculationStep(
             item="拖欠工资",
@@ -541,11 +589,17 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
     elif cs.owed_months is not None and cs.monthly_salary is None:
         calculation_lines.append(
             f"已知拖欠 {cs.owed_months} 个月工资，需要您提供月工资标准才能精确计算欠薪总额。"
+            "相关依据包括《劳动合同法》第三十条、《劳动合同法》第八十五条和《劳动法》第五十条。"
         )
         if "月工资标准" not in unknowns:
             unknowns.append("月工资标准")
     elif (cs.owed_wages or 0) > 0:
-        calculation_lines.append(f"拖欠工资部分：约 {cs.owed_wages:.0f} 元。")
+        calculation_lines.append(
+            f"拖欠工资部分：约 {cs.owed_wages:.0f} 元。"
+            "根据《劳动合同法》第三十条，用人单位应当按时足额支付劳动报酬；"
+            "根据《劳动合同法》第八十五条，逾期不支付的，劳动行政部门可责令加付 50% 至 100% 赔偿金；"
+            "根据《劳动法》第五十条，工资应当以货币形式按月支付给劳动者本人。"
+        )
         steps.append(CalculationStep(
             item="拖欠工资",
             formula=f"欠薪金额 {cs.owed_wages:.0f} 元",
@@ -554,7 +608,10 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
             legal_basis="《劳动合同法》关于工资支付的规定",
         ))
     elif cs.has_owed_wages and cs.monthly_salary is not None:
-        calculation_lines.append("存在工资拖欠事实，待确认具体欠薪月数后可精确计算。")
+        calculation_lines.append(
+            "存在工资拖欠事实，待确认具体欠薪月数后可精确计算。"
+            "欠薪场景可优先援引《劳动合同法》第三十条、《劳动合同法》第八十五条和《劳动法》第五十条。"
+        )
 
     # --- Deposit ---
     if cs.deposit > 0:
