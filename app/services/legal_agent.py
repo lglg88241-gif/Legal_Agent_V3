@@ -31,9 +31,15 @@ from app.agent.nodes._llm import (
     OUT_OF_SCOPE_RESPONSE,
     GRAPH_TOOL,
     create_cloud_llm,
-    create_local_router_llm,
     chat_model,
     chat_model_with_fallback,
+    get_agent_llm_router,
+    normalize_chat_messages,
+    to_langchain_messages,
+    call_langchain_llm,
+    call_zhipu,
+    call_local_vllm,
+    call_openai,
     safe_json_load,
     extract_candidate_sources,
     normalize_sources,
@@ -42,6 +48,7 @@ from app.agent.nodes._llm import (
     execute_tool_call,
     execute_tool_calls,
 )
+from app.core.llm_provider import get_llm_router
 from app.agent.nodes.router import (
     has_substantive_legal_intent,
     history_indicates_legal_dialogue,
@@ -97,7 +104,8 @@ def _infer_case_type(case_summary: str, question: str) -> str | None:
 
 class LegalGraphAgent:
     def __init__(self):
-        self.router_llm = create_local_router_llm()
+        self.llm_router = get_llm_router()
+        self.router_llm = create_cloud_llm(model="glm-4-flash")
         self._router_llm_fallback = create_cloud_llm(model="glm-4-flash")
         self.expert_llm = create_expert_llm()
         self.summary_llm = create_summary_llm()
@@ -106,6 +114,13 @@ class LegalGraphAgent:
     # === Shared LLM utilities (delegated to _llm module) ===
     _chat_model = chat_model
     _chat_model_with_fallback = chat_model_with_fallback
+    _get_llm_router = get_agent_llm_router
+    _normalize_chat_messages = normalize_chat_messages
+    _to_langchain_messages = to_langchain_messages
+    _call_langchain_llm = call_langchain_llm
+    _call_zhipu = call_zhipu
+    _call_local_vllm = call_local_vllm
+    _call_openai = call_openai
     _safe_json_load = safe_json_load
     _extract_candidate_sources = extract_candidate_sources
     _normalize_sources = normalize_sources

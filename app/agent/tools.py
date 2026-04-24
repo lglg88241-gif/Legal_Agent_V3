@@ -16,7 +16,9 @@ from neo4j import GraphDatabase
 
 from app.core.bm25_retriever import BM25Retriever
 from app.core.config import settings
-from app.core.llm_factory import create_cloud_llm, create_query_expansion_llm
+from app.core import llm_factory as _llm_factory
+from app.core.llm_factory import create_cloud_llm
+from app.core.llm_provider import LLMProvider, get_llm_router
 from app.core.reranker import BGEReranker
 from app.database.chroma_utils import resolve_persist_dir
 
@@ -72,8 +74,8 @@ BM25_RECALL_K = 10
 LAW_TOP_K = 6
 CASE_TOP_K = 2
 
-_query_expansion_llm: Any | None = None
-_query_expansion_llm_lock = threading.Lock()
+_query_expansion_local_llm: Any | None = None
+_query_expansion_local_llm_lock = threading.Lock()
 _query_expansion_fallback_llm: Any | None = None
 _query_expansion_fallback_llm_lock = threading.Lock()
 _ARTICLE_NUMBER_QUERY_PATTERN = re.compile(r"第[一二三四五六七八九十百零\d]+条")
@@ -240,14 +242,17 @@ def _serialize_reranked_documents(
         return json.dumps(fallback_payload, ensure_ascii=False)
 
 
-def _get_query_expansion_llm() -> Any:
-    global _query_expansion_llm
+def _get_query_expansion_local_llm() -> Any:
+    global _query_expansion_local_llm
 
-    if _query_expansion_llm is None:
-        with _query_expansion_llm_lock:
-            if _query_expansion_llm is None:
-                _query_expansion_llm = create_query_expansion_llm()
-    return _query_expansion_llm
+    if _query_expansion_local_llm is None:
+        with _query_expansion_local_llm_lock:
+            if _query_expansion_local_llm is None:
+                _query_expansion_local_llm = _llm_factory.create_local_llm(
+                    temperature=0.3,
+                    max_tokens=512,
+                )
+    return _query_expansion_local_llm
 
 
 def _get_query_expansion_fallback_llm() -> Any:
@@ -261,6 +266,24 @@ def _get_query_expansion_fallback_llm() -> Any:
                     max_tokens=512,
                 )
     return _query_expansion_fallback_llm
+
+
+def _invoke_query_expansion_model(messages: list[Any]) -> Any:
+    llm_router = get_llm_router()
+    provider = llm_router.get_provider("query_expansion")
+    logger.info("Query expansion provider: %s", provider.value)
+
+    if provider == LLMProvider.LOCAL_VLLM:
+        try:
+            response = _get_query_expansion_local_llm().invoke(messages)
+            content = response.content if isinstance(response.content, str) else str(response.content)
+            if _parse_expansion_queries(content):
+                return response
+            logger.warning("本地模型返回无效，fallback 到智谱")
+        except Exception as exc:
+            logger.warning("本地模型返回无效，fallback 到智谱: %s", exc)
+
+    return _get_query_expansion_fallback_llm().invoke(messages)
 
 
 def _normalize_query_list(original_query: str, queries: list[Any]) -> list[str]:
@@ -311,11 +334,7 @@ def _expand_queries(query: str, chat_history: str = "") -> list[str]:
                     )
                 ),
             ]
-        try:
-            response = _get_query_expansion_llm().invoke(messages)
-        except Exception as exc:
-            logger.warning("Primary query expansion LLM failed, fallback to cloud: %s", exc)
-            response = _get_query_expansion_fallback_llm().invoke(messages)
+        response = _invoke_query_expansion_model(messages)
         content = response.content if isinstance(response.content, str) else str(response.content)
         queries = _parse_expansion_queries(content)
         expanded_queries = _sanitize_expanded_queries(

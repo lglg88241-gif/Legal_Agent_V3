@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.celery_app import ask_agent_task
+from app.core.llm_provider import get_llm_router
 from app.core.security import AuthenticatedUser, get_current_user
 from app.database.mysql_db import get_db
 from app.services.case_boundary import detect_case_boundary
@@ -20,6 +21,7 @@ from app.services.graph_extractor import format_graph_memory
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+llm_router = get_llm_router()
 
 
 class DialogRequest(BaseModel):
@@ -28,6 +30,10 @@ class DialogRequest(BaseModel):
     force_current_case: bool = False
     is_precise_mode: bool = False
     proactive_graph_mode: bool = True
+
+
+class LocalModelToggleRequest(BaseModel):
+    enabled: bool = False
 
 
 @router.post("/dialog")
@@ -128,3 +134,39 @@ async def get_task_status(
         return {"status": "completed", "user_id": current_user.user_id, "data": result}
 
     return {"status": "failed", "user_id": current_user.user_id, "error": str(task_result.info)}
+
+
+@router.post("/api/settings/local-model")
+async def set_local_model(
+    body: LocalModelToggleRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    _ = current_user
+    enabled = bool(body.enabled)
+    if enabled:
+        healthy = await llm_router.check_vllm_health()
+        if not healthy:
+            llm_router.set_local_enabled(False)
+            return {"success": False, "enabled": False, "message": "本地模型未运行，请先启动 vLLM 服务"}
+    llm_router.set_local_enabled(enabled)
+    return {"success": True, "enabled": enabled}
+
+
+@router.get("/api/settings/local-model/status")
+async def get_local_model_status(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    _ = current_user
+    healthy = await llm_router.check_vllm_health()
+    if llm_router.local_enabled and not healthy:
+        llm_router.set_local_enabled(False)
+        return {
+            "enabled": False,
+            "vllm_healthy": False,
+            "vllm_url": llm_router.vllm_base_url,
+        }
+    return {
+        "enabled": llm_router.local_enabled,
+        "vllm_healthy": healthy,
+        "vllm_url": llm_router.vllm_base_url,
+    }

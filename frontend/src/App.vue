@@ -55,6 +55,21 @@
       </el-aside>
 
       <el-main class="chat-area">
+        <div class="local-model-card">
+          <div class="local-model-header">
+            <div class="local-model-title">本地模型加速</div>
+            <el-switch
+              v-model="localModel.enabled"
+              :loading="localModel.loading"
+              :disabled="localModel.loading"
+              @change="handleLocalModelToggle"
+            />
+          </div>
+          <div class="local-model-status" :class="localModelStatusClass">
+            {{ localModelStatusText }}
+          </div>
+        </div>
+
         <div v-if="!systemStatus.ready" class="init-overlay">
           <div class="init-card">
             <el-icon class="init-icon rotating"><Loading /></el-icon>
@@ -166,8 +181,10 @@ import {
   getConversationMessages,
   getConversationSummary,
   getConversations,
+  getLocalModelStatus,
   getSystemStatus,
   sendMessage,
+  setLocalModelStatus,
   submitFeedback,
   updateConversationTitle,
 } from './api/index.js'
@@ -190,6 +207,12 @@ const graphRefreshTimer = ref(null)
 const graphRefreshStopTimer = ref(null)
 const graphSidebarCollapsed = ref(false)
 const latestGraphRequestId = ref(0)
+const localModel = reactive({
+  enabled: false,
+  healthy: false,
+  vllmUrl: '',
+  loading: false,
+})
 
 const systemStatus = reactive({
   status: 'loading',
@@ -222,6 +245,16 @@ const currentUsername = computed(() => getStoredUser()?.username || '已登录�
 const currentConversation = computed(() =>
   conversations.value.find((item) => item.id === currentConversationId.value) || null
 )
+const localModelStatusText = computed(() => {
+  if (localModel.loading) return '检查中...'
+  if (!localModel.enabled) return '关闭（查询扩展走云端）'
+  if (localModel.healthy) return `✅ 已连接 (${localModel.vllmUrl || '127.0.0.1:8001'})`
+  return '❌ 连接失败'
+})
+const localModelStatusClass = computed(() => {
+  if (!localModel.enabled) return 'is-off'
+  return localModel.healthy ? 'is-on' : 'is-error'
+})
 
 const inputPlaceholder = computed(() => {
   if (!systemStatus.ready) return '系统初始化中，输入框暂时锁定。'
@@ -231,6 +264,7 @@ const inputPlaceholder = computed(() => {
 
 onMounted(async () => {
   startSystemStatusPolling()
+  await refreshLocalModelStatus()
   await initializeConversations()
 })
 
@@ -241,6 +275,45 @@ onUnmounted(() => {
 
 function componentLabel(value) {
   return value === 'connected' ? '已连接' : '加载中'
+}
+
+async function refreshLocalModelStatus() {
+  try {
+    const { data } = await getLocalModelStatus()
+    localModel.enabled = Boolean(data.enabled)
+    localModel.healthy = Boolean(data.vllm_healthy)
+    localModel.vllmUrl = data.vllm_url || '127.0.0.1:8001'
+  } catch (error) {
+    console.error('Failed to fetch local model status:', error)
+    localModel.enabled = false
+    localModel.healthy = false
+    localModel.vllmUrl = '127.0.0.1:8001'
+  }
+}
+
+async function handleLocalModelToggle(enabled) {
+  localModel.loading = true
+  try {
+    const { data } = await setLocalModelStatus(Boolean(enabled))
+    if (!data.success) {
+      localModel.enabled = false
+      localModel.healthy = false
+      ElMessage.warning(data.message || '请先启动 vLLM 服务')
+      return
+    }
+    await refreshLocalModelStatus()
+    if (localModel.enabled && !localModel.healthy) {
+      localModel.enabled = false
+      ElMessage.warning('请先启动 vLLM 服务')
+    }
+  } catch (error) {
+    console.error('Failed to toggle local model:', error)
+    localModel.enabled = false
+    localModel.healthy = false
+    ElMessage.error('本地模型设置失败')
+  } finally {
+    localModel.loading = false
+  }
 }
 
 function sortConversations(list) {
@@ -970,6 +1043,45 @@ body,
   flex-direction: column;
   padding: 0;
   overflow: hidden;
+}
+
+.local-model-card {
+  margin: 16px 24px 0;
+  padding: 14px 16px;
+  border: 1px solid #dbeafe;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #eff6ff, #f8fafc);
+}
+
+.local-model-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.local-model-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.local-model-status {
+  margin-top: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.local-model-status.is-off {
+  color: #6b7280;
+}
+
+.local-model-status.is-on {
+  color: #15803d;
+}
+
+.local-model-status.is-error {
+  color: #b91c1c;
 }
 
 .chat-scroll {

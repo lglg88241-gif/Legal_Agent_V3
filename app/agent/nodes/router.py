@@ -22,6 +22,7 @@ from app.agent.nodes._llm import (
     TOOLS_INTENT,
 )
 from app.agent.prompts.advisor import TRIPLE_TRACK_ROUTER_PROMPT_V2
+from app.core.llm_provider import get_llm_router
 
 logger = logging.getLogger(__name__)
 
@@ -527,6 +528,9 @@ async def route_decision(
         fallback_intent = "CASE_UPDATE" if fallback_intent != "GREETING" and summary_text != "无案情摘要" else fallback_intent
 
     try:
+        llm_router = getattr(self, "llm_router", None) or get_llm_router()
+        provider = llm_router.get_provider("router")
+        logger.info("Router provider: %s", provider.value)
         messages = [
                 {"role": "system", "content": TRIPLE_TRACK_ROUTER_PROMPT_V2},
                 {
@@ -538,11 +542,7 @@ async def route_decision(
                     ),
                 },
             ]
-        content = await self._chat_model_with_fallback(
-            self.router_llm,
-            self._router_llm_fallback,
-            messages,
-        )
+        content = await self._chat_model(self.router_llm, messages, provider=provider)
         parsed = self._safe_json_load(content, {"route_intent": fallback_intent})
         route_intent = str(parsed.get("route_intent", fallback_intent)).upper()
         if route_intent not in {"GREETING", "GENERAL_CONSULT", "CASE_UPDATE", OUT_OF_SCOPE_INTENT}:

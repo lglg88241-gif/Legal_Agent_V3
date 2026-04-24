@@ -16,11 +16,19 @@ from typing import Any
 os.environ.setdefault("USE_TORCH", "0")
 
 from json_repair import repair_json
+from openai import AsyncOpenAI
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+try:
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+except ImportError:
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    AIMessage = HumanMessage
 
 from app.agent.graph import AgentState
 from app.agent.tools import AGENT_TOOLS
+from app.core import llm_factory as _llm_factory
+from app.core.llm_provider import LLMProvider, get_llm_router
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +78,115 @@ def create_cloud_llm(model: str = "glm-4-flash") -> "ChatZhipuAI":
     )
 
 
-async def chat_model(self, llm, messages: list[dict[str, str]]) -> str:
-    """Send messages to a chat model and return the text response."""
-    langchain_messages = []
+def get_agent_llm_router(self):
+    router = getattr(self, "llm_router", None)
+    if router is None:
+        router = get_llm_router()
+        setattr(self, "llm_router", router)
+    return router
+
+
+def normalize_chat_messages(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
     for message in messages:
-        role = message.get("role")
+        role = str(message.get("role", "user")).lower()
+        if role not in {"system", "assistant", "user"}:
+            role = "user"
         content = message.get("content", "")
+        normalized.append(
+            {
+                "role": role,
+                "content": content if isinstance(content, str) else str(content),
+            }
+        )
+    return normalized
+
+
+def to_langchain_messages(self, messages: list[dict[str, str]]) -> list[Any]:
+    langchain_messages = []
+    for message in self._normalize_chat_messages(messages):
+        role = message["role"]
+        content = message["content"]
         if role == "system":
             langchain_messages.append(SystemMessage(content=content))
+        elif role == "assistant":
+            langchain_messages.append(AIMessage(content=content))
         else:
             langchain_messages.append(HumanMessage(content=content))
+    return langchain_messages
 
-    response = await llm.ainvoke(langchain_messages)
-    return response.content if isinstance(response.content, str) else str(response.content)
+
+async def call_langchain_llm(self, llm, messages: list[dict[str, str]]) -> str:
+    response = await llm.ainvoke(self._to_langchain_messages(messages))
+    content = response.content if hasattr(response, "content") else response
+    return content if isinstance(content, str) else str(content)
+
+
+async def call_zhipu(self, messages: list[dict[str, str]], llm=None) -> str:
+    target_llm = llm or getattr(self, "expert_llm", None) or create_cloud_llm()
+    return await self._call_langchain_llm(target_llm, messages)
+
+
+async def call_local_vllm(self, messages: list[dict[str, str]]) -> str:
+    local_llm = _llm_factory.create_local_llm(temperature=0.1, max_tokens=2048)
+    return await self._call_langchain_llm(local_llm, messages)
+
+
+async def call_openai(
+    self,
+    model: str,
+    messages: list[dict[str, str]],
+    temperature: float = 0.3,
+) -> str:
+    llm_router = self._get_llm_router()
+    client = AsyncOpenAI(
+        api_key=llm_router.openai_api_key,
+        base_url=llm_router.openai_base_url,
+        timeout=60.0,
+    )
+    response = await client.chat.completions.create(
+        model=model,
+        messages=self._normalize_chat_messages(messages),
+        temperature=temperature,
+        max_tokens=2048,
+    )
+    content = response.choices[0].message.content if response.choices else ""
+    return content if isinstance(content, str) else str(content or "")
+
+
+async def chat_model(
+    self,
+    llm,
+    messages: list[dict[str, str]],
+    provider: LLMProvider = LLMProvider.ZHIPU,
+) -> str:
+    """Send messages to the configured provider and return the text response."""
+    if provider in {LLMProvider.GPT_5_4, LLMProvider.GPT_5_1} and not self._get_llm_router().openai_api_key:
+        logger.warning("OPENAI_API_KEY not set, fallback to ZHIPU")
+        return await self._call_zhipu(messages, llm=llm)
+
+    if provider == LLMProvider.GPT_5_4:
+        try:
+            return await self._call_openai("gpt-5.4", messages)
+        except Exception as exc:
+            logger.warning("OpenAI API failed (%s), fallback to ZHIPU: %s", "gpt-5.4", exc)
+            return await self._call_zhipu(messages, llm=llm)
+
+    if provider == LLMProvider.GPT_5_1:
+        try:
+            return await self._call_openai("gpt-5.1", messages)
+        except Exception as exc:
+            logger.warning("OpenAI API failed (%s), fallback to ZHIPU: %s", "gpt-5.1", exc)
+            return await self._call_zhipu(messages, llm=llm)
+
+    if provider == LLMProvider.LOCAL_VLLM:
+        try:
+            return await self._call_local_vllm(messages)
+        except Exception as exc:
+            logger.warning("Local vLLM failed, fallback to ZHIPU: %s", exc)
+            return await self._call_zhipu(messages, llm=llm)
+
+    return await self._call_zhipu(messages, llm=llm)
 
 
 async def chat_model_with_fallback(self, primary_llm, fallback_llm, messages: list[dict[str, str]]) -> str:

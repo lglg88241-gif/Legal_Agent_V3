@@ -10,8 +10,11 @@ class Settings:
     LLM_MODE = os.getenv("LLM_MODE", "mock")
     API_KEY = os.getenv("API_KEY", "EMPTY")
     BASE_URL = os.getenv("BASE_URL", "http://localhost:8001/v1")
+    VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", BASE_URL.removesuffix("/v1"))
     LLM_MODEL_NAME = os.getenv("LLM_MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
     LOCAL_LLM_ENABLED = os.getenv("LOCAL_LLM_ENABLED", "true").lower() == "true"
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
     NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
@@ -25,7 +28,7 @@ class Settings:
     CHROMA_CASES_COLLECTION = os.getenv("CHROMA_CASES_COLLECTION", "legal_cases_collection")
     EMBEDDING_MODEL_PATH = os.getenv("EMBEDDING_MODEL_PATH", "BAAI/bge-small-zh-v1.5")
     RERANKER_MODEL_PATH = os.getenv("RERANKER_MODEL_PATH", "BAAI/bge-reranker-v2-m3")
-    ZHIPUAI_API_KEY = os.getenv("ZHIPUAI_API_KEY", "")
+    ZHIPUAI_API_KEY = os.getenv("ZHIPUAI_API_KEY", os.getenv("ZHIPU_API_KEY", ""))
     JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-this-secret-in-production")
     JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))

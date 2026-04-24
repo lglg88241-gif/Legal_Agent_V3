@@ -9,6 +9,7 @@ from typing import Any
 
 from app.agent.graph import AgentState
 from app.agent.prompts.advisor import FACT_UPDATER_SYSTEM_PROMPT_V2
+from app.core.llm_provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,7 @@ async def fact_updater_node(self, state: AgentState) -> AgentState:
                     ),
                 },
             ],
+            provider=LLMProvider.GPT_5_1,
         )
         parsed = self._safe_json_load(content, {"case_summary": fallback_summary})
         case_summary = parsed.get("case_summary", fallback_summary)

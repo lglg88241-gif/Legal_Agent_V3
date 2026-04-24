@@ -31,6 +31,7 @@ from app.agent.guards import (
     sanitize_llm_answer,
     sanitize_unverified_claims,
 )
+from app.core.llm_provider import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -654,6 +655,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
                 ),
             },
         ],
+        provider=LLMProvider.GPT_5_4,
     )
 
     parsed = self._safe_json_load(content, fallback)
