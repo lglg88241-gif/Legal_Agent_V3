@@ -13,6 +13,7 @@ Legal Agent V3 — 全面回答质量基准测试
 """
 from __future__ import annotations
 
+import argparse
 import io
 import json
 import sys
@@ -81,34 +82,147 @@ def new_conv(headers: dict) -> int:
     return body.get("id") or body.get("conversation", {}).get("id") or 1
 
 
+def _elapsed_ms(started: float) -> int:
+    return int((time.perf_counter() - started) * 1000)
+
+
+def _normalize_dialog_result(
+    payload: dict | None,
+    *,
+    fallback_latency_ms: int,
+    default_status: str = "completed",
+) -> dict:
+    data = payload.copy() if isinstance(payload, dict) else {}
+
+    response_text = data.get("response")
+    if not isinstance(response_text, str) or not response_text.strip():
+        message = data.get("message")
+        response_text = message if isinstance(message, str) else ""
+
+    sources = data.get("sources")
+    if not isinstance(sources, list):
+        sources = []
+
+    try:
+        confidence = float(data.get("confidence_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    try:
+        latency_ms = int(data.get("latency_ms", 0) or 0)
+    except (TypeError, ValueError):
+        latency_ms = 0
+    if latency_ms <= 0:
+        latency_ms = fallback_latency_ms
+
+    data["status"] = str(data.get("status") or default_status)
+    data["response"] = response_text
+    data["sources"] = sources
+    data["confidence_score"] = confidence
+    data["latency_ms"] = latency_ms
+    data["route_intent"] = str(data.get("route_intent") or data.get("route") or "")
+    return data
+
+
 def ask(headers: dict, cid: int, text: str, force: bool = False) -> dict:
-    r = requests.post(
-        f"{BASE_URL}/dialog",
-        headers=headers,
-        json={
-            "user_input": text,
-            "conversation_id": cid,
-            "force_current_case": force,
-            "is_precise_mode": False,
-            "proactive_graph_mode": True,
-        },
-        timeout=15,
-    )
+    started = time.perf_counter()
+    try:
+        r = requests.post(
+            f"{BASE_URL}/dialog",
+            headers=headers,
+            json={
+                "user_input": text,
+                "conversation_id": cid,
+                "force_current_case": force,
+                "is_precise_mode": False,
+                "proactive_graph_mode": True,
+            },
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        return _normalize_dialog_result(
+            {"status": "failed", "error": f"post_failed: {exc}"},
+            fallback_latency_ms=_elapsed_ms(started),
+            default_status="failed",
+        )
+
     if r.status_code != 200:
-        return {"error": f"HTTP {r.status_code}", "response": ""}
-    task_id = r.json().get("task_id")
+        return _normalize_dialog_result(
+            {"status": "failed", "error": f"HTTP {r.status_code}"},
+            fallback_latency_ms=_elapsed_ms(started),
+            default_status="failed",
+        )
+
+    try:
+        first = r.json()
+    except ValueError as exc:
+        return _normalize_dialog_result(
+            {"status": "failed", "error": f"invalid_json: {exc}"},
+            fallback_latency_ms=_elapsed_ms(started),
+            default_status="failed",
+        )
+
+    if first.get("status") == "needs_confirmation" and not force:
+        return ask(headers, cid, text, force=True)
+
+    task_id = first.get("task_id")
+    if not task_id:
+        return _normalize_dialog_result(
+            first,
+            fallback_latency_ms=_elapsed_ms(started),
+            default_status=str(first.get("status") or "completed"),
+        )
+
     for _ in range(int(POLL_TIMEOUT / POLL_INTERVAL)):
         time.sleep(POLL_INTERVAL)
-        sr = requests.get(
-            f"{BASE_URL}/dialog/status/{task_id}", headers=headers, timeout=10
-        )
-        if sr.status_code == 200:
-            data = sr.json()
-            if data.get("status") == "completed":
-                return data.get("data", {})
-            if data.get("status") == "failed":
-                return {"error": "task_failed", "response": ""}
-    return {"error": "timeout", "response": ""}
+        try:
+            sr = requests.get(
+                f"{BASE_URL}/dialog/status/{task_id}", headers=headers, timeout=10
+            )
+        except requests.RequestException:
+            continue
+        if sr.status_code != 200:
+            continue
+        data = sr.json()
+        if data.get("status") == "completed":
+            return _normalize_dialog_result(
+                data.get("data", {}),
+                fallback_latency_ms=_elapsed_ms(started),
+            )
+        if data.get("status") == "failed":
+            return _normalize_dialog_result(
+                {
+                    "status": "failed",
+                    "error": data.get("error", "task_failed"),
+                    "message": data.get("message", ""),
+                },
+                fallback_latency_ms=_elapsed_ms(started),
+                default_status="failed",
+            )
+
+    return _normalize_dialog_result(
+        {"status": "failed", "error": "timeout"},
+        fallback_latency_ms=_elapsed_ms(started),
+        default_status="failed",
+    )
+
+
+def _join_turn_responses(*turns: dict) -> str:
+    return "\n".join(
+        (turn.get("response") or "").strip()
+        for turn in turns
+        if isinstance(turn, dict) and (turn.get("response") or "").strip()
+    )
+
+
+def _sum_turn_latencies(*turns: dict) -> int:
+    total = 0
+    for turn in turns:
+        try:
+            total += int(turn.get("latency_ms", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+    return total
 
 
 def contains(text: str, *keywords: str) -> bool:
@@ -301,19 +415,20 @@ def test_d3_multi_turn_continuity(headers: dict) -> list[TestCase]:
     cases = []
 
     cid = new_conv(headers)
-    ask(headers, cid, "你好，我想咨询劳动纠纷")
-    ask(headers, cid, "我叫张三，在北京一家科技公司上班，月薪20000元")
-    ask(headers, cid, "公司2024年6月1日突然口头通知我离职，说是优化裁员，没有提前30天通知")
-    ask(headers, cid, "我在公司工作了整整4年，一直没有签劳动合同")
+    r1 = ask(headers, cid, "你好，我想咨询劳动纠纷")
+    r2 = ask(headers, cid, "我叫张三，在北京一家科技公司上班，月薪20000元")
+    r3 = ask(headers, cid, "公司2024年6月1日突然口头通知我离职，说是优化裁员，没有提前30天通知")
+    r4 = ask(headers, cid, "我在公司工作了整整4年，一直没有签劳动合同")
     r5 = ask(headers, cid, "综合我的情况，帮我算一下我能主张哪些权益，总共能要多少钱？")
-    text = r5.get("response", "")
+    text = _join_turn_responses(r1, r2, r3, r4, r5)
+    final_text = r5.get("response", "")
     tc = TestCase(
         "五轮劳动争议全程连贯",
         "D3-多轮连贯",
-        latency_ms=r5.get("latency_ms", 0),
+        latency_ms=_sum_turn_latencies(r1, r2, r3, r4, r5),
         sources_count=len(r5.get("sources", [])),
         confidence=r5.get("confidence_score", 0),
-        response_preview=text[:300],
+        response_preview=final_text[:200],
         route=r5.get("route_intent", ""),
     )
     tc.checks = [
@@ -327,17 +442,19 @@ def test_d3_multi_turn_continuity(headers: dict) -> list[TestCase]:
     cases.append(tc)
 
     cid = new_conv(headers)
-    ask(headers, cid, "我借给朋友50000元，有借条，约定2023年12月31日还款")
-    ask(headers, cid, "到期了他一直不还，我催了很多次，他说最多还我30000")
+    r1 = ask(headers, cid, "我借给朋友50000元，有借条，约定2023年12月31日还款")
+    r2 = ask(headers, cid, "到期了他一直不还，我催了很多次，他说最多还我30000")
     r3 = ask(headers, cid, "我应该怎么维权？我能要回全部50000吗，还有利息吗？")
-    text = r3.get("response", "")
+    text = _join_turn_responses(r1, r2, r3)
+    final_text = r3.get("response", "")
     tc2 = TestCase(
         "借贷纠纷数字连贯",
         "D3-多轮连贯",
-        latency_ms=r3.get("latency_ms", 0),
+        latency_ms=_sum_turn_latencies(r1, r2, r3),
         sources_count=len(r3.get("sources", [])),
         confidence=r3.get("confidence_score", 0),
-        response_preview=text[:300],
+        response_preview=final_text[:200],
+        route=r3.get("route_intent", ""),
     )
     tc2.checks = [
         CheckResult("50000元本金连贯", contains_any(text, "50000", "5万", "五万")),
@@ -565,7 +682,24 @@ def test_d8_system_health(headers: dict) -> list[TestCase]:
 # ════════════════════════════════════════════════════════════════
 # 主程序
 # ════════════════════════════════════════════════════════════════
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Legal Agent V3 质量 benchmark")
+    parser.add_argument(
+        "--only",
+        default="",
+        help="只跑指定维度，逗号分隔，例如 D3,D8",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+    only_codes = {
+        item.strip().upper()
+        for item in args.only.split(",")
+        if item.strip()
+    }
+
     print("=" * 60)
     print("Legal Agent V3 — 全面回答质量基准测试")
     print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -575,16 +709,21 @@ def main():
     headers = {"Authorization": f"Bearer {token}"}
     all_cases: list[TestCase] = []
     test_groups = [
-        ("D1 金额计算准确性", test_d1_amount_calculation),
-        ("D2 法条真实性", test_d2_statute_accuracy),
-        ("D3 多轮案情连贯性", test_d3_multi_turn_continuity),
-        ("D4 回答完整性", test_d4_completeness),
-        ("D5 回答可操作性", test_d5_actionability),
-        ("D6 幻觉抑制", test_d6_hallucination),
-        ("D7 案例引用质量", test_d7_case_citation),
-        ("D8 系统健康状态", test_d8_system_health),
+        ("D1", "D1 金额计算准确性", test_d1_amount_calculation),
+        ("D2", "D2 法条真实性", test_d2_statute_accuracy),
+        ("D3", "D3 多轮案情连贯性", test_d3_multi_turn_continuity),
+        ("D4", "D4 回答完整性", test_d4_completeness),
+        ("D5", "D5 回答可操作性", test_d5_actionability),
+        ("D6", "D6 幻觉抑制", test_d6_hallucination),
+        ("D7", "D7 案例引用质量", test_d7_case_citation),
+        ("D8", "D8 系统健康状态", test_d8_system_health),
     ]
-    for group_name, test_fn in test_groups:
+    if only_codes:
+        print(f"[INFO] 仅运行维度: {', '.join(sorted(only_codes))}")
+    selected_groups = [
+        item for item in test_groups if not only_codes or item[0] in only_codes
+    ]
+    for _, group_name, test_fn in selected_groups:
         print(f"\n{'═'*55}")
         print(f"  {group_name}")
         print(f"{'═'*55}")
@@ -643,7 +782,11 @@ def main():
             for tc in all_cases
         ],
     }
-    out_path = RESULTS_DIR / "quality_benchmark_report.json"
+    if only_codes:
+        suffix = "_".join(code.lower() for code in sorted(only_codes))
+        out_path = RESULTS_DIR / f"quality_benchmark_report_{suffix}.json"
+    else:
+        out_path = RESULTS_DIR / "quality_benchmark_report.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
     print(f"\n 详细报告已保存: {out_path}")
