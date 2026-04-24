@@ -83,6 +83,9 @@ export const clearConversationMessages = (conversationId) =>
   api.delete(`/conversations/${conversationId}/messages`)
 export const getConversationSummary = (conversationId) =>
   api.post(`/conversations/${conversationId}/summary`)
+export const getLocalModelStatus = () => api.get('/api/settings/local-model/status')
+export const setLocalModelStatus = (enabled) =>
+  api.post('/api/settings/local-model', { enabled: Boolean(enabled) })
 
 export const sendMessage = async (userInput, conversationId, options = {}) => {
   const initRes = await api.post('/dialog', {

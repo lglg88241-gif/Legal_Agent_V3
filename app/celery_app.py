@@ -17,7 +17,9 @@ from app.services.conversation_store import (
     load_conversation_case_summary,
     maybe_update_conversation_title,
     store_message,
+    update_conversation_case_state,
     update_conversation_case_summary,
+    update_conversation_case_type,
 )
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
@@ -110,6 +112,10 @@ async def _run_task_async(conversation_id: int) -> dict[str, Any]:
 
         async with session_factory() as db:
             case_summary = await load_conversation_case_summary(db, conversation_id)
+        from app.services.conversation_store import load_conversation_case_state
+
+        async with session_factory() as db:
+            saved_case_state = await load_conversation_case_state(db, conversation_id)
 
         graph_memory = await format_graph_memory(conversation_id=conversation_id)
         return {
@@ -117,6 +123,7 @@ async def _run_task_async(conversation_id: int) -> dict[str, Any]:
             "latest_user_input": latest_user_input,
             "case_summary": case_summary,
             "graph_memory": graph_memory,
+            "saved_case_state": saved_case_state,
         }
     finally:
         await celery_engine.dispose()
@@ -129,6 +136,8 @@ async def _persist_dialog_turn_async(
     assistant_content: str,
     metadata: dict[str, Any],
     case_summary: str = "",
+    case_state_dict: dict[str, Any] | None = None,
+    case_type: str | None = None,
 ) -> None:
     celery_engine, session_factory = _create_celery_session_factory()
     try:
@@ -147,6 +156,10 @@ async def _persist_dialog_turn_async(
             await maybe_update_conversation_title(db, conversation, user_content)
             if case_summary.strip():
                 await update_conversation_case_summary(db, conversation, case_summary)
+            if case_state_dict:
+                await update_conversation_case_state(db, conversation, case_state_dict)
+            if case_type:
+                await update_conversation_case_type(db, conversation, case_type)
             await store_message(
                 db,
                 conversation_id=conversation_id,
@@ -160,8 +173,12 @@ async def _persist_dialog_turn_async(
 
 
 @celery_app.task(name="update_graph_task")
-def update_graph_task(conversation_id: int):
+def update_graph_task(conversation_id: int, user_id: int = 0):
     try:
+        from app.memory.redis_mgr import get_redis_saver_for_current_loop
+
+        get_redis_saver_for_current_loop()
+
         async def _run():
             celery_engine, session_factory = _create_celery_session_factory()
             try:
@@ -187,6 +204,7 @@ def update_graph_task(conversation_id: int):
                 conversation_id=conversation_id,
                 user_input=latest_user_input,
                 case_summary=case_summary,
+                user_id=user_id,
             )
 
         update_result = asyncio.run(_run())
@@ -224,6 +242,9 @@ def ask_agent_task(
     start_time = time.time()
 
     try:
+        from app.memory.redis_mgr import get_redis_saver_for_current_loop
+
+        get_redis_saver_for_current_loop()
         # 所有 IO 合并到单一事件循环，避免多次 asyncio.run() 的开销
         context = asyncio.run(_run_task_async(conversation_id))
         chat_history = context["chat_history"]
@@ -241,6 +262,7 @@ def ask_agent_task(
                 is_precise_mode=is_precise_mode,
                 proactive_graph_mode=proactive_graph_mode,
                 conversation_id=conversation_id,
+                saved_case_state=context.get("saved_case_state"),
             )
         )
 
@@ -249,11 +271,18 @@ def ask_agent_task(
         response_sources = answer.get("sources", []) if isinstance(answer, dict) else []
         route_intent = answer.get("route_intent", "GENERAL_CONSULT") if isinstance(answer, dict) else "GENERAL_CONSULT"
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
+        case_state_dict = answer.get("case_state_snapshot") if isinstance(answer, dict) else None
+        case_type = answer.get("case_type") if isinstance(answer, dict) else None
 
         if route_intent == "GREETING":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Greeting route selected"},
                 {"tool": "greeting", "result_summary": "Fast greeting response generated"},
+            ]
+        elif route_intent == "OUT_OF_SCOPE":
+            agent_actions = [
+                {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},
+                {"tool": "out_of_scope", "result_summary": "Fixed out-of-scope response generated"},
             ]
         elif route_intent == "CASE_UPDATE":
             agent_actions = [
@@ -302,11 +331,13 @@ def ask_agent_task(
                         "route_intent": route_intent,
                     },
                     case_summary=updated_case_summary if route_intent == "CASE_UPDATE" else "",
+                    case_state_dict=case_state_dict,
+                    case_type=case_type,
                 )
             )
 
         if route_intent == "CASE_UPDATE":
-            update_graph_task.delay(conversation_id)
+            update_graph_task.delay(conversation_id, user_id)
 
         return result
 

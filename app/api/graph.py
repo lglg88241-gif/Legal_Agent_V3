@@ -7,6 +7,11 @@ from fastapi import APIRouter, HTTPException, Query
 from neo4j import GraphDatabase
 
 from app.core.config import settings
+from app.services.graph_extractor import (
+    get_case_graph,
+    get_cross_case_entities,
+    get_user_cases_graph_overview,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/graph", tags=["graph"])
@@ -180,3 +185,33 @@ async def get_subgraph(query: str = Query(..., min_length=1, max_length=200)):
     except Exception as exc:
         logger.exception("Failed to fetch Neo4j subgraph: %s", exc)
         raise HTTPException(status_code=503, detail="Neo4j subgraph is unavailable") from exc
+
+
+@router.get("/user/{user_id}/cases")
+async def get_user_cases(user_id: int):
+    """获取某用户所有案件的图谱概览。"""
+    if user_id <= 0:
+        raise HTTPException(status_code=400, detail="invalid user_id")
+
+    cases = await get_user_cases_graph_overview(user_id)
+    return {
+        "user_id": user_id,
+        "cases": cases,
+        "total": len(cases),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/user/{user_id}/cross-case-entities")
+async def get_user_cross_case_entities(user_id: int):
+    """发现用户跨案件的共享实体（同一公司/人出现在多个案件中）。"""
+    if user_id <= 0:
+        raise HTTPException(status_code=400, detail="invalid user_id")
+
+    entities = await get_cross_case_entities(user_id)
+    return {
+        "user_id": user_id,
+        "shared_entities": entities,
+        "total": len(entities),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }

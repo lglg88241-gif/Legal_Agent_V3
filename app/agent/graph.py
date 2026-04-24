@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 from langgraph.graph import END, StateGraph
 from typing_extensions import TypedDict
@@ -22,6 +22,7 @@ class AgentState(TypedDict, total=False):
     case_summary: str
     graph_context: str
     graph_memory: str
+    historical_reference: str
     current_query: str
     routed_query: str
     route_intent: str
@@ -37,12 +38,16 @@ class AgentState(TypedDict, total=False):
     reflection_analysis: str
     clarification_questions: list[str]
     graph_focus: str
+    saved_case_state: dict[str, Any] | None
+    _detected_monthly_wage: Optional[float]
 
 
 def route_after_tool_router(state: AgentState) -> str:
     route_intent = str(state.get("route_intent", "GENERAL_CONSULT")).upper()
     if route_intent == "GREETING":
         return "greeting"
+    if route_intent == "OUT_OF_SCOPE":
+        return "out_of_scope"
     if route_intent == "CASE_UPDATE":
         return "fact_updater"
     return "vector_researcher"
@@ -76,6 +81,7 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
     graph = StateGraph(AgentState)
     graph.add_node("tool_router", agent.tool_router_node)
     graph.add_node("greeting", agent.greeting_node)
+    graph.add_node("out_of_scope", agent.out_of_scope_node)
     graph.add_node("fact_updater", agent.fact_updater_node)
     graph.add_node("vector_researcher", agent.vector_researcher_node)
     graph.add_node("reflector", agent.reflector_node)
@@ -89,11 +95,13 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
         route_after_tool_router,
         {
             "greeting": "greeting",
+            "out_of_scope": "out_of_scope",
             "fact_updater": "fact_updater",
             "vector_researcher": "vector_researcher",
         },
     )
     graph.add_edge("greeting", END)
+    graph.add_edge("out_of_scope", END)
     graph.add_edge("fact_updater", "vector_researcher")
     graph.add_conditional_edges(
         "vector_researcher",
@@ -116,4 +124,11 @@ def build_legal_agent_graph(agent: LegalGraphAgent):
     graph.add_edge("clarifier", END)
     graph.add_edge("legal_advisor", END)
 
-    return graph.compile()
+    try:
+        from app.memory.redis_mgr import memory_mgr
+    except Exception:
+        return graph.compile()
+    try:
+        return graph.compile(checkpointer=memory_mgr)
+    except TypeError:
+        return graph.compile()

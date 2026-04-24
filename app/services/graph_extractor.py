@@ -14,6 +14,13 @@ from neo4j import GraphDatabase
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
+from app.agent.prompts.extractor import (  # noqa: E402
+    GRAPH_EXTRACTION_PROMPT,
+    INCREMENTAL_EXTRACTION_PROMPT,
+    SEMANTIC_GC_PROMPT,
+    BELIEF_REVISION_PROMPT,
+    BELIEF_REVISION_PROMPT_V2,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,334 +66,6 @@ class GraphGCOutput(BaseModel):
     obsolete_edges: list[GraphTriple] = Field(default_factory=list)
 
 
-INCREMENTAL_EXTRACTION_PROMPT = """
-你是一个案情图谱增量抽取器。
-这是用户最新的补充口供：{user_input}
-
-请只提取这段新口供里新增的实体和关系，输出 ADD 动作列表。
-要求：
-1. 只输出本轮新增事实，不要重复改写旧事实。
-2. 绝对不要输出 UPDATE 或 DELETE。
-3. 实体要做命名对齐，例如“我/本人/用户”统一为“当事人”。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要解释。
-
-输出格式：
-{
-  "actions": [
-    {
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    }
-  ]
-}
-""".strip()
-
-SEMANTIC_GC_PROMPT = """
-你是一个图谱对齐引擎。
-这是当前案卷的唯一确凿事实：{case_summary}
-这是图谱数据库中现有的节点集合：{current_nodes}
-
-请交叉对比，找出图谱中那些已经与最新事实冲突、被推翻、或者根本不存在于摘要中的幽灵节点。
-要求：
-1. 只返回确实应该被剔除的节点名称。
-2. 输出的节点名必须逐字复制自给定节点集合，禁止改写、扩写或杜撰。
-3. 如果节点虽然暂时没有在摘要中展开，但仍与现有事实一致，则不要删除。
-4. 只能输出合法 JSON，不要解释。
-
-输出格式：
-{"obsolete_nodes": ["旧公司名", "错误金额"]}
-
-如果完全一致，返回：
-{"obsolete_nodes": []}
-""".strip()
-
-GRAPH_EXTRACTION_PROMPT = """
-你是一个法律案件动态图谱抽取器。
-请从输入文本中提取已经明确出现的事实三元组，并做实体对齐。
-
-规则：
-1. 只提取已经明确表达的事实，禁止臆测。
-2. 同一事物必须统一命名，例如“我/本人/用户”统一为“当事人”。
-3. 每个实体都必须给出 category，且只能是：主体、客体、事件、后果。
-4. 只返回 JSON 数组，不要输出任何解释。
-
-返回格式：
-[
-  {
-    "source": "实体A",
-    "source_category": "主体",
-    "relation": "关系",
-    "target": "实体B",
-    "target_category": "事件"
-  }
-]
-""".strip()
-
-BELIEF_REVISION_PROMPT = """
-你是一个严谨的案情图谱管理员。
-这是当前图谱状态：{current_graph}
-这是用户的最新输入：{user_input}
-
-请判断新输入是对案情的补充，还是对之前错误信息的修正/推翻。
-请严格输出 JSON，动作类型只能是以下三种之一：
-ADD
-UPDATE
-DELETE
-
-要求：
-1. 如果是新增事实，输出 ADD。
-2. 如果是修正已有事实，输出 UPDATE，并明确 old_target 与 new_target。
-3. 如果是推翻错误事实，输出 DELETE。
-4. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”。
-5. 所有 category 只能是：主体、客体、事件、后果。
-6. 只输出 JSON，不要输出解释性文字。
-
-输出格式：
-{
-  "actions": [
-    {
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    },
-    {
-      "action": "UPDATE",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "过马路状态",
-      "old_target": "闯红灯",
-      "new_target": "绿灯通行",
-      "target_category": "事件"
-    },
-    {
-      "action": "DELETE",
-      "source": "当事人",
-      "relation": "存在事实",
-      "target": "错误事实"
-    }
-  ]
-}
-""".strip()
-
-BELIEF_REVISION_PROMPT_V2 = """
-你是一个图谱数据库的底层操作员。你的任务是根据用户的输入，输出对图谱的 CRUD 操作 JSON。
-【当前已有节点】：{existing_nodes}
-【当前已有关系】：{current_graph}
-【用户最新输入】：{user_input}
-
-⚠️ 极度危险警告：绝对不要把用户的“否认、要求删除、记错了、改成、不是A而是B”这类元指令当作实体或关系写入图谱。它们是执行指令，不是事实本身。遇到这类表达，你必须直接输出 DELETE 或 UPDATE。
-
-【硬性规则】
-1. 你必须先做冲突检测。只要新输入推翻、纠正、覆盖了旧事实，就绝对不能只输出 ADD。
-2. 当输出 DELETE、UPDATE 时，若涉及已有节点，必须从 existing_nodes 中逐字复制节点名，禁止改写。
-3. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”，“对方车/对方车辆”统一为“肇事车辆”。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要输出解释文字。
-
-【正确操作示例】
-场景 1 - 纠错反转：
-现有图谱包含：[当事人]-(砸伤)->[车间机器]。用户说：“我没在车间被砸，是路上被车撞了。”
-输出：
-{"actions": [{"action": "DELETE", "target_name": "车间机器"}, {"action": "DELETE", "target_name": "砸伤"}, {"action": "ADD", "source": "当事人", "source_category": "主体", "relation": "撞伤", "target": "肇事车辆", "target_category": "客体"}]}
-
-场景 2 - 明确要求删除：
-现有图谱包含：[机器]。用户说：“把跟机器相关的事情删掉。”
-输出：
-{"actions": [{"action": "DELETE", "target_name": "机器"}]}
-
-【绝对禁止的错误做法】
-将“要求删除”“否认”“记错了”这些指令写成关系，比如：
-[当事人]-(要求删除)->[机器]
-这是严重错误。
-
-【输出格式】
-{
-  "actions": [
-    {
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    },
-    {
-      "action": "UPDATE",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "过马路状态",
-      "old_target": "闯红灯",
-      "new_target": "绿灯通行",
-      "target_category": "事件"
-    },
-    {
-      "action": "DELETE",
-      "target_name": "机器"
-    }
-  ]
-}
-""".strip()
-
-INCREMENTAL_EXTRACTION_PROMPT = """
-你是一个案情图谱增量抽取器。
-这是用户最新的补充口供：{user_input}
-
-请只提取这段新口供里新增的实体和关系，输出 ADD 动作列表。
-要求：
-1. 只输出本轮新增事实，不要重复改写旧事实。
-2. 绝对不要输出 UPDATE 或 DELETE。
-3. 实体要做命名对齐，例如“我/本人/用户”统一为“当事人”。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要解释。
-
-输出格式：
-{{
-  "actions": [
-    {{
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    }}
-  ]
-}}
-""".strip()
-
-SEMANTIC_GC_PROMPT = """
-你是一个严谨的图谱对齐与清理引擎。
-这是当前案卷的唯一确凿事实：{case_summary}
-这是图谱数据库中现有的节点集合：{current_nodes}
-这是图谱数据库中现有的关系集合：{current_graph}
-
-你的任务是交叉对比最新事实与当前图谱，识别两类需要清理的脏数据：
-1. 幽灵节点：已经与最新事实冲突、被推翻、或根本不存在于摘要中的节点。
-2. 幽灵关系：两个节点本身依然有效，但它们之间某条旧关系已经被最新事实推翻，例如之前的“主动辞职”现在应改为“被迫离职”。
-
-要求：
-1. obsolete_nodes 只返回确实应该被剔除的节点名称。
-2. obsolete_edges 只返回确实应该被删除的旧关系三元组。
-3. 输出的节点名和关系涉及的 source/target 必须逐字复制自给定节点集合，禁止改写、扩写或杜撰。
-4. 如果两个节点仍然有效，但旧连线已经失真，你必须把这条旧关系提取到 obsolete_edges。
-5. 如果节点或关系仍与现有事实一致，则不要删除。
-6. 只能输出合法 JSON，不要解释。
-
-输出格式：
-{{"obsolete_nodes": ["旧公司名"], "obsolete_edges": [{{"source": "当事人", "relation": "主动辞职", "target": "深圳旺铺"}}]}}
-
-如果完全一致，返回：
-{{"obsolete_nodes": [], "obsolete_edges": []}}
-""".strip()
-
-BELIEF_REVISION_PROMPT = """
-你是一个严谨的案情图谱管理员。这是当前图谱状态：{current_graph}
-这是用户的最新输入：{user_input}
-
-请判断新输入是对案情的补充，还是对之前错误信息的修正/推翻。请严格输出 JSON，动作类型只能是以下三种之一：ADD、UPDATE、DELETE。
-
-要求：
-1. 如果是新增事实，输出 ADD。
-2. 如果是修正已有事实，输出 UPDATE，并明确 old_target 与 new_target。
-3. 如果是推翻错误事实，输出 DELETE。
-4. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”。
-5. 所有 category 只能是：主体、客体、事件、后果。
-6. 只输出 JSON，不要输出解释性文字。
-
-输出格式：
-{{
-  "actions": [
-    {{
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    }},
-    {{
-      "action": "UPDATE",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "过马路状态",
-      "old_target": "闯红灯",
-      "new_target": "绿灯通行",
-      "target_category": "事件"
-    }},
-    {{
-      "action": "DELETE",
-      "source": "当事人",
-      "relation": "存在事实",
-      "target": "错误事实"
-    }}
-  ]
-}}
-""".strip()
-
-BELIEF_REVISION_PROMPT_V2 = """
-你是一个图谱数据库的底层操作员。你的任务是根据用户的输入，输出对图谱的 CRUD 操作 JSON。
-【当前已有节点】：{existing_nodes}
-【当前已有关系】：{current_graph}
-【用户最新输入】：{user_input}
-
-极度危险警告：绝对不要把用户的“否认、要求删除、记错了、改成、不是A而是B”这类元指令当作实体或关系写入图谱。它们是执行指令，不是事实本身。遇到这类表达，你必须直接输出 DELETE 或 UPDATE。
-
-【硬性规则】
-1. 你必须先做冲突检测。只要新输入推翻、纠正、覆盖了旧事实，就绝对不能只输出 ADD。
-2. 当输出 DELETE、UPDATE 时，若涉及已有节点，必须从 existing_nodes 中逐字复制节点名，禁止改写。
-3. 所有实体都要做命名对齐，例如“我/本人/用户”统一为“当事人”，“对方车/对方车辆”统一为“肇事车辆”。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要输出解释文字。
-
-【正确操作示例】
-场景 1 - 纠错反转：
-现有图谱包含：[当事人]-(砸伤)->[车间机器]。用户说：“我没在车间被砸，是路上被车撞了。”
-输出：{{"actions": [{{"action": "DELETE", "target_name": "车间机器"}}, {{"action": "DELETE", "target_name": "砸伤"}}, {{"action": "ADD", "source": "当事人", "source_category": "主体", "relation": "撞伤", "target": "肇事车辆", "target_category": "客体"}}]}}
-
-场景 2 - 明确要求删除：
-现有图谱包含：[机器]。用户说：“把跟机器相关的事情删掉。”
-输出：{{"actions": [{{"action": "DELETE", "target_name": "机器"}}]}}
-
-【绝对禁止的错误做法】
-将“要求删除”“否认”“记错了”这些指令写成关系，比如：[当事人]-(要求删除)->[机器]
-这是严重错误。
-
-【输出格式】
-{{
-  "actions": [
-    {{
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    }},
-    {{
-      "action": "UPDATE",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "过马路状态",
-      "old_target": "闯红灯",
-      "new_target": "绿灯通行",
-      "target_category": "事件"
-    }},
-    {{
-      "action": "DELETE",
-      "target_name": "机器"
-    }}
-  ]
-}}
-""".strip()
-
 FETCH_FACTS_QUERY = """
 MATCH (source:DynamicCaseEntity {conversation_id: $conversation_id})-[rel:CASE_RELATION {conversation_id: $conversation_id}]->(target:DynamicCaseEntity {conversation_id: $conversation_id})
 RETURN source.name AS source_name,
@@ -403,6 +82,30 @@ MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
 RETURN n.name AS name
 ORDER BY name
 LIMIT 500
+"""
+
+FETCH_USER_CASES_QUERY = """
+MATCH (n:DynamicCaseEntity {user_id: $user_id})
+WITH DISTINCT n.conversation_id AS case_id
+MATCH (a:DynamicCaseEntity {user_id: $user_id, conversation_id: case_id})-[r:CASE_RELATION]-(b:DynamicCaseEntity {user_id: $user_id, conversation_id: case_id})
+RETURN case_id,
+       collect(DISTINCT a.name) AS source_names,
+       collect(DISTINCT b.name) AS target_names,
+       count(DISTINCT r) AS relation_count
+ORDER BY case_id DESC
+LIMIT 20
+"""
+
+FETCH_CROSS_CASE_ENTITIES_QUERY = """
+MATCH (n:DynamicCaseEntity {user_id: $user_id})
+WHERE n.name IS NOT NULL
+WITH n.name AS shared_entity,
+     n.category AS entity_category,
+     collect(DISTINCT n.conversation_id) AS cases
+WHERE size(cases) > 1
+RETURN shared_entity, entity_category, cases
+ORDER BY size(cases) DESC
+LIMIT 20
 """
 
 DELETE_GRAPH_QUERY = """
@@ -664,19 +367,23 @@ def _cleanup_orphans(session, conversation_id: int) -> None:
     ).consume()
 
 
-def _merge_fact(session, conversation_id: int, fact: dict[str, str]) -> None:
+def _merge_fact(session, conversation_id: int, fact: dict[str, str], user_id: int = 0) -> None:
     session.run(
         """
         MERGE (source:DynamicCaseEntity {conversation_id: $conversation_id, name: $source})
-        ON CREATE SET source.created_at = datetime()
+        ON CREATE SET source.created_at = datetime(),
+                      source.user_id = $user_id
         SET source.updated_at = datetime(),
             source.category = $source_category,
-            source.node_type = $source_category
+            source.node_type = $source_category,
+            source.user_id = $user_id
         MERGE (target:DynamicCaseEntity {conversation_id: $conversation_id, name: $target})
-        ON CREATE SET target.created_at = datetime()
+        ON CREATE SET target.created_at = datetime(),
+                      target.user_id = $user_id
         SET target.updated_at = datetime(),
             target.category = $target_category,
-            target.node_type = $target_category
+            target.node_type = $target_category,
+            target.user_id = $user_id
         MERGE (source)-[rel:CASE_RELATION {
             conversation_id: $conversation_id,
             relation: $relation,
@@ -684,10 +391,12 @@ def _merge_fact(session, conversation_id: int, fact: dict[str, str]) -> None:
             target_name: $target
         }]->(target)
         ON CREATE SET rel.created_at = datetime()
-        SET rel.updated_at = datetime()
+        SET rel.updated_at = datetime(),
+            rel.user_id = $user_id
         """,
         {
             "conversation_id": conversation_id,
+            "user_id": user_id,
             "source": fact["source"],
             "source_category": fact["source_category"],
             "relation": fact["relation"],
@@ -744,7 +453,11 @@ def _delete_node(session, conversation_id: int, target_name: str) -> None:
     ).consume()
 
 
-def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, str]]) -> dict[str, Any]:
+def _execute_graph_actions_sync(
+    conversation_id: int,
+    actions: list[dict[str, str]],
+    user_id: int = 0,
+) -> dict[str, Any]:
     driver = _build_driver()
     applied = 0
 
@@ -763,6 +476,7 @@ def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, st
                             "target": action["target"],
                             "target_category": action["target_category"],
                         },
+                        user_id=user_id,
                     )
                     applied += 1
                 elif action_type == "UPDATE":
@@ -783,6 +497,7 @@ def _execute_graph_actions_sync(conversation_id: int, actions: list[dict[str, st
                             "target": action["target"],
                             "target_category": action["target_category"],
                         },
+                        user_id=user_id,
                     )
                     applied += 1
                 elif action_type == "DELETE":
@@ -857,6 +572,28 @@ def _fetch_case_graph_node_names_sync(conversation_id: int) -> list[str]:
         seen.add(name)
         names.append(name)
     return names
+
+
+def _fetch_user_cases_sync(user_id: int) -> list[dict[str, Any]]:
+    """获取某用户所有案件的图谱概览。"""
+    driver = _build_driver()
+    try:
+        with driver.session() as session:
+            records = session.run(FETCH_USER_CASES_QUERY, {"user_id": user_id}).data()
+    finally:
+        driver.close()
+    return records
+
+
+def _fetch_cross_case_entities_sync(user_id: int) -> list[dict[str, Any]]:
+    """发现跨案件共享实体。"""
+    driver = _build_driver()
+    try:
+        with driver.session() as session:
+            records = session.run(FETCH_CROSS_CASE_ENTITIES_QUERY, {"user_id": user_id}).data()
+    finally:
+        driver.close()
+    return records
 
 
 def _delete_obsolete_nodes_sync(conversation_id: int, obsolete_nodes: list[str]) -> int:
@@ -939,6 +676,28 @@ async def get_case_graph_node_names(conversation_id: int) -> list[str]:
         return await asyncio.to_thread(_fetch_case_graph_node_names_sync, conversation_id)
     except Exception as exc:
         logger.warning("Failed to load case graph node names for conversation %s: %s", conversation_id, exc)
+        return []
+
+
+async def get_user_cases_graph_overview(user_id: int) -> list[dict[str, Any]]:
+    """获取用户所有案件的图谱概览（异步）。"""
+    if not user_id:
+        return []
+    try:
+        return await asyncio.to_thread(_fetch_user_cases_sync, user_id)
+    except Exception as exc:
+        logger.warning("Failed to load user cases graph for user %s: %s", user_id, exc)
+        return []
+
+
+async def get_cross_case_entities(user_id: int) -> list[dict[str, Any]]:
+    """发现用户跨案件的共享实体（异步）。"""
+    if not user_id:
+        return []
+    try:
+        return await asyncio.to_thread(_fetch_cross_case_entities_sync, user_id)
+    except Exception as exc:
+        logger.warning("Failed to find cross-case entities for user %s: %s", user_id, exc)
         return []
 
 
@@ -1064,7 +823,11 @@ async def plan_graph_gc(case_summary: str, current_nodes: list[str], current_gra
     return {"obsolete_nodes": [], "obsolete_edges": []}
 
 
-async def execute_graph_actions(conversation_id: int, actions: list[dict[str, str]]) -> dict[str, Any]:
+async def execute_graph_actions(
+    conversation_id: int,
+    actions: list[dict[str, str]],
+    user_id: int = 0,
+) -> dict[str, Any]:
     if not actions:
         return {
             "conversation_id": conversation_id,
@@ -1073,7 +836,7 @@ async def execute_graph_actions(conversation_id: int, actions: list[dict[str, st
         }
 
     try:
-        return await asyncio.to_thread(_execute_graph_actions_sync, conversation_id, actions)
+        return await asyncio.to_thread(_execute_graph_actions_sync, conversation_id, actions, user_id)
     except Exception as exc:
         logger.warning("Graph action execution failed for conversation %s: %s", conversation_id, exc)
         return {
@@ -1084,7 +847,7 @@ async def execute_graph_actions(conversation_id: int, actions: list[dict[str, st
         }
 
 
-async def upsert_case_graph(conversation_id: int, triples: list[dict[str, str]]) -> int:
+async def upsert_case_graph(conversation_id: int, triples: list[dict[str, str]], user_id: int = 0) -> int:
     add_actions = [
         {
             "action": "ADD",
@@ -1097,18 +860,23 @@ async def upsert_case_graph(conversation_id: int, triples: list[dict[str, str]])
         }
         for triple in triples
     ]
-    result = await execute_graph_actions(conversation_id, add_actions)
+    result = await execute_graph_actions(conversation_id, add_actions, user_id=user_id)
     return int(result.get("actions_applied", 0))
 
 
-async def sync_case_graph_from_history(conversation_id: int, chat_history: str) -> int:
+async def sync_case_graph_from_history(conversation_id: int, chat_history: str, user_id: int = 0) -> int:
     triples = await extract_case_triples(chat_history)
     if not triples:
         return 0
-    return await upsert_case_graph(conversation_id, triples)
+    return await upsert_case_graph(conversation_id, triples, user_id=user_id)
 
 
-async def refresh_case_graph(conversation_id: int, user_input: str, case_summary: str = "") -> dict[str, Any]:
+async def refresh_case_graph(
+    conversation_id: int,
+    user_input: str,
+    case_summary: str = "",
+    user_id: int = 0,
+) -> dict[str, Any]:
     add_actions = await extract_incremental_graph_actions(user_input)
 
     if not add_actions:
@@ -1126,7 +894,7 @@ async def refresh_case_graph(conversation_id: int, user_input: str, case_summary
             for triple in triples
         ]
 
-    add_result = await execute_graph_actions(conversation_id, add_actions)
+    add_result = await execute_graph_actions(conversation_id, add_actions, user_id=user_id)
     current_nodes = await get_case_graph_node_names(conversation_id)
     current_graph = await format_current_graph_state(conversation_id)
     gc_result = await plan_graph_gc(case_summary, current_nodes, current_graph)
@@ -1236,157 +1004,3 @@ async def delete_case_graph(conversation_id: int) -> None:
         logger.warning("Failed to delete case graph for conversation %s: %s", conversation_id, exc)
 
 
-INCREMENTAL_EXTRACTION_PROMPT = """
-你是案件图谱增量抽取器。
-这是用户最新补充的口供：{user_input}
-
-请只提取这段新口供里新增的实体和关系，并输出 ADD 动作列表。
-要求：
-1. 只输出本轮新增事实，不要重复改写旧事实。
-2. 绝对不要输出 UPDATE 或 DELETE。
-3. 实体要做命名对齐，例如"我/本人/用户"统一为"当事人"。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要解释。
-
-输出格式：
-{{
-  "actions": [
-    {{
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    }}
-  ]
-}}
-""".strip()
-
-
-SEMANTIC_GC_PROMPT = """
-你是严谨的图谱对齐与清理引擎。
-这是当前案卷的唯一确凿事实：{case_summary}
-这是图谱数据库中现有的节点集合：{current_nodes}
-这是图谱数据库中现有的关系集合：{current_graph}
-
-你的任务是交叉比对最新事实与当前图谱，识别两类需要清理的脏数据：
-1. 幽灵节点：已经与最新事实冲突、被推翻，或根本不存在于摘要中的节点。
-2. 幽灵关系：两个节点本身仍然有效，但它们之间某条旧关系已经被最新事实推翻。
-
-要求：
-1. obsolete_nodes 只返回确实应该被删除的节点名称。
-2. obsolete_edges 只返回确实应该被删除的旧关系三元组。
-3. source 和 target 必须逐字复制自给定节点集合，禁止改写或模糊扩展。
-4. 如果节点或关系仍与现有事实一致，则不要删除。
-5. 只能输出合法 JSON，不要解释。
-
-输出格式：
-{{"obsolete_nodes": ["旧公司名"], "obsolete_edges": [{{"source": "当事人", "relation": "主动辞职", "target": "原公司"}}]}}
-
-如果完全一致，返回：
-{{"obsolete_nodes": [], "obsolete_edges": []}}
-""".strip()
-
-
-BELIEF_REVISION_PROMPT = """
-你是严谨的案情图谱管理员。
-这是当前图谱状态：{current_graph}
-这是用户的最新输入：{user_input}
-
-请判断新输入是对案情的补充，还是对之前错误信息的修正或推翻，并严格输出 JSON。
-动作类型只能是 ADD、UPDATE、DELETE 三者之一。
-
-要求：
-1. 如果是新增事实，输出 ADD。
-2. 如果是修正已有事实，输出 UPDATE，并明确 old_target 与 new_target。
-3. 如果是推翻错误事实，输出 DELETE。
-4. 实体要做命名对齐，例如"我/本人/用户"统一为"当事人"。
-5. category 只能是：主体、客体、事件、后果。
-6. 只能输出 JSON，不要输出解释文字。
-
-输出格式：
-{{
-  "actions": [
-    {{
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    }},
-    {{
-      "action": "UPDATE",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "过错状态",
-      "old_target": "闯红灯",
-      "new_target": "绿灯通行",
-      "target_category": "事件"
-    }},
-    {{
-      "action": "DELETE",
-      "source": "当事人",
-      "relation": "存在事实",
-      "target": "错误事实"
-    }}
-  ]
-}}
-""".strip()
-
-
-BELIEF_REVISION_PROMPT_V2 = """
-你是图谱数据库的底层操作员。你的任务是根据用户输入，输出对图谱的 CRUD 操作 JSON。
-【当前已有节点】：{existing_nodes}
-【当前已有关系】：{current_graph}
-【用户最新输入】：{user_input}
-
-危险提醒：
-不要把"否认""要求删除""记错了""改成""不是 A 而是 B"这类元指令写进图谱。
-遇到这类输入，应直接输出 DELETE 或 UPDATE。
-
-规则：
-1. 只要新输入推翻、纠正或覆盖了旧事实，就不能只输出 ADD。
-2. 输出 DELETE 或 UPDATE 时，若涉及已有节点，节点名必须逐字复制自 existing_nodes。
-3. 实体要做命名对齐，例如"我/本人/用户"统一为"当事人"。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要解释。
-
-正确示例 1：
-现有图谱包含：[当事人]-(砸伤)->[车间机器]。用户说："我没在车间被砸，是路上被车撞了。"
-输出：
-{{"actions": [{{"action": "DELETE", "target_name": "车间机器"}}, {{"action": "DELETE", "target_name": "砸伤"}}, {{"action": "ADD", "source": "当事人", "source_category": "主体", "relation": "撞伤", "target": "肇事车辆", "target_category": "客体"}}]}}
-
-正确示例 2：
-现有图谱包含：[机器]。用户说："把跟机器相关的事情删掉。"
-输出：
-{{"actions": [{{"action": "DELETE", "target_name": "机器"}}]}}
-
-输出格式：
-{{
-  "actions": [
-    {{
-      "action": "ADD",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "主张",
-      "target": "赔偿",
-      "target_category": "后果"
-    }},
-    {{
-      "action": "UPDATE",
-      "source": "当事人",
-      "source_category": "主体",
-      "relation": "过错状态",
-      "old_target": "闯红灯",
-      "new_target": "绿灯通行",
-      "target_category": "事件"
-    }},
-    {{
-      "action": "DELETE",
-      "target_name": "机器"
-    }}
-  ]
-}}
-""".strip()

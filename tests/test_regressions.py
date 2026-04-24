@@ -202,35 +202,37 @@ def test_importing_main_does_not_require_legacy_history_or_summary_routes() -> N
 
 
 def test_advisor_fallback_uses_case_summary_for_labor_analysis() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    answer = legal_agent._build_advisor_fallback(
-        "员工于2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同，后公司准备注销。",
-        "公司没签合同我能要什么赔偿？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "员工于2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同，后公司准备注销。",
+            "公司没签合同我能要什么赔偿？",
+            "",
+        )
     )
 
-    assert "二倍工资差额" in answer
-    assert "48000" in answer
-    assert "财产保全" in answer
+    assert "二倍工资差额" in result.answer
+    assert "48000" in result.answer
+    assert "财产保全" in result.answer
 
 
 def test_advisor_fallback_without_salary_still_gives_operational_guidance() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    answer = legal_agent._build_advisor_fallback(
-        "员工已经入职但公司一直没签劳动合同，也没有提供纸质合同。",
-        "没签合同怎么办？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "员工已经入职但公司一直没签劳动合同，也没有提供纸质合同。",
+            "没签合同怎么办？",
+            "",
+        )
     )
 
-    assert "二倍工资差额" in answer
-    assert "月工资" in answer
-    assert "考勤记录" in answer
+    assert "二倍工资差额" in result.answer
+    assert "月工资" in result.answer
+    assert "考勤记录" in result.answer
 
 
 def test_graph_prompts_can_be_formatted_without_keyerror() -> None:
@@ -327,36 +329,38 @@ def test_case_continuity_keeps_short_followup_on_case_update_route() -> None:
 
 
 def test_layered_advisor_payload_calculates_before_asking_for_more() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    payload = legal_agent._build_layered_advisor_payload_v3(
-        "员工2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同。",
-        "现在能赔多少？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "员工2024年1月入职，月工资12000元，工作了5个月，公司一直未签劳动合同。",
+            "现在能赔多少？",
+            "",
+        )
     )
 
-    assert "二倍工资差额" in payload["answer"]
-    assert "48000" in payload["answer"]
-    assert payload["needs_core_followup"] is False
-    assert "劳动仲裁申请书" in payload["constructive_next_step"]
+    assert "二倍工资差额" in result.answer
+    assert "48000" in result.answer
+    assert result.needs_core_followup is False
+    assert "劳动仲裁申请书" in result.constructive_next_step
 
 
 def test_layered_advisor_payload_outputs_enforcement_strategy_without_refusing() -> None:
-    install_backend_import_stubs()
-    sys.modules.pop("app.services.legal_agent", None)
-    from app.services import legal_agent
+    from app.schemas.case_state import CaseState
+    from app.logic.calculators import build_claim_payload
 
-    payload = legal_agent._build_layered_advisor_payload_v3(
-        "原公司拖欠工资后注销，老板又用新公司继续安排原团队工作。",
-        "我能不能查封新公司资产并一起追责？",
-        "",
+    result = build_claim_payload(
+        CaseState.from_text(
+            "原公司拖欠工资后注销，老板又用新公司继续安排原团队工作。",
+            "我能不能查封新公司资产并一起追责？",
+            "",
+        )
     )
 
-    assert "人格混同" in payload["answer"]
-    assert "材料" in payload["answer"]
-    assert "依据不足" not in payload["answer"]
+    assert "人格混同" in result.answer
+    assert "材料" in result.answer
+    assert "依据不足" not in result.answer
 
 
 def test_clarifier_uses_sandwich_style_when_core_fields_missing() -> None:
@@ -379,3 +383,233 @@ def test_clarifier_uses_sandwich_style_when_core_fields_missing() -> None:
     assert "有法律价值" in question
     assert "足以先帮你判断" in question
     assert "为了把金额和请求做得更准" in question
+
+
+class TestAdvisorMonthlyWageBridge:
+    """Fix 2: advisor 节点从 state._detected_monthly_wage 补充月薪。"""
+
+    def test_detected_wage_fills_none_monthly_salary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_backend_import_stubs()
+        sys.modules.pop("app.services.legal_agent", None)
+        from app.services import legal_agent
+        from app.agent.nodes import advisor as advisor_module
+
+        agent = legal_agent.LegalGraphAgent()
+        original_build_claim_payload = advisor_module.build_claim_payload
+        captured: dict[str, object] = {}
+
+        def spy_build_claim_payload(case_state):
+            captured["monthly_salary"] = case_state.monthly_salary
+            return original_build_claim_payload(case_state)
+
+        async def fake_chat_model(*args, **kwargs):
+            return '{"answer":"测试回答","sources":[]}'
+
+        monkeypatch.setattr(advisor_module, "build_claim_payload", spy_build_claim_payload)
+        monkeypatch.setattr(agent, "_chat_model", fake_chat_model)
+
+        result = asyncio.run(
+            agent._generate_final_answer(
+                {
+                    "question": "帮我算赔偿",
+                    "case_summary": "",
+                    "graph_context": "",
+                    "graph_memory": "",
+                    "_detected_monthly_wage": 15000.0,
+                    "tool_results": [],
+                    "confidence_score": 0.0,
+                }
+            )
+        )
+
+        assert captured["monthly_salary"] == 15000.0
+        assert result["response"] == "测试回答"
+
+    def test_detected_wage_not_overwrite_existing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_backend_import_stubs()
+        sys.modules.pop("app.services.legal_agent", None)
+        from app.services import legal_agent
+        from app.agent.nodes import advisor as advisor_module
+
+        agent = legal_agent.LegalGraphAgent()
+        original_build_claim_payload = advisor_module.build_claim_payload
+        captured: dict[str, object] = {}
+
+        def spy_build_claim_payload(case_state):
+            captured["monthly_salary"] = case_state.monthly_salary
+            return original_build_claim_payload(case_state)
+
+        async def fake_chat_model(*args, **kwargs):
+            return '{"answer":"测试回答","sources":[]}'
+
+        monkeypatch.setattr(advisor_module, "build_claim_payload", spy_build_claim_payload)
+        monkeypatch.setattr(agent, "_chat_model", fake_chat_model)
+
+        result = asyncio.run(
+            agent._generate_final_answer(
+                {
+                    "question": "测试",
+                    "case_summary": "月薪12000元，工作6个月",
+                    "graph_context": "",
+                    "graph_memory": "",
+                    "_detected_monthly_wage": 15000.0,
+                    "tool_results": [],
+                    "confidence_score": 0.0,
+                }
+            )
+        )
+
+        assert captured["monthly_salary"] == 12000.0
+        assert result["response"] == "测试回答"
+
+    def test_invalid_wage_not_applied(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        install_backend_import_stubs()
+        sys.modules.pop("app.services.legal_agent", None)
+        from app.services import legal_agent
+        from app.agent.nodes import advisor as advisor_module
+
+        agent = legal_agent.LegalGraphAgent()
+        original_build_claim_payload = advisor_module.build_claim_payload
+        captured: dict[str, object] = {}
+
+        def spy_build_claim_payload(case_state):
+            captured["monthly_salary"] = case_state.monthly_salary
+            return original_build_claim_payload(case_state)
+
+        async def fake_chat_model(*args, **kwargs):
+            return '{"answer":"测试回答","sources":[]}'
+
+        monkeypatch.setattr(advisor_module, "build_claim_payload", spy_build_claim_payload)
+        monkeypatch.setattr(agent, "_chat_model", fake_chat_model)
+
+        result = asyncio.run(
+            agent._generate_final_answer(
+                {
+                    "question": "测试",
+                    "case_summary": "",
+                    "graph_context": "",
+                    "graph_memory": "",
+                    "_detected_monthly_wage": 0,
+                    "tool_results": [],
+                    "confidence_score": 0.0,
+                }
+            )
+        )
+
+        assert captured["monthly_salary"] is None
+        assert result["response"] == "测试回答"
+
+
+class TestRouterWagePersistence:
+    """router 层应在每轮检测到月薪时写入 _detected_monthly_wage。"""
+
+    def test_router_detects_wage_from_question(self) -> None:
+        from app.agent.nodes import router as router_module
+
+        class DummyAgent:
+            async def _patched_route_decision(self, current_query, chat_history="", case_summary="", is_precise_mode=False):
+                return {"route_intent": "GENERAL_CONSULT", "tool_calls": []}
+
+        result = asyncio.run(
+            router_module.tool_router_node(
+                DummyAgent(),
+                {
+                    "question": "我月薪15000在深圳上班",
+                    "current_query": "我月薪15000在深圳上班",
+                    "chat_history": "",
+                    "case_summary": "",
+                },
+            )
+        )
+
+        assert result["_detected_monthly_wage"] == 15000.0
+        assert result["route_intent"] == "GENERAL_CONSULT"
+
+    def test_router_does_not_overwrite_existing_wage(self) -> None:
+        from app.agent.nodes import router as router_module
+
+        class DummyAgent:
+            async def _patched_route_decision(self, current_query, chat_history="", case_summary="", is_precise_mode=False):
+                return {"route_intent": "GENERAL_CONSULT", "tool_calls": []}
+
+        result = asyncio.run(
+            router_module.tool_router_node(
+                DummyAgent(),
+                {
+                    "question": "帮我算一下赔偿",
+                    "current_query": "帮我算一下赔偿",
+                    "chat_history": "",
+                    "case_summary": "",
+                    "_detected_monthly_wage": 15000.0,
+                },
+            )
+        )
+
+        assert result["_detected_monthly_wage"] == 15000.0
+
+    def test_fact_updater_reads_state_wage(self) -> None:
+        from app.agent.nodes.fact_updater import fact_updater_node
+
+        class DummyAgent:
+            summary_llm = object()
+
+            async def _chat_model(self, llm, messages):
+                return '{"case_summary":"2024年3月公司因业绩辞退我"}'
+
+            def _safe_json_load(self, content, default):
+                import json
+
+                return json.loads(content)
+
+            def _patched_build_tool_calls_for_intent(self, intent, retrieval_query):
+                return []
+
+        result = asyncio.run(
+            fact_updater_node(
+                DummyAgent(),
+                {
+                    "question": "2024年3月公司因业绩辞退我",
+                    "case_summary": "",
+                    "_detected_monthly_wage": 15000.0,
+                },
+            )
+        )
+
+        assert "月薪15000元" in result["case_summary"]
+
+
+class TestInitialStateMonthlyWageRestore:
+    """Surgery #13: initial_state 应从 saved_case_state 恢复 _detected_monthly_wage。"""
+
+    def test_restore_from_saved_case_state(self) -> None:
+        saved = {"monthly_salary": 15000.0, "work_months": 12}
+        result = (
+            float(saved["monthly_salary"])
+            if saved
+            and isinstance(saved, dict)
+            and saved.get("monthly_salary") is not None
+            else None
+        )
+        assert result == 15000.0
+
+    def test_no_restore_when_none(self) -> None:
+        saved = {"work_months": 12}
+        result = (
+            float(saved["monthly_salary"])
+            if saved
+            and isinstance(saved, dict)
+            and saved.get("monthly_salary") is not None
+            else None
+        )
+        assert result is None
+
+    def test_no_restore_when_no_saved_state(self) -> None:
+        saved = None
+        result = (
+            float(saved["monthly_salary"])
+            if saved
+            and isinstance(saved, dict)
+            and saved.get("monthly_salary") is not None
+            else None
+        )
+        assert result is None

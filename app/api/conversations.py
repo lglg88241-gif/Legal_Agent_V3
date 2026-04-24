@@ -15,6 +15,7 @@ from app.services.conversation_store import (
     get_conversation_for_user,
     list_conversation_messages,
     list_user_conversations,
+    search_user_cases,
     serialize_conversation,
     serialize_message,
     update_conversation_title,
@@ -60,6 +61,29 @@ async def get_conversations(
     return {
         "status": "success",
         "conversations": [serialize_conversation(item) for item in conversations],
+    }
+
+
+@router.get("/search")
+async def search_cases(
+    case_type: str | None = None,
+    keyword: str | None = None,
+    limit: int = 10,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Surgery #13: 按案件类型或关键词搜索用户的历史案件。"""
+    await ensure_storage_schema()
+    results = await search_user_cases(
+        db,
+        user_id=current_user.user_id,
+        case_type=case_type,
+        keyword=keyword,
+        limit=min(limit, 50),
+    )
+    return {
+        "status": "success",
+        "cases": [serialize_conversation(conv) for conv in results],
     }
 
 
