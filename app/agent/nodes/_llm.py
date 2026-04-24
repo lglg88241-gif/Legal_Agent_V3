@@ -144,14 +144,17 @@ async def call_openai(
         base_url=llm_router.openai_base_url,
         timeout=60.0,
     )
-    response = await client.chat.completions.create(
-        model=model,
-        messages=self._normalize_chat_messages(messages),
-        temperature=temperature,
-        max_tokens=2048,
-    )
-    content = response.choices[0].message.content if response.choices else ""
-    return content if isinstance(content, str) else str(content or "")
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=self._normalize_chat_messages(messages),
+            temperature=temperature,
+            max_tokens=2048,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return content if isinstance(content, str) else str(content or "")
+    finally:
+        await client.close()
 
 
 async def chat_model(
