@@ -89,6 +89,14 @@
               >
                 {{ conversationModeLabel(session.conversation_mode) }}
               </el-tag>
+              <el-tag
+                v-if="session.dossier_id"
+                size="small"
+                effect="plain"
+                class="dossier-tag"
+              >
+                {{ `案卷 #${session.dossier_id}` }}
+              </el-tag>
               <el-tag size="small" effect="plain" class="type-tag">
                 {{ session.case_type || '未分类' }}
               </el-tag>
@@ -391,6 +399,7 @@ function formatTime(value) {
 }
 
 .session-item.active .type-tag,
+.session-item.active .dossier-tag,
 .session-item.active .mode-tag {
   color: #409eff;
   background: rgba(255, 255, 255, 0.92);
@@ -440,6 +449,7 @@ function formatTime(value) {
 }
 
 .mode-tag,
+.dossier-tag,
 .type-tag {
   flex: 0 0 auto;
 }

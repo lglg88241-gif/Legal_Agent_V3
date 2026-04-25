@@ -23,6 +23,9 @@
       </div>
       <div class="header-right">
         <span class="user-chip">{{ currentUsername }}</span>
+        <el-button text @click="openDossierDrawer">
+          案卷
+        </el-button>
         <el-button
           text
           @click="handleSummary"
@@ -102,7 +105,30 @@
               >
                 {{ currentConversation.case_type }}
               </el-tag>
+              <el-tag
+                v-if="currentConversation.dossier_id"
+                size="small"
+                effect="plain"
+                type="primary"
+              >
+                {{ currentConversationDossierLabel }}
+              </el-tag>
             </div>
+          </div>
+          <div class="conversation-dossier-row">
+            <div class="conversation-dossier-copy">
+              <span class="conversation-dossier-title">当前案卷</span>
+              <span class="conversation-dossier-subtitle">
+                {{
+                  currentConversation.dossier_id
+                    ? `已绑定 ${currentConversationDossierLabel}`
+                    : '当前会话尚未绑定案卷'
+                }}
+              </span>
+            </div>
+            <el-button size="small" plain @click="openDossierDrawer">
+              {{ currentConversation.dossier_id ? '更换案卷' : '绑定案卷' }}
+            </el-button>
           </div>
         </div>
 
@@ -191,6 +217,111 @@
       </el-aside>
     </el-container>
   </el-container>
+
+  <el-drawer
+    v-model="dossierDrawerVisible"
+    title="案卷"
+    size="420px"
+    destroy-on-close
+  >
+    <div class="dossier-drawer">
+      <div class="dossier-toolbar">
+        <div class="dossier-toolbar-copy">
+          <span class="dossier-toolbar-title">案卷管理</span>
+          <span class="dossier-toolbar-subtitle">创建案卷并绑定当前会话</span>
+        </div>
+        <el-button size="small" plain @click="refreshDossiers()" :loading="dossierListLoading">
+          刷新
+        </el-button>
+      </div>
+
+      <div class="dossier-current-card">
+        <div class="dossier-current-title">当前会话</div>
+        <div class="dossier-current-name">
+          {{ currentConversation?.title || '未选择会话' }}
+        </div>
+        <div class="dossier-current-hint">
+          {{
+            currentConversation?.dossier_id
+              ? `已绑定 ${currentConversationDossierLabel}`
+              : '可先创建案卷，再将当前会话绑定到案卷'
+          }}
+        </div>
+      </div>
+
+      <div class="dossier-create-card">
+        <div class="dossier-section-title">新建案卷</div>
+        <el-input
+          v-model="dossierForm.title"
+          maxlength="255"
+          placeholder="案卷标题"
+        />
+        <el-input
+          v-model="dossierForm.case_type"
+          maxlength="100"
+          placeholder="案由 / 类型，例如劳动争议"
+        />
+        <el-input
+          v-model="dossierForm.summary"
+          type="textarea"
+          :rows="3"
+          maxlength="5000"
+          show-word-limit
+          resize="none"
+          placeholder="案卷摘要（可选）"
+        />
+        <el-button type="primary" :loading="dossierSaving" @click="handleCreateDossier">
+          创建案卷
+        </el-button>
+      </div>
+
+      <div class="dossier-list-card">
+        <div class="dossier-section-title">我的案卷</div>
+        <div v-if="dossierListLoading" class="dossier-list-status">正在加载案卷...</div>
+        <el-empty
+          v-else-if="!dossiers.length"
+          description="暂无案卷，可先创建一个"
+          :image-size="64"
+        />
+        <div v-else class="dossier-list">
+          <div
+            v-for="dossier in dossiers"
+            :key="dossier.id"
+            class="dossier-item"
+            :class="{ active: dossier.id === currentConversation?.dossier_id }"
+          >
+            <div class="dossier-item-main">
+              <div class="dossier-item-copy">
+                <div class="dossier-item-title">
+                  {{ dossier.title || `案卷 #${dossier.id}` }}
+                </div>
+                <div class="dossier-item-meta">
+                  <el-tag size="small" effect="plain" :type="dossierStatusTagType(dossier.status)">
+                    {{ dossierStatusLabel(dossier.status) }}
+                  </el-tag>
+                  <span v-if="dossier.case_type">{{ dossier.case_type }}</span>
+                  <span v-else>未分类</span>
+                </div>
+                <div class="dossier-item-summary">
+                  {{ dossier.summary || '暂无案卷摘要' }}
+                </div>
+              </div>
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :disabled="!currentConversationId || dossierBindingId === dossier.id || dossier.id === currentConversation?.dossier_id"
+                :loading="dossierBindingId === dossier.id"
+                @click="handleAttachDossier(dossier)"
+              >
+                {{ dossier.id === currentConversation?.dossier_id ? '已绑定当前会话' : '绑定当前会话' }}
+              </el-button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </el-drawer>
 </template>
 
 <script setup>
@@ -210,14 +341,17 @@ import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import SessionList from './components/SessionList.vue'
 import {
+  attachConversationToDossier,
   batchDeleteConversations,
   clearConversationMessages,
   createConversation,
+  createDossier,
   deleteConversation,
   getConversationGraph,
   getConversationMessages,
   getConversationSummary,
   getConversations,
+  getDossiers,
   getLocalModelStatus,
   searchConversations,
   getSystemStatus,
@@ -249,6 +383,16 @@ const latestGraphRequestId = ref(0)
 const conversationListLoading = ref(false)
 const conversationSearchKeyword = ref('')
 const sessionBatchMode = ref(false)
+const dossiers = ref([])
+const dossierDrawerVisible = ref(false)
+const dossierListLoading = ref(false)
+const dossierSaving = ref(false)
+const dossierBindingId = ref(null)
+const dossierForm = reactive({
+  title: '',
+  case_type: '',
+  summary: '',
+})
 const localModel = reactive({
   enabled: false,
   healthy: false,
@@ -293,6 +437,24 @@ const currentConversationModeLabel = computed(() =>
 const currentConversationModeTagType = computed(() =>
   conversationModeTagType(currentConversation.value?.conversation_mode)
 )
+const currentConversationDossier = computed(() => {
+  const dossierId = currentConversation.value?.dossier_id
+  if (!dossierId) return null
+  return (
+    dossiers.value.find((item) => item.id === dossierId) || {
+      id: dossierId,
+      title: `案卷 #${dossierId}`,
+      case_type: '',
+      summary: '',
+      status: 'active',
+    }
+  )
+})
+const currentConversationDossierLabel = computed(() => {
+  const dossier = currentConversationDossier.value
+  if (!dossier) return ''
+  return dossier.title || `案卷 #${dossier.id}`
+})
 const conversationListEmptyText = computed(() =>
   conversationSearchKeyword.value.trim() ? '没有找到相关会话' : '暂无会话'
 )
@@ -379,6 +541,18 @@ function setConversations(list) {
   conversations.value = sortConversations(list)
 }
 
+function sortDossiers(list) {
+  return [...list].sort((left, right) => {
+    const leftTime = new Date(left.updated_at || left.created_at || 0).getTime()
+    const rightTime = new Date(right.updated_at || right.created_at || 0).getTime()
+    return rightTime - leftTime
+  })
+}
+
+function setDossiers(list) {
+  dossiers.value = sortDossiers(list)
+}
+
 function upsertConversationLocal(conversation) {
   if (!conversation) return
   const next = [...conversations.value]
@@ -400,6 +574,12 @@ function touchConversationLocal(conversationId, patch = {}) {
     ...patch,
     updated_at: new Date().toISOString(),
   })
+}
+
+function resetDossierForm() {
+  dossierForm.title = ''
+  dossierForm.case_type = ''
+  dossierForm.summary = ''
 }
 
 function resetAnalysis() {
@@ -510,6 +690,78 @@ async function refreshConversationList(preferredConversationId = null) {
     }
   } finally {
     conversationListLoading.value = false
+  }
+}
+
+async function refreshDossiers(options = {}) {
+  dossierListLoading.value = true
+  try {
+    const { data } = await getDossiers()
+    setDossiers(Array.isArray(data.dossiers) ? data.dossiers : [])
+  } catch (error) {
+    console.error('Failed to fetch dossiers:', error)
+    if (!options.silent) {
+      ElMessage.error('加载案卷列表失败')
+    }
+  } finally {
+    dossierListLoading.value = false
+  }
+}
+
+async function openDossierDrawer() {
+  dossierDrawerVisible.value = true
+  await refreshDossiers()
+}
+
+async function handleCreateDossier() {
+  const title = String(dossierForm.title || '').trim()
+  if (!title) {
+    ElMessage.warning('请输入案卷标题')
+    return
+  }
+
+  dossierSaving.value = true
+  try {
+    const { data } = await createDossier({
+      title,
+      case_type: String(dossierForm.case_type || '').trim() || undefined,
+      summary: String(dossierForm.summary || '').trim() || undefined,
+    })
+    if (data?.dossier) {
+      setDossiers([data.dossier, ...dossiers.value.filter((item) => item.id !== data.dossier.id)])
+    } else {
+      await refreshDossiers({ silent: true })
+    }
+    resetDossierForm()
+    ElMessage.success('案卷已创建，可在下方绑定当前会话')
+  } catch (error) {
+    console.error('Failed to create dossier:', error)
+    ElMessage.error('创建案卷失败')
+  } finally {
+    dossierSaving.value = false
+  }
+}
+
+async function handleAttachDossier(dossier) {
+  if (!currentConversationId.value || !dossier?.id) return
+
+  dossierBindingId.value = dossier.id
+  try {
+    const { data } = await attachConversationToDossier(currentConversationId.value, dossier.id)
+    if (data?.conversation) {
+      upsertConversationLocal(data.conversation)
+      if (currentConversationId.value === data.conversation.id) {
+        currentSessionId.value = data.conversation.session_id || currentSessionId.value
+      }
+    }
+    await refreshConversationList(currentConversationId.value)
+    await refreshDossiers({ silent: true })
+    ElMessage.success('当前会话已绑定到案卷')
+  } catch (error) {
+    console.error('Failed to attach conversation to dossier:', error)
+    ElMessage.error('绑定案卷失败')
+  } finally {
+    dossierBindingId.value = null
   }
 }
 
@@ -801,6 +1053,28 @@ function conversationModeTagType(mode) {
       return 'danger'
     default:
       return 'info'
+  }
+}
+
+function dossierStatusLabel(status) {
+  switch (String(status || '').toLowerCase()) {
+    case 'archived':
+      return '已归档'
+    case 'closed':
+      return '已关闭'
+    default:
+      return '进行中'
+  }
+}
+
+function dossierStatusTagType(status) {
+  switch (String(status || '').toLowerCase()) {
+    case 'archived':
+      return 'info'
+    case 'closed':
+      return 'danger'
+    default:
+      return 'success'
   }
 }
 
@@ -1570,6 +1844,151 @@ body,
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
+}
+
+.conversation-dossier-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #eef2f7;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.conversation-dossier-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.conversation-dossier-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.conversation-dossier-subtitle {
+  font-size: 12px;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dossier-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dossier-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dossier-toolbar-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dossier-toolbar-title,
+.dossier-section-title,
+.dossier-current-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.dossier-toolbar-subtitle,
+.dossier-current-hint {
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.5;
+}
+
+.dossier-current-card,
+.dossier-create-card,
+.dossier-list-card {
+  padding: 14px;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.dossier-current-name {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.dossier-create-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-list-status {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-item {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.dossier-item.active {
+  border-color: #93c5fd;
+  background: #eff6ff;
+}
+
+.dossier-item-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dossier-item-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dossier-item-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.dossier-item-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.dossier-item-summary {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #6b7280;
 }
 
 .chat-scroll {

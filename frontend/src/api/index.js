@@ -86,6 +86,13 @@ export const getConversationMessages = (conversationId) =>
   api.get(`/conversations/${conversationId}/messages`)
 export const deleteConversation = (conversationId) =>
   api.delete(`/conversations/${conversationId}`)
+export const getDossiers = () => api.get('/dossiers')
+export const createDossier = (payload) => api.post('/dossiers', payload)
+export const updateDossier = (dossierId, payload) =>
+  api.patch(`/dossiers/${dossierId}`, payload)
+export const archiveDossier = (dossierId) => api.delete(`/dossiers/${dossierId}`)
+export const attachConversationToDossier = (conversationId, dossierId) =>
+  api.post(`/conversations/${conversationId}/attach-dossier`, { dossier_id: dossierId })
 export const batchDeleteConversations = (conversationIds) =>
   api.delete('/conversations/batch', {
     data: { conversation_ids: conversationIds },
