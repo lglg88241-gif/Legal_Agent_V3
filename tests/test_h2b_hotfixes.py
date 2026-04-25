@@ -199,7 +199,7 @@ def test_ask_agent_task_skips_case_state_persistence_for_general_consult(
     persisted: dict[str, object] = {}
     graph_calls: list[tuple[int, int, int]] = []
 
-    async def fake_run_task_async(conversation_id: int):
+    async def fake_run_task_async(conversation_id: int, user_id: int):
         return {
             "chat_history": "",
             "case_summary": "\u65e7\u6458\u8981",

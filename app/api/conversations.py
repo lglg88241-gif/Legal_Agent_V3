@@ -39,6 +39,7 @@ router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 class ConversationCreateRequest(BaseModel):
     title: str = Field(default=DEFAULT_CONVERSATION_TITLE, max_length=255)
+    dossier_id: int | None = Field(default=None, gt=0)
 
 
 class ConversationUpdateRequest(BaseModel):
@@ -112,10 +113,16 @@ async def create_conversation(
     db: AsyncSession = Depends(get_db),
 ):
     await ensure_storage_schema()
+    dossier_id = payload.dossier_id if payload else None
+    if dossier_id is not None:
+        dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+        if dossier is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
     conversation = await create_conversation_record(
         db,
         user_id=current_user.user_id,
         title=(payload.title if payload else DEFAULT_CONVERSATION_TITLE),
+        dossier_id=dossier_id,
     )
     await db.commit()
     await db.refresh(conversation)

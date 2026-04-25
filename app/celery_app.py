@@ -14,6 +14,7 @@ from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
     get_message_for_conversation,
+    load_dossier_context_for_conversation,
     load_conversation_persistence_consent,
     list_recent_conversation_messages,
     load_conversation_case_summary,
@@ -73,7 +74,7 @@ def _create_celery_session_factory() -> tuple[Any, async_sessionmaker[AsyncSessi
     return celery_engine, session_factory
 
 
-async def _run_task_async(conversation_id: int) -> dict[str, Any]:
+async def _run_task_async(conversation_id: int, user_id: int) -> dict[str, Any]:
     """
     将原本分散的多个 asyncio.run() 调用合并到单一协程中统一执行。
 
@@ -123,6 +124,13 @@ async def _run_task_async(conversation_id: int) -> dict[str, Any]:
         async with session_factory() as db:
             persistence_consent = await load_conversation_persistence_consent(db, conversation_id)
 
+        async with session_factory() as db:
+            dossier_context = await load_dossier_context_for_conversation(
+                db,
+                user_id,
+                conversation_id,
+            )
+
         graph_memory = await format_graph_memory(conversation_id=conversation_id)
         return {
             "chat_history": chat_history,
@@ -131,6 +139,7 @@ async def _run_task_async(conversation_id: int) -> dict[str, Any]:
             "graph_memory": graph_memory,
             "saved_case_state": saved_case_state,
             "persistence_consent": persistence_consent,
+            "dossier_context": dossier_context,
         }
     finally:
         await celery_engine.dispose()
@@ -282,7 +291,7 @@ def ask_agent_task(
 
         get_redis_saver_for_current_loop()
         # 所有 IO 合并到单一事件循环，避免多次 asyncio.run() 的开销
-        context = asyncio.run(_run_task_async(conversation_id))
+        context = asyncio.run(_run_task_async(conversation_id, user_id))
         chat_history = context["chat_history"]
         case_summary = context["case_summary"]
         graph_memory = context["graph_memory"]
@@ -299,6 +308,7 @@ def ask_agent_task(
                 proactive_graph_mode=proactive_graph_mode,
                 conversation_id=conversation_id,
                 saved_case_state=context.get("saved_case_state"),
+                dossier_context=context.get("dossier_context"),
             )
         )
 

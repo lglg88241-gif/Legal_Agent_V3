@@ -178,10 +178,12 @@ async def create_conversation_record(
     db: AsyncSession,
     user_id: int,
     title: str = DEFAULT_CONVERSATION_TITLE,
+    dossier_id: int | None = None,
 ) -> Conversation:
     now = utcnow()
     conversation = Conversation(
         user_id=user_id,
+        dossier_id=dossier_id,
         session_id=str(uuid4()),
         title=(title or "").strip(),
         conversation_mode=DEFAULT_CONVERSATION_MODE,
@@ -621,6 +623,7 @@ def serialize_dossier_conversation_summary(conversation: Conversation) -> dict[s
             getattr(conversation, "persistence_consent", DEFAULT_PERSISTENCE_CONSENT)
         ),
         "case_type": getattr(conversation, "case_type", None) or "",
+        "case_summary": (getattr(conversation, "case_summary", None) or "").strip(),
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
     }
 
@@ -635,6 +638,29 @@ def serialize_dossier_detail(
         serialize_dossier_conversation_summary(conversation)
         for conversation in conversations
     ]
+    return payload
+
+
+async def load_dossier_context_for_conversation(
+    db: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+) -> dict[str, Any] | None:
+    conversation = await get_conversation_for_user(db, user_id, conversation_id)
+    if conversation is None:
+        return None
+
+    dossier_id = getattr(conversation, "dossier_id", None)
+    if dossier_id is None:
+        return None
+
+    dossier = await get_dossier_for_user(db, user_id, dossier_id)
+    if dossier is None:
+        return None
+
+    conversations = await list_dossier_conversations(db, user_id, dossier.id)
+    payload = serialize_dossier_detail(dossier, conversations)
+    payload["active_conversation_id"] = conversation.id
     return payload
 
 

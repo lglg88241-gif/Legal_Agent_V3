@@ -62,7 +62,7 @@ def _run_ask_agent_task(
     persisted: dict[str, object] = {}
     graph_calls: list[tuple[int, int, int]] = []
 
-    async def fake_run_task_async(conversation_id: int):
+    async def fake_run_task_async(conversation_id: int, user_id: int):
         return {
             "chat_history": "",
             "case_summary": "旧摘要",

@@ -331,6 +331,15 @@
           <el-button
             v-if="selectedDossierId"
             size="small"
+            type="primary"
+            plain
+            @click="handleCreateConversationFromSelectedDossier"
+          >
+            基于此案卷新建会话
+          </el-button>
+          <el-button
+            v-if="selectedDossierId"
+            size="small"
             plain
             @click="loadSelectedDossierDetail(selectedDossierId)"
             :loading="dossierDetailLoading"
@@ -1001,14 +1010,28 @@ async function handleUpdateDossierDetail() {
   }
 }
 
+async function handleCreateConversationFromSelectedDossier() {
+  if (!selectedDossierId.value) return
+  await createNewConversation({ dossierId: selectedDossierId.value })
+}
+
 async function createNewConversation(options = {}) {
   try {
-    const { data } = await createConversation({})
+    const payload = {}
+    if (options.dossierId) {
+      payload.dossier_id = options.dossierId
+    }
+
+    const { data } = await createConversation(payload)
     const conversation = data.conversation
     conversationSearchKeyword.value = ''
     sessionBatchMode.value = false
     upsertConversationLocal(conversation)
     await switchConversation(conversation.id)
+    if (options.dossierId) {
+      await refreshDossiers({ silent: true, preferredDossierId: options.dossierId })
+      await loadSelectedDossierDetail(options.dossierId, { silent: true })
+    }
     if (!options.silent) {
       ElMessage.success('已创建新会话。')
     }

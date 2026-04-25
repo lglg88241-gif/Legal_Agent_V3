@@ -211,6 +211,58 @@ def _format_other_rag_context(other_entries: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_dossier_context_block(dossier_context: dict[str, Any] | None) -> str:
+    if not isinstance(dossier_context, dict):
+        return ""
+
+    title = str(dossier_context.get("title") or "").strip() or "未命名案卷"
+    case_type = str(dossier_context.get("case_type") or "").strip() or "未分类"
+    summary = str(dossier_context.get("summary") or "").strip() or "暂无案卷摘要"
+    status = str(dossier_context.get("status") or "").strip() or "active"
+    conversation_count = int(dossier_context.get("conversation_count") or 0)
+    active_conversation_id = dossier_context.get("active_conversation_id")
+    conversations = dossier_context.get("conversations")
+
+    conversation_lines: list[str] = []
+    if isinstance(conversations, list):
+        for index, item in enumerate(conversations[:5], start=1):
+            if not isinstance(item, dict):
+                continue
+            conversation_id = item.get("id")
+            title_text = str(item.get("title") or "").strip() or f"会话 #{conversation_id or index}"
+            mode = str(item.get("conversation_mode") or "UNKNOWN").strip()
+            consent = str(item.get("persistence_consent") or "unknown").strip()
+            summary_text = str(item.get("case_summary") or "").strip()
+            case_type_text = str(item.get("case_type") or "").strip()
+            markers: list[str] = [f"mode={mode}", f"consent={consent}"]
+            if case_type_text:
+                markers.append(f"case_type={case_type_text}")
+            if conversation_id == active_conversation_id:
+                markers.append("current_conversation=true")
+            line = f"{index}. {title_text} ({', '.join(markers)})"
+            if summary_text:
+                line += f" | 摘要：{summary_text[:120]}"
+            conversation_lines.append(line)
+
+    if not conversation_lines:
+        conversation_lines.append("无已绑定会话摘要")
+
+    return (
+        "<dossier_context>\n"
+        "[案卷上下文]\n"
+        f"标题：{title}\n"
+        f"类型：{case_type}\n"
+        f"摘要：{summary}\n"
+        f"状态：{status}\n"
+        f"绑定会话数量：{conversation_count}\n"
+        "已绑定会话：\n"
+        f"{chr(10).join(conversation_lines)}\n"
+        "使用规则：案卷上下文只能作为背景记忆和事实线索，不能替代检索到的法条原文、案例或其他RAG依据。"
+        "如果案卷上下文与本轮用户输入冲突，优先指出冲突并向用户澄清，不要直接沿用旧案情。\n"
+        "</dossier_context>"
+    )
+
+
 def _build_guard_rag_context(
     laws_block: str,
     cases_block: str,
@@ -433,6 +485,7 @@ def build_advisor_system_prompt(
     laws_block: str = "",
     cases_block: str = "",
     payload_facts: str = "",
+    dossier_context: str = "",
 ) -> str:
     """
     Build the full advisor system prompt.
@@ -488,8 +541,11 @@ def build_advisor_system_prompt(
     cases_block = cases_block or "无"
     rag_context = rag_context or "无"
 
+    dossier_block = dossier_context.strip()
+
     prompt = f"""
 你不是普通的文本精校员，而是一位资深的中国法律咨询律师。请基于下面给定的事实、法条原文和参考案例，给出一段专业、有共情、可落地的回答。
+{dossier_block}
 {correction_block}
 <number_lock>
 【数字锁定 — 最高优先级，任何其他规则均不得推翻此条】
@@ -628,6 +684,8 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
             + f"\n- 已知月薪：{int(_cs_for_payload.monthly_salary)} 元（来自会话上下文）"
         ).strip()
 
+    dossier_context_block = _format_dossier_context_block(state.get("dossier_context"))
+
     advisor_system_prompt = build_advisor_system_prompt(
         question=state["question"],
         case_summary=display_case_summary,
@@ -638,6 +696,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         laws_block=laws_block,
         cases_block=cases_block,
         payload_facts=payload_facts,
+        dossier_context=dossier_context_block,
     )
 
     fallback = {"answer": layered_payload.answer, "sources": []}

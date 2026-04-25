@@ -20,6 +20,7 @@ class AgentState(TypedDict, total=False):
     proactive_graph_mode: bool
     chat_history: str
     case_summary: str
+    dossier_context: dict[str, Any] | None
     graph_context: str
     graph_memory: str
     historical_reference: str

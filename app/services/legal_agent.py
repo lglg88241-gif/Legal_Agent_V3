@@ -218,6 +218,7 @@ class LegalGraphAgent:
         proactive_graph_mode: bool = True,
         conversation_id: int | None = None,
         saved_case_state: dict | None = None,
+        dossier_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         initial_state: AgentState = {
             "user_id": user_id,
@@ -228,6 +229,7 @@ class LegalGraphAgent:
             "proactive_graph_mode": bool(proactive_graph_mode),
             "chat_history": chat_history,
             "case_summary": case_summary,
+            "dossier_context": dossier_context,
             "graph_context": graph_memory,
             "graph_memory": graph_memory,
             "historical_reference": "",
