@@ -78,6 +78,20 @@ def create_cloud_llm(model: str = "glm-4-flash") -> "ChatZhipuAI":
     )
 
 
+def _describe_llm_target(llm: Any) -> tuple[str, str]:
+    model_name = str(
+        getattr(llm, "model_name", None)
+        or getattr(llm, "model", None)
+        or ""
+    ).strip()
+    base_url = str(
+        getattr(llm, "openai_api_base", None)
+        or getattr(llm, "base_url", None)
+        or ""
+    ).strip()
+    return model_name, base_url
+
+
 def get_agent_llm_router(self):
     router = getattr(self, "llm_router", None)
     if router is None:
@@ -124,11 +138,23 @@ async def call_langchain_llm(self, llm, messages: list[dict[str, str]]) -> str:
 
 async def call_zhipu(self, messages: list[dict[str, str]], llm=None) -> str:
     target_llm = llm or getattr(self, "expert_llm", None) or create_cloud_llm()
+    model_name, base_url = _describe_llm_target(target_llm)
+    logger.info(
+        "LLM dispatch | provider=zhipu model=%s base_url=%s",
+        model_name or "glm-4-flash",
+        base_url or "https://open.bigmodel.cn/api/paas/v4",
+    )
     return await self._call_langchain_llm(target_llm, messages)
 
 
 async def call_local_vllm(self, messages: list[dict[str, str]]) -> str:
     local_llm = _llm_factory.create_local_llm(temperature=0.1, max_tokens=2048)
+    model_name, base_url = _describe_llm_target(local_llm)
+    logger.info(
+        "LLM dispatch | provider=local-vllm model=%s base_url=%s",
+        model_name or "unknown",
+        base_url or "unknown",
+    )
     return await self._call_langchain_llm(local_llm, messages)
 
 
@@ -139,6 +165,11 @@ async def call_openai(
     temperature: float = 0.3,
 ) -> str:
     llm_router = self._get_llm_router()
+    logger.info(
+        "LLM dispatch | provider=openai model=%s base_url=%s",
+        model,
+        llm_router.openai_base_url,
+    )
     client = AsyncOpenAI(
         api_key=llm_router.openai_api_key,
         base_url=llm_router.openai_base_url,

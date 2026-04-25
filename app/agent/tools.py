@@ -291,10 +291,33 @@ def _get_query_expansion_fallback_llm() -> Any:
     return _query_expansion_fallback_llm
 
 
+def _describe_query_expansion_target(llm: Any) -> tuple[str, str]:
+    model_name = str(
+        getattr(llm, "model_name", None)
+        or getattr(llm, "model", None)
+        or ""
+    ).strip()
+    base_url = str(
+        getattr(llm, "openai_api_base", None)
+        or getattr(llm, "base_url", None)
+        or ""
+    ).strip()
+    return model_name, base_url
+
+
 def _invoke_query_expansion_model(messages: list[Any]) -> Any:
     llm_router = get_llm_router()
     provider = llm_router.get_provider("query_expansion")
-    logger.info("Query expansion provider: %s", provider.value)
+    if provider == LLMProvider.LOCAL_VLLM:
+        model_name, base_url = _describe_query_expansion_target(_get_query_expansion_local_llm())
+    else:
+        model_name, base_url = _describe_query_expansion_target(_get_query_expansion_fallback_llm())
+    logger.info(
+        "Query expansion | provider=%s model=%s base_url=%s",
+        provider.value,
+        model_name or "unknown",
+        base_url or "unknown",
+    )
 
     if provider == LLMProvider.LOCAL_VLLM:
         try:

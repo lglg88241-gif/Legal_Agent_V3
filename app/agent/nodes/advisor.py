@@ -641,6 +641,13 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
     )
 
     fallback = {"answer": layered_payload.answer, "sources": []}
+    llm_router = self._get_llm_router()
+    logger.info(
+        "Advisor generation | requested_provider=%s requested_model=%s base_url=%s",
+        LLMProvider.GPT_5_4.value,
+        "gpt-5.4",
+        getattr(llm_router, "openai_base_url", ""),
+    )
 
     content = await self._chat_model(
         self.expert_llm,

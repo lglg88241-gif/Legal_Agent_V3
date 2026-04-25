@@ -187,6 +187,71 @@ def _contains_chinese_legal_keyword(text: str) -> bool:
     return any(kw in text for kw in _CHINESE_LEGAL_KEYWORDS)
 
 
+_PURE_LAW_REFERENCE_PATTERNS = (
+    re.compile(r"\u7b2c\s*[0-9\u4e00-\u9fff]+\s*\u6761"),
+    re.compile(r"[\u4e00-\u9fff]{2,20}\u6cd5"),
+)
+_PURE_LAW_REFERENCE_TERMS = (
+    "\u6cd5\u5f8b",
+    "\u6cd5\u6761",
+    "\u6761\u6587",
+    "\u89c4\u5b9a",
+    "\u6cd5\u89c4",
+    "\u6761\u6b3e",
+    "\u5185\u5bb9",
+    "\u662f\u4ec0\u4e48",
+    "\u4ec0\u4e48\u610f\u601d",
+    "\u600e\u4e48\u89c4\u5b9a",
+)
+_PURE_LAW_FACT_MARKERS = (
+    "\u6211",
+    "\u672c\u4eba",
+    "\u6211\u4eec",
+    "\u516c\u53f8",
+    "\u8001\u677f",
+    "\u6708\u85aa",
+    "\u5de5\u8d44",
+    "\u5de5\u4f5c",
+    "\u88ab\u8f9e\u9000",
+    "\u6ca1\u7b7e\u5408\u540c",
+    "\u672a\u7b7e\u5408\u540c",
+    "\u5de5\u4f24",
+    "\u79bb\u5a5a",
+    "\u6d41\u6c34",
+    "\u804a\u5929\u8bb0\u5f55",
+)
+_PURE_LAW_AMOUNT_PATTERN = re.compile(r"\d{2,}(?:\.\d+)?\s*(?:\u5143|\u4e07)")
+
+
+def looks_like_pure_law_reference_question(question: str) -> bool:
+    cleaned = " ".join((question or "").strip().split())
+    if not cleaned:
+        return False
+
+    has_reference = any(term in cleaned for term in _PURE_LAW_REFERENCE_TERMS) or any(
+        pattern.search(cleaned) for pattern in _PURE_LAW_REFERENCE_PATTERNS
+    )
+    if not has_reference:
+        return False
+
+    has_case_fact = any(marker in cleaned for marker in _PURE_LAW_FACT_MARKERS) or bool(
+        _PURE_LAW_AMOUNT_PATTERN.search(cleaned)
+    )
+    if has_case_fact:
+        return False
+
+    return cleaned.endswith(("?", "\uff1f")) or any(
+        term in cleaned
+        for term in (
+            "\u89c4\u5b9a\u4e86\u4ec0\u4e48",
+            "\u8bf4\u4e86\u4ec0\u4e48",
+            "\u662f\u4ec0\u4e48\u610f\u601d",
+            "\u600e\u4e48\u89c4\u5b9a",
+            "\u6709\u4ec0\u4e48\u5185\u5bb9",
+        )
+    )
+
+
 LAW_INTENT_KEYWORDS = (
     "法条", "法律", "法规", "量刑", "依据", "民法典", "刑法",
     "劳动合同法", "赔偿", "算不算", "怎么判", "如何认定", "是否构成", "工伤",
@@ -256,6 +321,8 @@ def _extract_graph_entity_name(query: str) -> str | None:
 # ======================================================================
 
 def has_substantive_legal_intent(self, question: str) -> bool:
+    if looks_like_pure_law_reference_question(question):
+        return True
     keywords = [
         "法条", "法律", "法规", "赔偿", "赔付", "量刑", "判几年",
         "工伤", "劳动仲裁", "合同", "纠纷", "起诉", "犯罪", "构成",
@@ -309,7 +376,7 @@ def looks_like_chitchat(self, question: str, chat_history: str = "") -> bool:
 
 def detect_intents(self, question: str, chat_history: str = "") -> dict[str, bool]:
     lowered = question.lower()
-    has_law_intent = _hit_any(question, LAW_INTENT_KEYWORDS)
+    has_law_intent = _hit_any(question, LAW_INTENT_KEYWORDS) or looks_like_pure_law_reference_question(question)
     has_case_intent = _hit_any(question, CASE_INTENT_KEYWORDS)
     has_graph_intent = _hit_any(question, GRAPH_INTENT_KEYWORDS) or "case" in lowered
     is_chitchat = self._looks_like_chitchat(question, chat_history=chat_history)
@@ -403,6 +470,8 @@ def is_general_consult(self, question: str, case_summary: str = "") -> bool:
     text = " ".join((question or "").strip().split())
     if not text:
         return False
+    if looks_like_pure_law_reference_question(text):
+        return True
     if self._has_substantive_legal_intent(text) and not self._patched_is_case_update(text, case_summary=case_summary):
         return True
     consult_tokens = [
@@ -466,6 +535,8 @@ def build_tool_calls_for_intent(self, route_intent: str, query: str) -> list[dic
             routes.append({"name": GRAPH_TOOL, "arguments": {"entity_name": graph_entity}})
         return self._dedupe_tool_calls(routes)
     if route_intent == "GENERAL_CONSULT":
+        if looks_like_pure_law_reference_question(cleaned_query):
+            return [{"name": LAW_TOOL, "arguments": {"query": cleaned_query}}]
         intents = self._detect_intents(cleaned_query)
         routes: list[dict[str, Any]] = []
         if intents["has_law_intent"] or intents["has_case_intent"]:
@@ -498,6 +569,12 @@ async def route_decision(
 
     if detect_out_of_scope_reason(cleaned_question):
         return {"route_intent": OUT_OF_SCOPE_INTENT, "tool_calls": []}
+
+    if looks_like_pure_law_reference_question(cleaned_question):
+        return {
+            "route_intent": "GENERAL_CONSULT",
+            "tool_calls": self._patched_build_tool_calls_for_intent("GENERAL_CONSULT", cleaned_question),
+        }
 
     if is_precise_mode:
         retrieval_query = summary_text if has_case_summary else cleaned_question

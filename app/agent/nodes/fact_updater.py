@@ -110,6 +110,13 @@ async def fact_updater_node(self, state: AgentState) -> AgentState:
             logger.warning("Fact updater failed to load historical reference: %s", exc)
 
     try:
+        llm_router = self._get_llm_router()
+        logger.info(
+            "Fact updater | requested_provider=%s requested_model=%s base_url=%s",
+            LLMProvider.GPT_5_1.value,
+            "gpt-5.1",
+            getattr(llm_router, "openai_base_url", ""),
+        )
         content = await self._chat_model(
             self.summary_llm,
             [

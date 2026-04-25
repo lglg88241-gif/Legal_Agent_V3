@@ -303,6 +303,7 @@ def ask_agent_task(
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
         case_state_dict = answer.get("case_state_snapshot") if isinstance(answer, dict) else None
         case_type = answer.get("case_type") if isinstance(answer, dict) else None
+        should_persist_case_state = route_intent == "CASE_UPDATE"
 
         if route_intent == "GREETING":
             agent_actions = [
@@ -363,8 +364,8 @@ def ask_agent_task(
                         "route_intent": route_intent,
                     },
                     case_summary=updated_case_summary if route_intent == "CASE_UPDATE" else "",
-                    case_state_dict=case_state_dict,
-                    case_type=case_type,
+                    case_state_dict=case_state_dict if should_persist_case_state else None,
+                    case_type=case_type if should_persist_case_state else None,
                 )
             )
 
