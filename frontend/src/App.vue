@@ -83,6 +83,29 @@
           </div>
         </div>
 
+        <div v-if="currentConversation" class="conversation-mode-card">
+          <div class="conversation-mode-main">
+            <div class="conversation-mode-copy">
+              <span class="conversation-mode-title">当前模式</span>
+              <span class="conversation-mode-subtitle">
+                {{ currentConversation.title || `会话 #${currentConversation.id}` }}
+              </span>
+            </div>
+            <div class="conversation-mode-tags">
+              <el-tag size="small" effect="light" :type="currentConversationModeTagType">
+                {{ currentConversationModeLabel }}
+              </el-tag>
+              <el-tag
+                v-if="currentConversation.case_type"
+                size="small"
+                effect="plain"
+              >
+                {{ currentConversation.case_type }}
+              </el-tag>
+            </div>
+          </div>
+        </div>
+
         <div v-if="!systemStatus.ready" class="init-overlay">
           <div class="init-card">
             <el-icon class="init-icon rotating"><Loading /></el-icon>
@@ -199,6 +222,7 @@ import {
   searchConversations,
   getSystemStatus,
   sendMessage,
+  setConversationModeConsent,
   setLocalModelStatus,
   submitFeedback,
   updateConversationTitle,
@@ -262,6 +286,12 @@ const currentGraph = reactive({
 const currentUsername = computed(() => getStoredUser()?.username || '已登录用户')
 const currentConversation = computed(() =>
   conversations.value.find((item) => item.id === currentConversationId.value) || null
+)
+const currentConversationModeLabel = computed(() =>
+  conversationModeLabel(currentConversation.value?.conversation_mode)
+)
+const currentConversationModeTagType = computed(() =>
+  conversationModeTagType(currentConversation.value?.conversation_mode)
 )
 const conversationListEmptyText = computed(() =>
   conversationSearchKeyword.value.trim() ? '没有找到相关会话' : '暂无会话'
@@ -748,6 +778,74 @@ async function resolveCaseBoundarySuggestion(message) {
   }
 }
 
+function conversationModeLabel(mode) {
+  switch (String(mode || '').toUpperCase()) {
+    case 'LEGAL_QA':
+      return '法律问答'
+    case 'CASE_ANALYSIS':
+      return '案情分析'
+    case 'TRACKED_CASE':
+      return '持续跟踪'
+    default:
+      return '未分类'
+  }
+}
+
+function conversationModeTagType(mode) {
+  switch (String(mode || '').toUpperCase()) {
+    case 'LEGAL_QA':
+      return 'success'
+    case 'CASE_ANALYSIS':
+      return 'warning'
+    case 'TRACKED_CASE':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
+async function resolveModeConsentSuggestion(prompt) {
+  const message = [
+    prompt || '我注意到你正在描述一个具体案情。是否要保存为持续跟踪的案情会话？',
+    '',
+    '当前聊天记录仍会保存在会话历史中；选择持续跟踪后，系统会把案情整理为可持续维护的结构化案情。',
+  ].join('\n')
+
+  try {
+    await ElMessageBox.confirm(
+      message,
+      '模式确认',
+      {
+        confirmButtonText: '保存并持续跟踪',
+        cancelButtonText: '仅本次分析',
+        distinguishCancelAndClose: true,
+        type: 'warning',
+      }
+    )
+    return 'tracked'
+  } catch (error) {
+    if (error === 'cancel') {
+      return 'temporary'
+    }
+    if (error === 'close') {
+      return 'cancelled'
+    }
+    throw error
+  }
+}
+
+function restoreDraftInput(draftText, feedbackMessage = '', feedbackType = 'info') {
+  inputText.value = draftText
+  if (!feedbackMessage) return
+
+  if (feedbackType === 'error') {
+    ElMessage.error(feedbackMessage)
+    return
+  }
+
+  ElMessage.info(feedbackMessage)
+}
+
 async function sendImpl(textOverride = null, options = {}) {
   if (!systemStatus.ready) {
     ElMessage.warning('系统仍在初始化，请稍后。')
@@ -763,8 +861,12 @@ async function sendImpl(textOverride = null, options = {}) {
   const finalStr = (typeof textOverride === 'string' ? textOverride : inputText.value) || ''
   const text = finalStr.trim()
   if (!text || sending.value) return
+  const draftText = text
 
   const forceCurrentCase = Boolean(options.forceCurrentCase)
+  const modeConsentEnabled = options.modeConsentEnabled !== false
+  const restoreDraftOnErrorText =
+    typeof options.restoreDraftOnErrorText === 'string' ? options.restoreDraftOnErrorText : null
   const tempKey = `temp-user-${Date.now()}`
   const nowIso = new Date().toISOString()
   const previousNodeCount = currentGraph.nodes?.length || 0
@@ -794,6 +896,7 @@ async function sendImpl(textOverride = null, options = {}) {
       forceCurrentCase,
       isPreciseMode: proactiveGraphMode.value,
       proactiveGraphMode: proactiveGraphMode.value,
+      modeConsentEnabled,
     })
     const initData = initRes?.data || {}
 
@@ -804,18 +907,81 @@ async function sendImpl(textOverride = null, options = {}) {
       currentGraph.loading = false
 
       if (nextAction === 'new_case') {
-        const newConversation = await createCaseForResend()
-        if (newConversation?.id) {
-          await sendImpl(text, { conversationId: newConversation.id, forceCurrentCase: false })
+        try {
+          const newConversation = await createCaseForResend()
+          if (!newConversation?.id) {
+            restoreDraftInput(draftText, '新案情确认失败，输入内容已恢复', 'error')
+            return
+          }
+
+          await sendImpl(text, {
+            conversationId: newConversation.id,
+            forceCurrentCase: false,
+            modeConsentEnabled: false,
+            restoreDraftOnErrorText: draftText,
+          })
+        } catch (error) {
+          console.error('Failed to continue suggest_new_case flow:', error)
+          restoreDraftInput(draftText, '新案情确认失败，输入内容已恢复', 'error')
         }
         return
       }
 
       if (nextAction === 'cancelled') {
+        restoreDraftInput(draftText, '已取消，输入内容已恢复')
         return
       }
 
-      await sendImpl(text, { conversationId: baseConversationId, forceCurrentCase: true })
+      await sendImpl(text, {
+        conversationId: baseConversationId,
+        forceCurrentCase: true,
+        modeConsentEnabled: false,
+        restoreDraftOnErrorText: draftText,
+      })
+      return
+    }
+
+    if (initData.action === 'mode_consent') {
+      removeMessageById(tempKey)
+      const nextAction = await resolveModeConsentSuggestion(initData.consent_prompt)
+      sending.value = false
+      currentGraph.loading = false
+
+      if (nextAction === 'cancelled') {
+        restoreDraftInput(draftText, '已取消，输入内容已恢复')
+        return
+      }
+
+      const payload =
+        nextAction === 'tracked'
+          ? {
+              mode: 'TRACKED_CASE',
+              consent: 'tracked',
+              reason: 'user_selected_tracked',
+            }
+          : {
+              mode: 'CASE_ANALYSIS',
+              consent: 'temporary',
+              reason: 'user_selected_temporary',
+            }
+
+      try {
+        const { data: consentData } = await setConversationModeConsent(baseConversationId, payload)
+        if (consentData?.conversation) {
+          upsertConversationLocal(consentData.conversation)
+        }
+      } catch (error) {
+        console.error('Failed to persist mode consent:', error)
+        restoreDraftInput(draftText, '模式确认失败，输入内容已恢复', 'error')
+        return
+      }
+
+      await sendImpl(text, {
+        conversationId: baseConversationId,
+        forceCurrentCase,
+        modeConsentEnabled: false,
+        restoreDraftOnErrorText: draftText,
+      })
       return
     }
 
@@ -841,6 +1007,9 @@ async function sendImpl(textOverride = null, options = {}) {
     startGraphRefreshPolling(baseConversationId, previousNodeCount, text)
   } catch (error) {
     console.error('Failed to send message:', error)
+    if (restoreDraftOnErrorText) {
+      restoreDraftInput(restoreDraftOnErrorText, '发送失败，输入内容已恢复', 'error')
+    }
     updatePendingMessage(tempKey, { pending: false })
     messages.value.push({
       id: `assistant-error-${Date.now()}`,
@@ -959,6 +1128,10 @@ function handleClearLegacy() {
           case_summary: '',
           case_type: '',
           case_state: null,
+          conversation_mode: 'UNKNOWN',
+          persistence_consent: 'unknown',
+          mode_confirmed_at: null,
+          mode_reason: null,
         })
         if (data?.warning) {
           ElMessage.warning('聊天已清空，但图谱清理可能未完成。')
@@ -1076,6 +1249,10 @@ function handleClearReset() {
           case_summary: '',
           case_type: '',
           case_state: null,
+          conversation_mode: 'UNKNOWN',
+          persistence_consent: 'unknown',
+          mode_confirmed_at: null,
+          mode_reason: null,
         })
         if (data?.warning) {
           ElMessage.warning('聊天已清空，但图谱清理可能未完成。')
@@ -1350,6 +1527,49 @@ body,
 
 .local-model-status.is-error {
   color: #b91c1c;
+}
+
+.conversation-mode-card {
+  margin: 12px 24px 0;
+  padding: 12px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  background: #fff;
+}
+
+.conversation-mode-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.conversation-mode-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.conversation-mode-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.conversation-mode-subtitle {
+  font-size: 12px;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-mode-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .chat-scroll {

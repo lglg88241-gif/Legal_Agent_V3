@@ -9,9 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.database.mysql_db import Base, engine
 from app.models import Conversation, Message
+from app.services.conversation_mode import (
+    normalize_conversation_mode,
+    normalize_persistence_consent,
+)
 
 DEFAULT_CONVERSATION_TITLE = ""
 DEFAULT_FALLBACK_TITLE = "默认会话"
+
+DEFAULT_CONVERSATION_MODE = "UNKNOWN"
+DEFAULT_PERSISTENCE_CONSENT = "unknown"
 
 
 def _ensure_conversation_updated_at(sync_conn) -> None:
@@ -90,6 +97,48 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
             text("ALTER TABLE conversations ADD COLUMN case_type VARCHAR(100) DEFAULT NULL")
         )
 
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "conversation_mode" not in columns:
+        sync_conn.execute(
+            text(
+                "ALTER TABLE conversations "
+                "ADD COLUMN conversation_mode VARCHAR(32) NOT NULL DEFAULT 'UNKNOWN'"
+            )
+        )
+
+    sync_conn.execute(
+        text(
+            "UPDATE conversations "
+            "SET conversation_mode = 'UNKNOWN' "
+            "WHERE conversation_mode IS NULL OR conversation_mode = ''"
+        )
+    )
+
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "persistence_consent" not in columns:
+        sync_conn.execute(
+            text(
+                "ALTER TABLE conversations "
+                "ADD COLUMN persistence_consent VARCHAR(32) NOT NULL DEFAULT 'unknown'"
+            )
+        )
+
+    sync_conn.execute(
+        text(
+            "UPDATE conversations "
+            "SET persistence_consent = 'unknown' "
+            "WHERE persistence_consent IS NULL OR persistence_consent = ''"
+        )
+    )
+
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "mode_confirmed_at" not in columns:
+        sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN mode_confirmed_at DATETIME"))
+
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "mode_reason" not in columns:
+        sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN mode_reason TEXT"))
+
 
 async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
     target_engine = bind_engine or engine
@@ -122,6 +171,8 @@ async def create_conversation_record(
         user_id=user_id,
         session_id=str(uuid4()),
         title=(title or "").strip(),
+        conversation_mode=DEFAULT_CONVERSATION_MODE,
+        persistence_consent=DEFAULT_PERSISTENCE_CONSENT,
         updated_at=now,
     )
     db.add(conversation)
@@ -273,6 +324,27 @@ async def update_conversation_case_type(
     return conversation
 
 
+async def update_conversation_mode_state(
+    db: AsyncSession,
+    conversation: Conversation,
+    *,
+    conversation_mode: str | None = None,
+    persistence_consent: str | None = None,
+    mode_reason: str | None = None,
+    mark_confirmed: bool = False,
+) -> Conversation:
+    if conversation_mode is not None:
+        conversation.conversation_mode = normalize_conversation_mode(conversation_mode)
+    if persistence_consent is not None:
+        conversation.persistence_consent = normalize_persistence_consent(persistence_consent)
+    if mode_reason is not None:
+        conversation.mode_reason = (mode_reason or "").strip() or None
+    if mark_confirmed:
+        conversation.mode_confirmed_at = utcnow()
+    await touch_conversation(db, conversation=conversation)
+    return conversation
+
+
 async def store_message(
     db: AsyncSession,
     conversation_id: int,
@@ -311,6 +383,10 @@ async def clear_conversation_messages(
         conversation.case_summary = ""
         conversation.case_state_json = None
         conversation.case_type = None
+        conversation.conversation_mode = DEFAULT_CONVERSATION_MODE
+        conversation.persistence_consent = DEFAULT_PERSISTENCE_CONSENT
+        conversation.mode_confirmed_at = None
+        conversation.mode_reason = None
         await touch_conversation(db, conversation=conversation)
 
 
@@ -376,6 +452,12 @@ async def search_user_cases(
 
 
 def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
+    conversation_mode = normalize_conversation_mode(
+        getattr(conversation, "conversation_mode", DEFAULT_CONVERSATION_MODE)
+    )
+    persistence_consent = normalize_persistence_consent(
+        getattr(conversation, "persistence_consent", DEFAULT_PERSISTENCE_CONSENT)
+    )
     return {
         "id": conversation.id,
         "user_id": conversation.user_id,
@@ -384,6 +466,14 @@ def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
         "case_summary": conversation.case_summary or "",
         "case_type": getattr(conversation, "case_type", None) or "",
         "case_state": getattr(conversation, "case_state_json", None),
+        "conversation_mode": conversation_mode,
+        "persistence_consent": persistence_consent,
+        "mode_confirmed_at": (
+            conversation.mode_confirmed_at.isoformat()
+            if getattr(conversation, "mode_confirmed_at", None)
+            else None
+        ),
+        "mode_reason": getattr(conversation, "mode_reason", None),
         "created_at": conversation.created_at.isoformat() if conversation.created_at else None,
         "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
     }

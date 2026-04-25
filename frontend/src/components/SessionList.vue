@@ -80,9 +80,19 @@
               <el-icon class="session-icon"><ChatDotRound /></el-icon>
               <span class="session-name">{{ session.title || `未命名会话 #${session.id}` }}</span>
             </div>
-            <el-tag size="small" effect="plain" class="type-tag">
-              {{ session.case_type || '未分类' }}
-            </el-tag>
+            <div class="tag-group">
+              <el-tag
+                size="small"
+                effect="light"
+                class="mode-tag"
+                :type="conversationModeTagType(session.conversation_mode)"
+              >
+                {{ conversationModeLabel(session.conversation_mode) }}
+              </el-tag>
+              <el-tag size="small" effect="plain" class="type-tag">
+                {{ session.case_type || '未分类' }}
+              </el-tag>
+            </div>
           </div>
 
           <div class="session-preview">
@@ -245,6 +255,32 @@ function buildPreview(session) {
   return summary.length > 40 ? `${summary.slice(0, 40)}...` : summary
 }
 
+function conversationModeLabel(mode) {
+  switch (String(mode || '').toUpperCase()) {
+    case 'LEGAL_QA':
+      return '法律问答'
+    case 'CASE_ANALYSIS':
+      return '案情分析'
+    case 'TRACKED_CASE':
+      return '持续跟踪'
+    default:
+      return '未分类'
+  }
+}
+
+function conversationModeTagType(mode) {
+  switch (String(mode || '').toUpperCase()) {
+    case 'LEGAL_QA':
+      return 'success'
+    case 'CASE_ANALYSIS':
+      return 'warning'
+    case 'TRACKED_CASE':
+      return 'danger'
+    default:
+      return 'info'
+  }
+}
+
 function formatTime(value) {
   if (!value) return ''
   return new Date(value).toLocaleString('zh-CN', {
@@ -354,7 +390,8 @@ function formatTime(value) {
   color: rgba(255, 255, 255, 0.78);
 }
 
-.session-item.active .type-tag {
+.session-item.active .type-tag,
+.session-item.active .mode-tag {
   color: #409eff;
   background: rgba(255, 255, 255, 0.92);
   border-color: transparent;
@@ -395,9 +432,16 @@ function formatTime(value) {
   white-space: nowrap;
 }
 
+.tag-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.mode-tag,
 .type-tag {
   flex: 0 0 auto;
-  color: #6b7280;
 }
 
 .session-preview {

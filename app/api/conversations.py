@@ -21,7 +21,12 @@ from app.services.conversation_store import (
     search_user_cases,
     serialize_conversation,
     serialize_message,
+    update_conversation_mode_state,
     update_conversation_title,
+)
+from app.services.conversation_mode import (
+    validate_conversation_mode,
+    validate_persistence_consent,
 )
 from app.services.graph_extractor import delete_case_graph, get_case_graph
 from app.services.llm_service import llm_service
@@ -40,6 +45,12 @@ class ConversationUpdateRequest(BaseModel):
 
 class ConversationBatchDeleteRequest(BaseModel):
     conversation_ids: list[int] = Field(default_factory=list, min_length=1)
+
+
+class ConversationModeConsentRequest(BaseModel):
+    mode: str = Field(..., min_length=1, max_length=32)
+    consent: str = Field(..., min_length=1, max_length=32)
+    reason: str | None = Field(default=None, max_length=1000)
 
 
 def _build_graph_cleanup_response(
@@ -228,6 +239,49 @@ async def rename_conversation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
 
     await update_conversation_title(db, conversation, payload.title)
+    await db.commit()
+    await db.refresh(conversation)
+    return {"status": "success", "conversation": serialize_conversation(conversation)}
+
+
+@router.post("/{conversation_id}/mode-consent")
+async def set_conversation_mode_consent(
+    conversation_id: int,
+    payload: ConversationModeConsentRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    conversation = await get_conversation_for_user(db, current_user.user_id, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    try:
+        normalized_mode = validate_conversation_mode(payload.mode)
+        normalized_consent = validate_persistence_consent(payload.consent)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if normalized_consent == "tracked" and normalized_mode != "TRACKED_CASE":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="tracked consent requires TRACKED_CASE mode",
+        )
+
+    if normalized_consent == "temporary" and normalized_mode != "CASE_ANALYSIS":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="temporary consent requires CASE_ANALYSIS mode",
+        )
+
+    await update_conversation_mode_state(
+        db,
+        conversation,
+        conversation_mode=normalized_mode,
+        persistence_consent=normalized_consent,
+        mode_reason=payload.reason,
+        mark_confirmed=True,
+    )
     await db.commit()
     await db.refresh(conversation)
     return {"status": "success", "conversation": serialize_conversation(conversation)}

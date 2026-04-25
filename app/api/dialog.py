@@ -12,10 +12,12 @@ from app.core.llm_provider import get_llm_router
 from app.core.security import AuthenticatedUser, get_current_user
 from app.database.mysql_db import get_db
 from app.services.case_boundary import detect_case_boundary
+from app.services.conversation_mode import detect_conversation_mode, normalize_conversation_mode
 from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
     list_recent_conversation_messages,
+    update_conversation_mode_state,
 )
 from app.services.graph_extractor import format_graph_memory
 
@@ -30,6 +32,7 @@ class DialogRequest(BaseModel):
     force_current_case: bool = False
     is_precise_mode: bool = False
     proactive_graph_mode: bool = True
+    mode_consent_enabled: bool = False
 
 
 class LocalModelToggleRequest(BaseModel):
@@ -64,6 +67,7 @@ async def process_dialog(
             if (item.content or "").strip()
         )
         current_graph_summary = (conversation.case_summary or "").strip() or await format_graph_memory(conversation.id)
+        boundary = "SAME_CASE"
 
         if not request.force_current_case:
             boundary = await detect_case_boundary(
@@ -82,6 +86,49 @@ async def process_dialog(
                         "发现您似乎在咨询一个全新的法律问题。"
                         "为了保证案情分析与图谱记忆的准确性，是否为您建立一份新的独立卷宗？"
                     ),
+                }
+
+        current_mode = normalize_conversation_mode(getattr(conversation, "conversation_mode", None))
+        if request.mode_consent_enabled:
+            mode_result = detect_conversation_mode(
+                clean_input,
+                current_mode=current_mode,
+                case_summary=conversation.case_summary,
+            )
+            detected_mode = str(mode_result.get("detected_mode") or "UNKNOWN")
+            requires_consent = bool(mode_result.get("requires_persistence_consent"))
+            suggested_mode = mode_result.get("suggested_mode")
+            reason = str(mode_result.get("reason") or "").strip()
+
+            if detected_mode == "LEGAL_QA" and current_mode == "UNKNOWN":
+                await update_conversation_mode_state(
+                    db,
+                    conversation,
+                    conversation_mode="LEGAL_QA",
+                    persistence_consent=getattr(conversation, "persistence_consent", "unknown"),
+                    mode_reason=reason or "auto_detected_legal_qa",
+                )
+                await db.commit()
+                current_mode = "LEGAL_QA"
+
+            if requires_consent:
+                return {
+                    "status": "needs_confirmation",
+                    "action": "mode_consent",
+                    "user_id": current_user.user_id,
+                    "conversation_id": conversation.id,
+                    "session_id": conversation.session_id,
+                    "case_boundary": boundary,
+                    "detected_mode": detected_mode,
+                    "conversation_mode": current_mode,
+                    "suggested_mode": suggested_mode,
+                    "requires_persistence_consent": True,
+                    "consent_prompt": "我注意到你正在描述一个具体案情。是否要保存为持续跟踪的案情会话？",
+                    "consent_actions": [
+                        {"label": "仅本次分析", "value": "temporary"},
+                        {"label": "保存并持续跟踪", "value": "tracked"},
+                    ],
+                    "reason": reason,
                 }
 
         task = ask_agent_task.apply_async(

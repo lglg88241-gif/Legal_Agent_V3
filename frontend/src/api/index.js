@@ -92,6 +92,8 @@ export const batchDeleteConversations = (conversationIds) =>
   })
 export const clearConversationMessages = (conversationId) =>
   api.delete(`/conversations/${conversationId}/messages`)
+export const setConversationModeConsent = (conversationId, payload) =>
+  api.post(`/conversations/${conversationId}/mode-consent`, payload)
 export const getConversationSummary = (conversationId) =>
   api.post(`/conversations/${conversationId}/summary`)
 export const getLocalModelStatus = () => api.get('/api/settings/local-model/status')
@@ -105,6 +107,7 @@ export const sendMessage = async (userInput, conversationId, options = {}) => {
     force_current_case: Boolean(options.forceCurrentCase),
     is_precise_mode: Boolean(options.isPreciseMode),
     proactive_graph_mode: options.proactiveGraphMode !== false,
+    mode_consent_enabled: Boolean(options.modeConsentEnabled),
   })
   const taskId = initRes.data.task_id
 

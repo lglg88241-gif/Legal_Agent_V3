@@ -162,6 +162,9 @@ def test_clear_conversation_messages_resets_case_state() -> None:
             case_summary="old summary",
             case_state_json={"monthly_salary": 12000},
             case_type="labor",
+            conversation_mode="TRACKED_CASE",
+            persistence_consent="tracked",
+            mode_reason="previous_tracking_choice",
         )
         original_updated_at = conversation.updated_at
         messages = [
@@ -200,6 +203,10 @@ def test_clear_conversation_messages_resets_case_state() -> None:
         assert conversation.case_summary == ""
         assert conversation.case_state_json is None
         assert conversation.case_type is None
+        assert conversation.conversation_mode == "UNKNOWN"
+        assert conversation.persistence_consent == "unknown"
+        assert conversation.mode_confirmed_at is None
+        assert conversation.mode_reason is None
         assert conversation.updated_at is not None
         assert original_updated_at is None or conversation.updated_at >= original_updated_at
 

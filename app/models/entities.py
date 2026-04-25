@@ -43,13 +43,37 @@ class Conversation(Base):
         JSON,
         nullable=True,
         default=None,
-        comment="CaseState Pydantic 模型的 JSON 序列化快照",
+        comment="Serialized CaseState snapshot",
     )
     case_type: Mapped[str | None] = mapped_column(
         String(100),
         nullable=True,
         default=None,
-        comment="案件类型: 劳动争议/刑事/民事/行政/知识产权/其他",
+        comment="Case type label",
+    )
+    conversation_mode: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="UNKNOWN",
+        server_default="UNKNOWN",
+        comment="Conversation mode: UNKNOWN/LEGAL_QA/CASE_ANALYSIS/TRACKED_CASE",
+    )
+    persistence_consent: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
+        comment="Persistence consent: unknown/temporary/tracked",
+    )
+    mode_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        default=None,
+    )
+    mode_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
