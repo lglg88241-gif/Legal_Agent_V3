@@ -205,3 +205,20 @@ class TestSanitizeLlmAnswerIntegration:
         """
         result = sanitize_llm_answer(_CLEAN_LLM_ANSWER, _PAYLOAD, _RAG_WITHOUT_ARTICLE)
         assert result == _CLEAN_LLM_ANSWER
+
+    def test_same_law_referenced_article_remains_allowed_when_present_in_rag(self) -> None:
+        rag_context = (
+            "1. 中华人民共和国劳动合同法第八十七条：用人单位违反本法规定解除或者终止劳动合同的，"
+            "应当依照本法第四十七条规定的经济补偿标准的二倍向劳动者支付赔偿金。\n"
+            "2. 中华人民共和国劳动合同法第四十七条：经济补偿按劳动者在本单位工作的年限，"
+            "每满一年支付一个月工资的标准向劳动者支付。"
+        )
+        llm = (
+            "根据《劳动合同法》第八十七条，用人单位违法解除或者终止劳动合同的，"
+            "应当依照本法第四十七条规定的经济补偿标准的二倍向劳动者支付赔偿金。"
+        )
+
+        result = sanitize_llm_answer(llm, _PAYLOAD, rag_context)
+
+        assert "第八十七条" in result
+        assert "第四十七条" in result

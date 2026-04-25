@@ -105,9 +105,13 @@ _ARTICLE_NUMBER_QUERY_PATTERN = re.compile(r"第[一二三四五六七八九十�
 _EXPLICIT_ARTICLE_REFERENCE_PATTERN = re.compile(
     r"第([零〇一二两三四五六七八九十百千\d]+)条"
 )
+_INTRA_LAW_REFERENCE_PATTERN = re.compile(
+    r"(?:依照|按照|根据|参照)?本法第([零〇一二两三四五六七八九十百千\d]+)条"
+)
 _LAW_TITLE_SUFFIX_PATTERN = re.compile(
     r"(?:《)?([\u4e00-\u9fff]{2,40}(?:法|条例|规定|办法|解释))(?:》)?"
 )
+_MAX_EXACT_REFERENCE_EXPANSIONS = 3
 _CHINESE_DIGITS = {
     "零": 0,
     "〇": 0,
@@ -180,6 +184,20 @@ def _parse_expansion_queries(content: str) -> list[str]:
     else:
         queries = []
     return _coerce_expansion_queries(queries)
+
+
+def _build_law_article_reference(
+    law_title: str,
+    article_number: int,
+    *,
+    query: str,
+) -> dict[str, Any]:
+    return {
+        "law_title": law_title,
+        "article_number": article_number,
+        "article_label": f"第{_int_to_chinese_number(article_number)}条",
+        "query": query,
+    }
 
 
 def _normalize_law_title(value: str) -> str:
@@ -314,12 +332,11 @@ def _extract_explicit_law_article_reference(query: str) -> dict[str, Any] | None
     if not matched_law_title:
         return None
 
-    return {
-        "law_title": matched_law_title,
-        "article_number": article_number,
-        "article_label": f"第{_int_to_chinese_number(article_number)}条",
-        "query": normalized_query,
-    }
+    return _build_law_article_reference(
+        matched_law_title,
+        article_number,
+        query=normalized_query,
+    )
 
 
 def _mark_exact_match_metadata(
@@ -327,9 +344,12 @@ def _mark_exact_match_metadata(
     query: str,
     law_title: str,
     article_label: str,
+    *,
+    lookup_kind: str = "exact",
 ) -> dict[str, Any]:
     enriched_metadata = dict(metadata or {})
     enriched_metadata["_exact_lookup"] = True
+    enriched_metadata["_exact_lookup_kind"] = lookup_kind
     enriched_metadata["_exact_lookup_query"] = query
     enriched_metadata["_exact_lookup_law_title"] = law_title
     enriched_metadata["_exact_lookup_article"] = article_label
@@ -368,14 +388,13 @@ def _get_vectorstore_records(
     return documents, metadatas
 
 
-def _lookup_exact_law_article_candidates(
-    query: str,
+def _lookup_exact_law_article_candidates_for_reference(
+    reference: dict[str, Any],
     vectorstore: Chroma,
+    *,
+    retrieval: str = "exact",
+    lookup_kind: str = "exact",
 ) -> list[dict[str, Any]]:
-    reference = _extract_explicit_law_article_reference(query)
-    if reference is None:
-        return []
-
     documents, metadatas = _get_vectorstore_records(
         vectorstore,
         article_label=reference["article_label"],
@@ -403,9 +422,10 @@ def _lookup_exact_law_article_candidates(
                     reference["query"],
                     reference["law_title"],
                     reference["article_label"],
+                    lookup_kind=lookup_kind,
                 ),
                 score=0.0,
-                retrieval="exact",
+                retrieval=retrieval,
                 matched_query=reference["query"],
             )
         )
@@ -413,9 +433,87 @@ def _lookup_exact_law_article_candidates(
     return _dedupe_candidates_preserve_order(exact_candidates)
 
 
+def _lookup_exact_law_article_candidates(
+    query: str,
+    vectorstore: Chroma,
+) -> list[dict[str, Any]]:
+    reference = _extract_explicit_law_article_reference(query)
+    if reference is None:
+        return []
+    return _lookup_exact_law_article_candidates_for_reference(reference, vectorstore)
+
+
+def _extract_same_law_reference_numbers(
+    content: str,
+    *,
+    source_article_number: int | None,
+) -> list[int]:
+    reference_numbers: list[int] = []
+    seen: set[int] = set()
+
+    for match in _INTRA_LAW_REFERENCE_PATTERN.finditer(content or ""):
+        article_number = _parse_chinese_number(match.group(1))
+        if article_number is None:
+            continue
+        if source_article_number is not None and article_number == source_article_number:
+            continue
+        if article_number in seen:
+            continue
+        seen.add(article_number)
+        reference_numbers.append(article_number)
+        if len(reference_numbers) >= _MAX_EXACT_REFERENCE_EXPANSIONS:
+            break
+
+    return reference_numbers
+
+
+def _lookup_exact_reference_candidates(
+    exact_candidates: list[dict[str, Any]],
+    vectorstore: Chroma,
+) -> list[dict[str, Any]]:
+    reference_candidates: list[dict[str, Any]] = []
+
+    for candidate in exact_candidates:
+        metadata = candidate.get("metadata") or {}
+        law_title = str(
+            metadata.get("_exact_lookup_law_title")
+            or metadata.get("law_title")
+            or ""
+        ).strip()
+        if not law_title:
+            continue
+
+        source_article_number = _article_number_from_text(
+            str(metadata.get("article") or metadata.get("_exact_lookup_article") or "")
+        )
+        reference_numbers = _extract_same_law_reference_numbers(
+            candidate.get("content") or "",
+            source_article_number=source_article_number,
+        )
+
+        for article_number in reference_numbers:
+            reference_candidates.extend(
+                _lookup_exact_law_article_candidates_for_reference(
+                    _build_law_article_reference(
+                        law_title,
+                        article_number,
+                        query=str(candidate.get("matched_query") or ""),
+                    ),
+                    vectorstore,
+                    retrieval="exact_reference",
+                    lookup_kind="exact_reference",
+                )
+            )
+
+    return _dedupe_candidates_preserve_order(reference_candidates)
+
+
 def _is_exact_lookup_candidate(candidate: dict[str, Any]) -> bool:
     metadata = candidate.get("metadata") or {}
-    return bool(metadata.get("_exact_lookup")) or candidate.get("retrieval") == "exact"
+    return bool(metadata.get("_exact_lookup")) or candidate.get("retrieval") in {
+        "exact",
+        "exact_reference",
+    }
 
 
 def _multi_query_rerank_with_rrf(
@@ -688,6 +786,10 @@ def _expand_queries(query: str, chat_history: str = "") -> list[str]:
     if not normalized_query:
         return [query]
 
+    if _extract_explicit_law_article_reference(normalized_query) is not None:
+        logger.info("Skip query expansion for explicit law article query [%s]", normalized_query)
+        return [normalized_query]
+
     try:
         history_text = (chat_history or "").strip() or "无历史对话"
         messages = [
@@ -873,6 +975,7 @@ def search_law_articles(query: str, chat_history: str = "") -> str:
     """用于查询法律条文、法规规定、量刑标准等纯法律理论问题。"""
     vectorstore = _get_law_vectorstore()
     exact_candidates = _lookup_exact_law_article_candidates(query, vectorstore)
+    exact_reference_candidates = _lookup_exact_reference_candidates(exact_candidates, vectorstore)
     expanded_queries, candidates = _retrieve_candidates(
         query,
         vectorstore,
@@ -880,7 +983,9 @@ def search_law_articles(query: str, chat_history: str = "") -> str:
         chat_history=chat_history,
     )
     queries = expanded_queries or [query.strip()]
-    merged_candidates = _dedupe_candidates_preserve_order([*exact_candidates, *candidates])
+    merged_candidates = _dedupe_candidates_preserve_order(
+        [*exact_candidates, *exact_reference_candidates, *candidates]
+    )
     return _serialize_reranked_documents(queries, merged_candidates, top_k=LAW_TOP_K)
 
 

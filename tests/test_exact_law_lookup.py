@@ -182,6 +182,23 @@ def test_search_law_articles_injects_exact_article_match_first(
                         }
                     ],
                 }
+            if where == {"article": "第四十七条"}:
+                return {
+                    "documents": [
+                        (
+                            "中华人民共和国劳动合同法\n\n"
+                            "第四十七条 经济补偿按劳动者在本单位工作的年限，"
+                            "每满一年支付一个月工资的标准向劳动者支付。"
+                        )
+                    ],
+                    "metadatas": [
+                        {
+                            "source": "劳动合同法.docx",
+                            "article": "第四十七条",
+                            "law_title": "中华人民共和国劳动合同法",
+                        }
+                    ],
+                }
             return {"documents": [], "metadatas": []}
 
     def fake_retrieve_candidates(query, vectorstore, corpus, chat_history=""):
@@ -238,4 +255,88 @@ def test_search_law_articles_injects_exact_article_match_first(
     assert payload[0]["retrieval"] == "exact"
     assert payload[0]["metadata"]["article"] == "第八十七条"
     assert "支付赔偿金" in payload[0]["content"]
+    assert payload[1]["retrieval"] == "exact_reference"
+    assert payload[1]["metadata"]["article"] == "第四十七条"
+    assert "经济补偿" in payload[1]["content"]
     assert any(item["metadata"]["article"] == "第四十八条" for item in payload[1:])
+
+
+def test_expand_queries_skips_llm_for_explicit_law_article(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _load_tools_module()
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("query expansion model should not be called for explicit law citations")
+
+    monkeypatch.setattr(tools, "_invoke_query_expansion_model", fail_if_called)
+
+    expanded = tools._expand_queries("劳动合同法第82条规定了什么？")
+
+    assert expanded == ["劳动合同法第82条规定了什么？"]
+
+
+def test_search_law_articles_keeps_exact_article_first_for_article_82(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _load_tools_module()
+
+    class FakeLawVectorstore:
+        def get(self, where=None, include=None):
+            assert include == ["documents", "metadatas"]
+            if where == {"article": "第八十二条"}:
+                return {
+                    "documents": [
+                        (
+                            "中华人民共和国劳动合同法\n\n"
+                            "第八十二条 用人单位自用工之日起超过一个月不满一年未与劳动者订立书面劳动合同的，"
+                            "应当向劳动者每月支付二倍的工资。"
+                        )
+                    ],
+                    "metadatas": [
+                        {
+                            "source": "劳动合同法.docx",
+                            "article": "第八十二条",
+                            "law_title": "中华人民共和国劳动合同法",
+                        }
+                    ],
+                }
+            return {"documents": [], "metadatas": []}
+
+    def fake_retrieve_candidates(query, vectorstore, corpus, chat_history=""):
+        assert corpus == "law"
+        return (
+            ["劳动合同法第82条规定了什么？"],
+            [
+                tools._build_candidate(
+                    content="加班工资计算标准 ...",
+                    source="噪声材料.docx",
+                    metadata={"source": "噪声材料.docx"},
+                    score=0.9,
+                    retrieval="dense",
+                    matched_query="加班工资计算标准",
+                )
+            ],
+        )
+
+    def fake_rerank(queries, candidates, top_k, rrf_k=60):
+        return [
+            {
+                "index": index,
+                "candidate": candidate,
+                "fused_score": 1.0 / (index + 1),
+                "rerank_score": float(top_k - index),
+            }
+            for index, candidate in enumerate(candidates[:top_k])
+        ]
+
+    monkeypatch.setattr(tools, "_get_law_vectorstore", lambda: FakeLawVectorstore())
+    monkeypatch.setattr(tools, "_retrieve_candidates", fake_retrieve_candidates)
+    monkeypatch.setattr(tools, "_multi_query_rerank_with_rrf", fake_rerank)
+
+    payload = json.loads(tools.search_law_articles("劳动合同法第82条规定了什么？"))
+
+    assert payload
+    assert payload[0]["retrieval"] == "exact"
+    assert payload[0]["metadata"]["article"] == "第八十二条"
+    assert "二倍的工资" in payload[0]["content"]
