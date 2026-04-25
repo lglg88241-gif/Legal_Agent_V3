@@ -25,6 +25,53 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+    dossiers: Mapped[list["Dossier"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class Dossier(Base):
+    __tablename__ = "dossiers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    case_type: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        default=None,
+    )
+    summary: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="active",
+        server_default="active",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+        onupdate=datetime.utcnow,
+    )
+
+    user: Mapped[User] = relationship(back_populates="dossiers")
+    conversations: Mapped[list["Conversation"]] = relationship(back_populates="dossier")
 
 
 class Conversation(Base):
@@ -34,6 +81,12 @@ class Conversation(Base):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+    dossier_id: Mapped[int | None] = mapped_column(
+        ForeignKey("dossiers.id", ondelete="SET NULL"),
+        nullable=True,
+        default=None,
         index=True,
     )
     session_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -89,6 +142,7 @@ class Conversation(Base):
     )
 
     user: Mapped[User] = relationship(back_populates="conversations")
+    dossier: Mapped[Dossier | None] = relationship(back_populates="conversations")
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation",
         cascade="all, delete-orphan",

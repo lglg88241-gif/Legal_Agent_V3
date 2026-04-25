@@ -1,3 +1,3 @@
-from app.models.entities import Conversation, Message, User
+from app.models.entities import Conversation, Dossier, Message, User
 
-__all__ = ["User", "Conversation", "Message"]
+__all__ = ["User", "Conversation", "Dossier", "Message"]

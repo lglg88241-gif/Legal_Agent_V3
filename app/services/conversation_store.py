@@ -8,7 +8,7 @@ from sqlalchemy import delete, inspect, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.database.mysql_db import Base, engine
-from app.models import Conversation, Message
+from app.models import Conversation, Dossier, Message
 from app.services.conversation_mode import (
     normalize_conversation_mode,
     normalize_persistence_consent,
@@ -19,6 +19,8 @@ DEFAULT_FALLBACK_TITLE = "默认会话"
 
 DEFAULT_CONVERSATION_MODE = "UNKNOWN"
 DEFAULT_PERSISTENCE_CONSENT = "unknown"
+DEFAULT_DOSSIER_STATUS = "active"
+VALID_DOSSIER_STATUSES = {"active", "archived", "closed"}
 
 
 def _ensure_conversation_updated_at(sync_conn) -> None:
@@ -139,6 +141,10 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
     if "mode_reason" not in columns:
         sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN mode_reason TEXT"))
 
+    columns = {column["name"] for column in inspector.get_columns("conversations")}
+    if "dossier_id" not in columns:
+        sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN dossier_id INTEGER"))
+
 
 async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
     target_engine = bind_engine or engine
@@ -161,6 +167,13 @@ def build_conversation_title(
     return cleaned[:24]
 
 
+def normalize_dossier_status(status: str | None) -> str:
+    cleaned = " ".join((status or "").strip().split()).lower()
+    if cleaned not in VALID_DOSSIER_STATUSES:
+        raise ValueError(f"Unsupported dossier status: {status}")
+    return cleaned
+
+
 async def create_conversation_record(
     db: AsyncSession,
     user_id: int,
@@ -180,6 +193,28 @@ async def create_conversation_record(
     return conversation
 
 
+async def create_dossier_record(
+    db: AsyncSession,
+    user_id: int,
+    *,
+    title: str,
+    case_type: str | None = None,
+    summary: str | None = None,
+    status: str = DEFAULT_DOSSIER_STATUS,
+) -> Dossier:
+    dossier = Dossier(
+        user_id=user_id,
+        title=(title or "").strip(),
+        case_type=(case_type or "").strip() or None,
+        summary=(summary or "").strip() or None,
+        status=normalize_dossier_status(status),
+        updated_at=utcnow(),
+    )
+    db.add(dossier)
+    await db.flush()
+    return dossier
+
+
 async def get_conversation_for_user(
     db: AsyncSession,
     user_id: int,
@@ -193,6 +228,19 @@ async def get_conversation_for_user(
     )
 
 
+async def get_dossier_for_user(
+    db: AsyncSession,
+    user_id: int,
+    dossier_id: int,
+) -> Dossier | None:
+    return await db.scalar(
+        select(Dossier).where(
+            Dossier.id == dossier_id,
+            Dossier.user_id == user_id,
+        )
+    )
+
+
 async def list_user_conversations(
     db: AsyncSession,
     user_id: int,
@@ -201,6 +249,18 @@ async def list_user_conversations(
         select(Conversation)
         .where(Conversation.user_id == user_id)
         .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+    )
+    return list(result)
+
+
+async def list_user_dossiers(
+    db: AsyncSession,
+    user_id: int,
+) -> list[Dossier]:
+    result = await db.scalars(
+        select(Dossier)
+        .where(Dossier.user_id == user_id)
+        .order_by(Dossier.updated_at.desc(), Dossier.id.desc())
     )
     return list(result)
 
@@ -282,6 +342,24 @@ async def touch_conversation(
     return target
 
 
+async def touch_dossier(
+    db: AsyncSession,
+    dossier: Dossier | None = None,
+    dossier_id: int | None = None,
+) -> Dossier | None:
+    target = dossier
+    if target is None and dossier_id is not None:
+        target = await db.get(Dossier, dossier_id)
+
+    if target is None:
+        return None
+
+    target.updated_at = utcnow()
+    db.add(target)
+    await db.flush()
+    return target
+
+
 async def update_conversation_title(
     db: AsyncSession,
     conversation: Conversation,
@@ -290,6 +368,36 @@ async def update_conversation_title(
     conversation.title = (title or "").strip()
     await touch_conversation(db, conversation=conversation)
     return conversation
+
+
+async def update_dossier_fields(
+    db: AsyncSession,
+    dossier: Dossier,
+    *,
+    title: str | None = None,
+    case_type: str | None = None,
+    summary: str | None = None,
+    status: str | None = None,
+) -> Dossier:
+    if title is not None:
+        dossier.title = (title or "").strip()
+    if case_type is not None:
+        dossier.case_type = (case_type or "").strip() or None
+    if summary is not None:
+        dossier.summary = (summary or "").strip() or None
+    if status is not None:
+        dossier.status = normalize_dossier_status(status)
+    await touch_dossier(db, dossier=dossier)
+    return dossier
+
+
+async def archive_dossier_record(
+    db: AsyncSession,
+    dossier: Dossier,
+) -> Dossier:
+    dossier.status = "archived"
+    await touch_dossier(db, dossier=dossier)
+    return dossier
 
 
 async def update_conversation_case_summary(
@@ -341,6 +449,16 @@ async def update_conversation_mode_state(
         conversation.mode_reason = (mode_reason or "").strip() or None
     if mark_confirmed:
         conversation.mode_confirmed_at = utcnow()
+    await touch_conversation(db, conversation=conversation)
+    return conversation
+
+
+async def attach_conversation_to_dossier(
+    db: AsyncSession,
+    conversation: Conversation,
+    dossier_id: int | None,
+) -> Conversation:
+    conversation.dossier_id = dossier_id
     await touch_conversation(db, conversation=conversation)
     return conversation
 
@@ -463,6 +581,19 @@ async def search_user_cases(
     return list(result)
 
 
+def serialize_dossier(dossier: Dossier) -> dict[str, Any]:
+    return {
+        "id": dossier.id,
+        "user_id": dossier.user_id,
+        "title": dossier.title,
+        "case_type": dossier.case_type or "",
+        "summary": dossier.summary or "",
+        "status": normalize_dossier_status(getattr(dossier, "status", DEFAULT_DOSSIER_STATUS)),
+        "created_at": dossier.created_at.isoformat() if dossier.created_at else None,
+        "updated_at": dossier.updated_at.isoformat() if dossier.updated_at else None,
+    }
+
+
 def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
     conversation_mode = normalize_conversation_mode(
         getattr(conversation, "conversation_mode", DEFAULT_CONVERSATION_MODE)
@@ -473,6 +604,7 @@ def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
     return {
         "id": conversation.id,
         "user_id": conversation.user_id,
+        "dossier_id": getattr(conversation, "dossier_id", None),
         "session_id": conversation.session_id,
         "title": conversation.title,
         "case_summary": conversation.case_summary or "",

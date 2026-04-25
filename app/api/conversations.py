@@ -10,11 +10,13 @@ from app.core.security import AuthenticatedUser, get_current_user
 from app.database.mysql_db import get_db
 from app.services.conversation_store import (
     DEFAULT_CONVERSATION_TITLE,
+    attach_conversation_to_dossier,
     clear_conversation_messages,
     create_conversation_record,
     delete_conversation_record,
     ensure_storage_schema,
     get_conversation_for_user,
+    get_dossier_for_user,
     list_user_conversations_by_ids,
     list_conversation_messages,
     list_user_conversations,
@@ -51,6 +53,10 @@ class ConversationModeConsentRequest(BaseModel):
     mode: str = Field(..., min_length=1, max_length=32)
     consent: str = Field(..., min_length=1, max_length=32)
     reason: str | None = Field(default=None, max_length=1000)
+
+
+class ConversationAttachDossierRequest(BaseModel):
+    dossier_id: int = Field(..., gt=0)
 
 
 def _build_graph_cleanup_response(
@@ -282,6 +288,28 @@ async def set_conversation_mode_consent(
         mode_reason=payload.reason,
         mark_confirmed=True,
     )
+    await db.commit()
+    await db.refresh(conversation)
+    return {"status": "success", "conversation": serialize_conversation(conversation)}
+
+
+@router.post("/{conversation_id}/attach-dossier")
+async def attach_dossier(
+    conversation_id: int,
+    payload: ConversationAttachDossierRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    conversation = await get_conversation_for_user(db, current_user.user_id, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
+    dossier = await get_dossier_for_user(db, current_user.user_id, payload.dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    await attach_conversation_to_dossier(db, conversation, dossier.id)
     await db.commit()
     await db.refresh(conversation)
     return {"status": "success", "conversation": serialize_conversation(conversation)}
