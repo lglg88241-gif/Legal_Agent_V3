@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -21,6 +22,7 @@ DEFAULT_CONVERSATION_MODE = "UNKNOWN"
 DEFAULT_PERSISTENCE_CONSENT = "unknown"
 DEFAULT_DOSSIER_STATUS = "active"
 VALID_DOSSIER_STATUSES = {"active", "archived", "closed"}
+DEFAULT_PARTICIPANT_ALIASES: dict[str, dict[str, Any]] = {}
 
 
 def _ensure_conversation_updated_at(sync_conn) -> None:
@@ -182,6 +184,10 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
             "WHERE auto_summary_source_count IS NULL"
         )
     )
+
+    dossier_columns = {column["name"] for column in inspector.get_columns("dossiers")}
+    if "participant_aliases_json" not in dossier_columns:
+        sync_conn.execute(text("ALTER TABLE dossiers ADD COLUMN participant_aliases_json TEXT"))
 
 
 async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
@@ -470,6 +476,53 @@ async def update_dossier_auto_summary(
     return dossier
 
 
+def _load_participant_aliases(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return dict(DEFAULT_PARTICIPANT_ALIASES)
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return dict(DEFAULT_PARTICIPANT_ALIASES)
+    return parsed if isinstance(parsed, dict) else dict(DEFAULT_PARTICIPANT_ALIASES)
+
+
+def _normalize_participant_aliases(
+    participant_aliases: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(participant_aliases, dict):
+        return {}
+
+    normalized: dict[str, dict[str, Any]] = {}
+    for key, value in participant_aliases.items():
+        if not isinstance(key, str) or not isinstance(value, dict):
+            continue
+        label = str(value.get("label") or "").strip()
+        role = str(value.get("role") or "").strip()
+        party_side = str(value.get("party_side") or "").strip()
+        if not label and not role:
+            continue
+        normalized[key] = {
+            "label": label,
+            "role": role,
+            "party_side": party_side or key,
+            "confirmed_by_user": True,
+        }
+    return normalized
+
+
+async def update_dossier_participant_aliases(
+    db: AsyncSession,
+    dossier: Dossier,
+    participant_aliases: dict[str, Any] | None,
+) -> Dossier:
+    normalized = _normalize_participant_aliases(participant_aliases)
+    dossier.participant_aliases_json = json.dumps(normalized, ensure_ascii=False) if normalized else None
+    await touch_dossier(db, dossier=dossier)
+    return dossier
+
+
 async def update_conversation_case_summary(
     db: AsyncSession,
     conversation: Conversation,
@@ -652,6 +705,9 @@ async def search_user_cases(
 
 
 def serialize_dossier(dossier: Dossier) -> dict[str, Any]:
+    participant_aliases = _load_participant_aliases(
+        getattr(dossier, "participant_aliases_json", None)
+    )
     return {
         "id": dossier.id,
         "user_id": dossier.user_id,
@@ -665,6 +721,7 @@ def serialize_dossier(dossier: Dossier) -> dict[str, Any]:
             else None
         ),
         "auto_summary_source_count": int(getattr(dossier, "auto_summary_source_count", 0) or 0),
+        "participant_aliases": participant_aliases,
         "status": normalize_dossier_status(getattr(dossier, "status", DEFAULT_DOSSIER_STATUS)),
         "created_at": dossier.created_at.isoformat() if dossier.created_at else None,
         "updated_at": dossier.updated_at.isoformat() if dossier.updated_at else None,

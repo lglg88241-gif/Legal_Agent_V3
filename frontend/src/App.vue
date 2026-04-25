@@ -423,6 +423,46 @@
             </div>
           </div>
 
+          <div class="dossier-participants-section">
+            <div class="dossier-auto-summary-header">
+              <div class="dossier-detail-conversations-title">当事人称呼</div>
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="dossierParticipantsSaving"
+                @click="handleUpdateDossierParticipants"
+              >
+                保存当事人称呼
+              </el-button>
+            </div>
+            <div class="dossier-participants-hint">
+              这些称呼是用户确认的案卷别名，可使用化名或角色名，不等同于真实姓名。
+            </div>
+            <div class="dossier-participants-grid">
+              <el-input
+                v-model="dossierParticipantForm.primary_label"
+                maxlength="100"
+                placeholder="主要当事人称呼，例如：我"
+              />
+              <el-input
+                v-model="dossierParticipantForm.primary_role"
+                maxlength="100"
+                placeholder="主要当事人角色，例如：劳动者"
+              />
+              <el-input
+                v-model="dossierParticipantForm.opposing_label"
+                maxlength="100"
+                placeholder="对方称呼，例如：公司"
+              />
+              <el-input
+                v-model="dossierParticipantForm.opposing_role"
+                maxlength="100"
+                placeholder="对方角色，例如：用人单位"
+              />
+            </div>
+          </div>
+
           <div class="dossier-detail-conversations">
             <div class="dossier-detail-conversations-title">绑定会话</div>
             <el-empty
@@ -462,6 +502,77 @@
       </div>
     </div>
   </el-drawer>
+
+  <el-dialog
+    v-model="trackedOnboardingVisible"
+    title="案卷初始化"
+    width="520px"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    :show-close="false"
+  >
+    <div class="tracked-onboarding-copy">
+      <div class="tracked-onboarding-title">为了后续持续跟踪，请确认案卷和当事人称呼。</div>
+      <div class="tracked-onboarding-subtitle">
+        你可以使用化名或角色名，不需要填写真实姓名。
+      </div>
+      <div class="tracked-onboarding-subtitle">
+        当前聊天记录仍会保存在会话历史中；选择持续跟踪后，系统会把案情整理为可持续维护的结构化案情。
+      </div>
+    </div>
+
+    <div class="tracked-onboarding-form">
+      <el-input
+        v-model="trackedOnboardingForm.title"
+        maxlength="255"
+        placeholder="案卷名称"
+      />
+      <div class="tracked-onboarding-grid">
+        <el-input
+          v-model="trackedOnboardingForm.primary_label"
+          maxlength="100"
+          placeholder="主要当事人称呼，例如：我"
+        />
+        <el-input
+          v-model="trackedOnboardingForm.primary_role"
+          maxlength="100"
+          placeholder="主要当事人角色，例如：劳动者"
+        />
+        <el-input
+          v-model="trackedOnboardingForm.opposing_label"
+          maxlength="100"
+          placeholder="对方称呼，例如：公司"
+        />
+        <el-input
+          v-model="trackedOnboardingForm.opposing_role"
+          maxlength="100"
+          placeholder="对方角色，例如：用人单位"
+        />
+      </div>
+      <div class="tracked-onboarding-hint">
+        {{
+          trackedOnboardingState.dossierId
+            ? '当前会话已绑定案卷，本次会更新该案卷的名称和当事人称呼。'
+            : '当前会为这次持续跟踪创建一个新案卷，并把本会话绑定到该案卷。'
+        }}
+      </div>
+    </div>
+
+    <template #footer>
+      <div class="tracked-onboarding-actions">
+        <el-button @click="handleCancelTrackedOnboarding" :disabled="trackedOnboardingSubmitting">
+          取消
+        </el-button>
+        <el-button
+          type="primary"
+          :loading="trackedOnboardingSubmitting"
+          @click="handleConfirmTrackedOnboarding"
+        >
+          确认并继续
+        </el-button>
+      </div>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
@@ -502,6 +613,7 @@ import {
   setLocalModelStatus,
   submitFeedback,
   updateDossier,
+  updateDossierParticipants,
   updateConversationTitle,
 } from './api/index.js'
 import { clearAuthSession, getStoredUser } from './utils/auth.js'
@@ -535,7 +647,10 @@ const selectedDossierId = ref(null)
 const selectedDossierDetail = ref(null)
 const dossierDetailLoading = ref(false)
 const dossierDetailSaving = ref(false)
+const dossierParticipantsSaving = ref(false)
 const dossierSummaryGenerating = ref(false)
+const trackedOnboardingVisible = ref(false)
+const trackedOnboardingSubmitting = ref(false)
 const dossierForm = reactive({
   title: '',
   case_type: '',
@@ -547,6 +662,27 @@ const dossierDetailForm = reactive({
   summary: '',
   status: 'active',
 })
+const dossierParticipantForm = reactive({
+  primary_label: '',
+  primary_role: '',
+  opposing_label: '',
+  opposing_role: '',
+})
+const trackedOnboardingForm = reactive({
+  title: '',
+  primary_label: '',
+  primary_role: '',
+  opposing_label: '',
+  opposing_role: '',
+})
+const trackedOnboardingState = reactive({
+  conversationId: null,
+  text: '',
+  forceCurrentCase: false,
+  draftText: '',
+  dossierId: null,
+})
+let trackedOnboardingResolver = null
 const localModel = reactive({
   enabled: false,
   healthy: false,
@@ -748,11 +884,56 @@ function resetDossierForm() {
   dossierForm.summary = ''
 }
 
+function defaultParticipantDrafts(caseType = '') {
+  const normalized = String(caseType || '').trim()
+  const isLabor = normalized.includes('劳动')
+  return {
+    title: isLabor ? '劳动争议案卷' : '案情跟踪案卷',
+    primary_label: '我',
+    primary_role: isLabor ? '劳动者' : '当事人',
+    opposing_label: isLabor ? '公司' : '对方',
+    opposing_role: isLabor ? '用人单位' : '对方当事人',
+  }
+}
+
+function applyParticipantAliasesToForm(form, participantAliases = {}, caseType = '') {
+  const defaults = defaultParticipantDrafts(caseType)
+  const primary = participantAliases?.primary_party || {}
+  const opposing = participantAliases?.opposing_party || {}
+  form.primary_label = primary.label || defaults.primary_label
+  form.primary_role = primary.role || defaults.primary_role
+  form.opposing_label = opposing.label || defaults.opposing_label
+  form.opposing_role = opposing.role || defaults.opposing_role
+}
+
+function resetDossierParticipantForm(caseType = '') {
+  applyParticipantAliasesToForm(dossierParticipantForm, {}, caseType)
+}
+
 function resetDossierDetailForm() {
   dossierDetailForm.title = ''
   dossierDetailForm.case_type = ''
   dossierDetailForm.summary = ''
   dossierDetailForm.status = 'active'
+  resetDossierParticipantForm()
+}
+
+function resetTrackedOnboardingForm(caseType = '') {
+  const defaults = defaultParticipantDrafts(caseType)
+  trackedOnboardingForm.title = defaults.title
+  trackedOnboardingForm.primary_label = defaults.primary_label
+  trackedOnboardingForm.primary_role = defaults.primary_role
+  trackedOnboardingForm.opposing_label = defaults.opposing_label
+  trackedOnboardingForm.opposing_role = defaults.opposing_role
+}
+
+function clearTrackedOnboardingState() {
+  trackedOnboardingState.conversationId = null
+  trackedOnboardingState.text = ''
+  trackedOnboardingState.forceCurrentCase = false
+  trackedOnboardingState.draftText = ''
+  trackedOnboardingState.dossierId = null
+  resetTrackedOnboardingForm()
 }
 
 function applySelectedDossierDetail(dossier) {
@@ -766,6 +947,11 @@ function applySelectedDossierDetail(dossier) {
   dossierDetailForm.case_type = dossier.case_type || ''
   dossierDetailForm.summary = dossier.summary || ''
   dossierDetailForm.status = dossier.status || 'active'
+  applyParticipantAliasesToForm(
+    dossierParticipantForm,
+    dossier.participant_aliases || {},
+    dossier.case_type || ''
+  )
 }
 
 function resetAnalysis() {
@@ -1040,6 +1226,40 @@ async function handleUpdateDossierDetail() {
   }
 }
 
+async function handleUpdateDossierParticipants() {
+  if (!selectedDossierId.value) return
+
+  const primaryLabel = String(dossierParticipantForm.primary_label || '').trim()
+  const primaryRole = String(dossierParticipantForm.primary_role || '').trim()
+  const opposingLabel = String(dossierParticipantForm.opposing_label || '').trim()
+  const opposingRole = String(dossierParticipantForm.opposing_role || '').trim()
+
+  if (!primaryLabel || !primaryRole || !opposingLabel || !opposingRole) {
+    ElMessage.warning('请先补全当事人称呼和角色')
+    return
+  }
+
+  dossierParticipantsSaving.value = true
+  try {
+    const { data } = await updateDossierParticipants(selectedDossierId.value, {
+      participant_aliases: buildParticipantAliasesPayload(dossierParticipantForm),
+    })
+
+    if (data?.dossier) {
+      upsertDossierLocal(data.dossier)
+    }
+
+    await refreshDossiers({ silent: true, preferredDossierId: selectedDossierId.value })
+    await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
+    ElMessage.success('当事人称呼已更新')
+  } catch (error) {
+    console.error('Failed to update dossier participants:', error)
+    ElMessage.error('保存当事人称呼失败')
+  } finally {
+    dossierParticipantsSaving.value = false
+  }
+}
+
 async function handleGenerateDossierSummary() {
   if (!selectedDossierId.value) return
 
@@ -1061,6 +1281,88 @@ async function handleGenerateDossierSummary() {
 async function handleCreateConversationFromSelectedDossier() {
   if (!selectedDossierId.value) return
   await createNewConversation({ dossierId: selectedDossierId.value })
+}
+
+async function handleConfirmTrackedOnboarding() {
+  const conversationId = trackedOnboardingState.conversationId
+  if (!conversationId) return
+
+  const title = String(trackedOnboardingForm.title || '').trim()
+  const primaryLabel = String(trackedOnboardingForm.primary_label || '').trim()
+  const primaryRole = String(trackedOnboardingForm.primary_role || '').trim()
+  const opposingLabel = String(trackedOnboardingForm.opposing_label || '').trim()
+  const opposingRole = String(trackedOnboardingForm.opposing_role || '').trim()
+
+  if (!title || !primaryLabel || !primaryRole || !opposingLabel || !opposingRole) {
+    ElMessage.warning('请先补全案卷名称和当事人称呼')
+    return
+  }
+
+  trackedOnboardingSubmitting.value = true
+  try {
+    const conversation =
+      conversations.value.find((item) => item.id === conversationId) || currentConversation.value
+    let dossierId = trackedOnboardingState.dossierId
+    const boundDossier =
+      (dossierId && selectedDossierDetail.value?.id === dossierId
+        ? selectedDossierDetail.value
+        : dossiers.value.find((item) => item.id === dossierId)) || null
+
+    if (!dossierId) {
+      const { data } = await createDossier({
+        title,
+        case_type: String(conversation?.case_type || '').trim() || undefined,
+      })
+      if (!data?.dossier?.id) {
+        throw new Error('Failed to create dossier')
+      }
+      dossierId = data.dossier.id
+      trackedOnboardingState.dossierId = dossierId
+      upsertDossierLocal(data.dossier)
+    } else if (!boundDossier || title !== (boundDossier.title || '')) {
+      const { data } = await updateDossier(dossierId, {
+        title,
+      })
+      if (data?.dossier) {
+        upsertDossierLocal(data.dossier)
+      }
+    }
+
+    const { data: participantsData } = await updateDossierParticipants(dossierId, {
+      participant_aliases: buildParticipantAliasesPayload(trackedOnboardingForm),
+    })
+    if (participantsData?.dossier) {
+      upsertDossierLocal(participantsData.dossier)
+    }
+
+    const { data: consentData } = await setConversationModeConsent(conversationId, {
+      mode: 'TRACKED_CASE',
+      consent: 'tracked',
+      reason: 'user_selected_tracked',
+    })
+    if (consentData?.conversation) {
+      upsertConversationLocal(consentData.conversation)
+    }
+
+    if (conversation?.dossier_id !== dossierId) {
+      const { data: attachData } = await attachConversationToDossier(conversationId, dossierId)
+      if (attachData?.conversation) {
+        upsertConversationLocal(attachData.conversation)
+      }
+    }
+
+    await refreshConversationList(conversationId)
+    await refreshDossiers({ silent: true, preferredDossierId: dossierId })
+    await loadSelectedDossierDetail(dossierId, { silent: true })
+    finalizeTrackedOnboarding({ cancelled: false })
+    clearTrackedOnboardingState()
+  } catch (error) {
+    console.error('Failed to complete tracked onboarding:', error)
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '案卷初始化失败')
+  } finally {
+    trackedOnboardingSubmitting.value = false
+  }
 }
 
 async function createNewConversation(options = {}) {
@@ -1406,6 +1708,67 @@ function formatDossierConversationTime(value) {
   })
 }
 
+function buildParticipantAliasesPayload(form) {
+  return {
+    primary_party: {
+      label: String(form.primary_label || '').trim(),
+      role: String(form.primary_role || '').trim(),
+      party_side: 'claimant',
+    },
+    opposing_party: {
+      label: String(form.opposing_label || '').trim(),
+      role: String(form.opposing_role || '').trim(),
+      party_side: 'opponent',
+    },
+  }
+}
+
+function resolveTrackedOnboardingDossierSeed(conversationId) {
+  const conversation =
+    conversations.value.find((item) => item.id === conversationId) || currentConversation.value
+  const boundDossierId = conversation?.dossier_id || null
+  const boundDossier =
+    (boundDossierId && selectedDossierDetail.value?.id === boundDossierId
+      ? selectedDossierDetail.value
+      : dossiers.value.find((item) => item.id === boundDossierId)) || null
+
+  const defaults = defaultParticipantDrafts(conversation?.case_type || '')
+  trackedOnboardingState.dossierId = boundDossierId
+  trackedOnboardingForm.title = boundDossier?.title || defaults.title
+  applyParticipantAliasesToForm(
+    trackedOnboardingForm,
+    boundDossier?.participant_aliases || {},
+    conversation?.case_type || ''
+  )
+}
+
+function finalizeTrackedOnboarding(result) {
+  trackedOnboardingVisible.value = false
+  const resolver = trackedOnboardingResolver
+  trackedOnboardingResolver = null
+  if (resolver) {
+    resolver(result)
+  }
+}
+
+async function resolveTrackedOnboarding(options = {}) {
+  trackedOnboardingState.conversationId = options.conversationId || currentConversationId.value
+  trackedOnboardingState.text = options.text || ''
+  trackedOnboardingState.forceCurrentCase = Boolean(options.forceCurrentCase)
+  trackedOnboardingState.draftText = options.draftText || ''
+  resolveTrackedOnboardingDossierSeed(trackedOnboardingState.conversationId)
+  trackedOnboardingVisible.value = true
+  return new Promise((resolve) => {
+    trackedOnboardingResolver = resolve
+  })
+}
+
+function handleCancelTrackedOnboarding() {
+  if (trackedOnboardingSubmitting.value) return
+  finalizeTrackedOnboarding({ cancelled: true })
+  clearTrackedOnboardingState()
+}
+
 async function resolveModeConsentSuggestion(prompt) {
   const message = [
     prompt || '我注意到你正在描述一个具体案情。是否要保存为持续跟踪的案情会话？',
@@ -1551,6 +1914,27 @@ async function sendImpl(textOverride = null, options = {}) {
 
       if (nextAction === 'cancelled') {
         restoreDraftInput(draftText, '已取消，输入内容已恢复')
+        return
+      }
+
+      if (nextAction === 'tracked') {
+        const onboardingResult = await resolveTrackedOnboarding({
+          conversationId: baseConversationId,
+          text,
+          forceCurrentCase,
+          draftText,
+        })
+        if (onboardingResult?.cancelled) {
+          restoreDraftInput(draftText, '已取消，输入内容已恢复')
+          return
+        }
+
+        await sendImpl(text, {
+          conversationId: baseConversationId,
+          forceCurrentCase,
+          modeConsentEnabled: false,
+          restoreDraftOnErrorText: draftText,
+        })
         return
       }
 
@@ -2356,11 +2740,33 @@ body,
   background: #f8fafc;
 }
 
+.dossier-participants-section {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
 .dossier-auto-summary-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.dossier-participants-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
+.dossier-participants-grid,
+.tracked-onboarding-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .dossier-auto-summary-meta {
@@ -2378,6 +2784,35 @@ body,
   line-height: 1.7;
   font-size: 13px;
   color: #111827;
+}
+
+.tracked-onboarding-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tracked-onboarding-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.tracked-onboarding-subtitle,
+.tracked-onboarding-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
+.tracked-onboarding-form {
+  margin-top: 14px;
+}
+
+.tracked-onboarding-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .dossier-detail-conversations {
@@ -2528,6 +2963,13 @@ body,
 .input-area .el-button {
   height: 54px;
   min-width: 80px;
+}
+
+@media (max-width: 768px) {
+  .dossier-participants-grid,
+  .tracked-onboarding-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .init-overlay {

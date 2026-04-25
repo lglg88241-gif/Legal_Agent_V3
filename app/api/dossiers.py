@@ -19,6 +19,7 @@ from app.services.conversation_store import (
     update_dossier_fields,
     archive_dossier_record,
     update_dossier_auto_summary,
+    update_dossier_participant_aliases,
 )
 from app.services.dossier_summary import generate_dossier_auto_summary
 
@@ -36,6 +37,16 @@ class DossierUpdateRequest(BaseModel):
     case_type: str | None = Field(default=None, max_length=100)
     summary: str | None = Field(default=None, max_length=5000)
     status: str | None = Field(default=None, max_length=32)
+
+
+class DossierParticipantAliasRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=100)
+    role: str = Field(..., min_length=1, max_length=100)
+    party_side: str = Field(..., min_length=1, max_length=32)
+
+
+class DossierParticipantsUpdateRequest(BaseModel):
+    participant_aliases: dict[str, DossierParticipantAliasRequest]
 
 
 @router.get("")
@@ -145,6 +156,28 @@ async def archive_dossier(
         await db.commit()
         await db.refresh(dossier)
 
+    return {"status": "success", "dossier": serialize_dossier(dossier)}
+
+
+@router.patch("/{dossier_id}/participants")
+async def update_dossier_participants(
+    dossier_id: int,
+    payload: DossierParticipantsUpdateRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    aliases_payload = {
+        key: (value.model_dump() if hasattr(value, "model_dump") else value.dict())
+        for key, value in payload.participant_aliases.items()
+    }
+    await update_dossier_participant_aliases(db, dossier, aliases_payload)
+    await db.commit()
+    await db.refresh(dossier)
     return {"status": "success", "dossier": serialize_dossier(dossier)}
 
 

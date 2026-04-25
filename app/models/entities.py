@@ -67,6 +67,11 @@ class Dossier(Base):
         default=0,
         server_default="0",
     )
+    participant_aliases_json: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,

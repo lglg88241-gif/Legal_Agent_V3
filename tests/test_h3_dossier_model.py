@@ -134,6 +134,24 @@ def test_serialize_dossier_includes_auto_summary_defaults() -> None:
     assert serialized["auto_summary"] == ""
     assert serialized["auto_summary_updated_at"] is None
     assert serialized["auto_summary_source_count"] == 0
+    assert serialized["participant_aliases"] == {}
+
+
+def test_serialize_dossier_includes_participant_aliases() -> None:
+    dossier = Dossier(
+        id=14,
+        user_id=7,
+        title="\u52b3\u52a8\u4e89\u8bae\u6848\u5377",
+        case_type="\u52b3\u52a8\u4e89\u8bae",
+        summary="\u624b\u52a8\u6458\u8981",
+        status="active",
+        participant_aliases_json='{"primary_party":{"label":"\\u6211","role":"\\u52b3\\u52a8\\u8005","party_side":"claimant","confirmed_by_user":true}}',
+    )
+
+    serialized = serialize_dossier(dossier)
+
+    assert serialized["participant_aliases"]["primary_party"]["label"] == "\u6211"
+    assert serialized["participant_aliases"]["primary_party"]["confirmed_by_user"] is True
 
 
 def test_runtime_schema_creates_dossiers_table_and_conversation_dossier_id() -> None:
@@ -179,6 +197,7 @@ def test_runtime_schema_creates_dossiers_table_and_conversation_dossier_id() -> 
                     "auto_summary",
                     "auto_summary_updated_at",
                     "auto_summary_source_count",
+                    "participant_aliases_json",
                 } <= dossier_columns
         finally:
             sync_engine.dispose()
@@ -468,6 +487,91 @@ def test_delete_dossier_archives_record(
 
     assert result["status"] == "success"
     assert result["dossier"]["status"] == "archived"
+
+
+def test_update_dossier_participants_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=10,
+        user_id=2,
+        title="\u6848\u5377",
+        case_type="\u52b3\u52a8\u4e89\u8bae",
+        summary="summary",
+        status="active",
+    )
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+
+    result = asyncio.run(
+        dossiers_api.update_dossier_participants(
+            dossier_id=10,
+            payload=dossiers_api.DossierParticipantsUpdateRequest(
+                participant_aliases={
+                    "primary_party": dossiers_api.DossierParticipantAliasRequest(
+                        label="\u6211",
+                        role="\u52b3\u52a8\u8005",
+                        party_side="claimant",
+                    ),
+                    "opposing_party": dossiers_api.DossierParticipantAliasRequest(
+                        label="\u516c\u53f8",
+                        role="\u7528\u4eba\u5355\u4f4d",
+                        party_side="opponent",
+                    ),
+                }
+            ),
+            current_user=AuthenticatedUser(user_id=2, username="owner"),
+            db=DummyDB(),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["dossier"]["participant_aliases"]["primary_party"]["label"] == "\u6211"
+    assert result["dossier"]["participant_aliases"]["primary_party"]["confirmed_by_user"] is True
+    assert result["dossier"]["participant_aliases"]["opposing_party"]["party_side"] == "opponent"
+
+
+def test_update_dossier_participants_other_user_returns_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return None
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            dossiers_api.update_dossier_participants(
+                dossier_id=11,
+                payload=dossiers_api.DossierParticipantsUpdateRequest(
+                    participant_aliases={
+                        "primary_party": dossiers_api.DossierParticipantAliasRequest(
+                            label="\u6211",
+                            role="\u52b3\u52a8\u8005",
+                            party_side="claimant",
+                        )
+                    }
+                ),
+                current_user=AuthenticatedUser(user_id=2, username="owner"),
+                db=DummyDB(),
+            )
+        )
+
+    assert exc_info.value.status_code == 404
 
 
 def test_attach_conversation_to_owned_dossier_success(
@@ -796,6 +900,58 @@ def test_load_dossier_context_for_conversation_returns_owned_dossier_detail(
     assert result["conversation_count"] == 2
     assert result["conversations"][0]["id"] == 61
     assert result["conversations"][0]["case_summary"] == "第一轮案情摘要"
+
+def test_load_dossier_context_for_conversation_includes_participant_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossier = Dossier(
+        id=72,
+        user_id=7,
+        title="\u52b3\u52a8\u4e89\u8bae\u6848\u5377",
+        case_type="\u52b3\u52a8\u4e89\u8bae",
+        summary="\u89e3\u9664\u52b3\u52a8\u5408\u540c\u4e89\u8bae",
+        status="active",
+        participant_aliases_json='{"primary_party":{"label":"\\u6211","role":"\\u52b3\\u52a8\\u8005","party_side":"claimant","confirmed_by_user":true},"opposing_party":{"label":"\\u516c\\u53f8","role":"\\u7528\\u4eba\\u5355\\u4f4d","party_side":"opponent","confirmed_by_user":true}}',
+    )
+    active_conversation = Conversation(
+        id=81,
+        user_id=7,
+        dossier_id=72,
+        session_id="session-81",
+        title="\u5f53\u524d\u4f1a\u8bdd",
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    async def fake_get_conversation_for_user(db, user_id: int, conversation_id: int):
+        return active_conversation
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_list_dossier_conversations(db, user_id: int, dossier_id: int):
+        return [active_conversation]
+
+    monkeypatch.setattr(
+        "app.services.conversation_store.get_conversation_for_user",
+        fake_get_conversation_for_user,
+    )
+    monkeypatch.setattr(
+        "app.services.conversation_store.get_dossier_for_user",
+        fake_get_dossier_for_user,
+    )
+    monkeypatch.setattr(
+        "app.services.conversation_store.list_dossier_conversations",
+        fake_list_dossier_conversations,
+    )
+
+    result = asyncio.run(
+        load_dossier_context_for_conversation(DummyDB(), user_id=7, conversation_id=81)
+    )
+
+    assert result is not None
+    assert result["participant_aliases"]["primary_party"]["label"] == "\u6211"
+    assert result["participant_aliases"]["opposing_party"]["role"] == "\u7528\u4eba\u5355\u4f4d"
 
 
 def test_load_dossier_context_for_conversation_respects_user_isolation(

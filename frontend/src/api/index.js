@@ -91,6 +91,8 @@ export const getDossierDetail = (dossierId) => api.get(`/dossiers/${dossierId}`)
 export const createDossier = (payload) => api.post('/dossiers', payload)
 export const updateDossier = (dossierId, payload) =>
   api.patch(`/dossiers/${dossierId}`, payload)
+export const updateDossierParticipants = (dossierId, payload) =>
+  api.patch(`/dossiers/${dossierId}/participants`, payload)
 export const generateDossierSummary = (dossierId) =>
   api.post(`/dossiers/${dossierId}/generate-summary`)
 export const archiveDossier = (dossierId) => api.delete(`/dossiers/${dossierId}`)
