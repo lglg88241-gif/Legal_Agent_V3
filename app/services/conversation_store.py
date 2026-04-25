@@ -145,6 +145,44 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
     if "dossier_id" not in columns:
         sync_conn.execute(text("ALTER TABLE conversations ADD COLUMN dossier_id INTEGER"))
 
+    inspector = inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    if "dossiers" not in tables:
+        return
+
+    dossier_columns = {column["name"] for column in inspector.get_columns("dossiers")}
+    if "auto_summary" not in dossier_columns:
+        sync_conn.execute(text("ALTER TABLE dossiers ADD COLUMN auto_summary TEXT"))
+
+    dossier_columns = {column["name"] for column in inspector.get_columns("dossiers")}
+    if "auto_summary_updated_at" not in dossier_columns:
+        sync_conn.execute(text("ALTER TABLE dossiers ADD COLUMN auto_summary_updated_at DATETIME"))
+
+    dossier_columns = {column["name"] for column in inspector.get_columns("dossiers")}
+    if "auto_summary_source_count" not in dossier_columns:
+        if sync_conn.dialect.name == "postgresql":
+            sync_conn.execute(
+                text(
+                    "ALTER TABLE dossiers "
+                    "ADD COLUMN auto_summary_source_count INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+        else:
+            sync_conn.execute(
+                text(
+                    "ALTER TABLE dossiers "
+                    "ADD COLUMN auto_summary_source_count INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+
+    sync_conn.execute(
+        text(
+            "UPDATE dossiers "
+            "SET auto_summary_source_count = COALESCE(auto_summary_source_count, 0) "
+            "WHERE auto_summary_source_count IS NULL"
+        )
+    )
+
 
 async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
     target_engine = bind_engine or engine
@@ -418,6 +456,20 @@ async def archive_dossier_record(
     return dossier
 
 
+async def update_dossier_auto_summary(
+    db: AsyncSession,
+    dossier: Dossier,
+    *,
+    auto_summary: str,
+    auto_summary_source_count: int,
+) -> Dossier:
+    dossier.auto_summary = (auto_summary or "").strip() or None
+    dossier.auto_summary_updated_at = utcnow() if dossier.auto_summary else None
+    dossier.auto_summary_source_count = max(int(auto_summary_source_count or 0), 0)
+    await touch_dossier(db, dossier=dossier)
+    return dossier
+
+
 async def update_conversation_case_summary(
     db: AsyncSession,
     conversation: Conversation,
@@ -606,6 +658,13 @@ def serialize_dossier(dossier: Dossier) -> dict[str, Any]:
         "title": dossier.title,
         "case_type": dossier.case_type or "",
         "summary": dossier.summary or "",
+        "auto_summary": getattr(dossier, "auto_summary", None) or "",
+        "auto_summary_updated_at": (
+            dossier.auto_summary_updated_at.isoformat()
+            if getattr(dossier, "auto_summary_updated_at", None)
+            else None
+        ),
+        "auto_summary_source_count": int(getattr(dossier, "auto_summary_source_count", 0) or 0),
         "status": normalize_dossier_status(getattr(dossier, "status", DEFAULT_DOSSIER_STATUS)),
         "created_at": dossier.created_at.isoformat() if dossier.created_at else None,
         "updated_at": dossier.updated_at.isoformat() if dossier.updated_at else None,

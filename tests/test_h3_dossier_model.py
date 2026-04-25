@@ -15,6 +15,7 @@ from app.services.conversation_store import (
     ensure_storage_schema,
     load_dossier_context_for_conversation,
     serialize_conversation,
+    serialize_dossier,
 )
 
 
@@ -63,8 +64,11 @@ def _load_conversations_api_module():
 
 
 def _load_dossiers_api_module():
+    _install_common_stubs()
     sys.modules.pop("app.api.dossiers", None)
-    return importlib.import_module("app.api.dossiers")
+    module = importlib.import_module("app.api.dossiers")
+    sys.modules.pop("app.services.llm_service", None)
+    return module
 
 
 class DummyDB:
@@ -114,6 +118,24 @@ def test_serialize_conversation_includes_bound_dossier_id() -> None:
     assert serialized["dossier_id"] == 5
 
 
+def test_serialize_dossier_includes_auto_summary_defaults() -> None:
+    dossier = Dossier(
+        id=13,
+        user_id=7,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="手动摘要",
+        status="active",
+    )
+
+    serialized = serialize_dossier(dossier)
+
+    assert serialized["summary"] == "手动摘要"
+    assert serialized["auto_summary"] == ""
+    assert serialized["auto_summary_updated_at"] is None
+    assert serialized["auto_summary_source_count"] == 0
+
+
 def test_runtime_schema_creates_dossiers_table_and_conversation_dossier_id() -> None:
     async def _run() -> None:
         sync_engine = create_engine("sqlite:///:memory:")
@@ -149,7 +171,15 @@ def test_runtime_schema_creates_dossiers_table_and_conversation_dossier_id() -> 
                     column["name"] for column in inspector.get_columns("dossiers")
                 }
                 assert "dossier_id" in conversation_columns
-                assert {"title", "case_type", "summary", "status"} <= dossier_columns
+                assert {
+                    "title",
+                    "case_type",
+                    "summary",
+                    "status",
+                    "auto_summary",
+                    "auto_summary_updated_at",
+                    "auto_summary_source_count",
+                } <= dossier_columns
         finally:
             sync_engine.dispose()
 

@@ -373,6 +373,7 @@
             maxlength="100"
             placeholder="案由 / 类型"
           />
+          <div class="dossier-detail-conversations-title">手动摘要</div>
           <el-input
             v-model="dossierDetailForm.summary"
             type="textarea"
@@ -394,6 +395,33 @@
           >
             保存案卷信息
           </el-button>
+
+          <div class="dossier-auto-summary-section">
+            <div class="dossier-auto-summary-header">
+              <div class="dossier-detail-conversations-title">智能摘要</div>
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="dossierSummaryGenerating"
+                @click="handleGenerateDossierSummary"
+              >
+                {{ selectedDossierDetail.auto_summary ? '刷新智能摘要' : '智能生成摘要' }}
+              </el-button>
+            </div>
+            <div
+              v-if="selectedDossierDetail.auto_summary_updated_at || selectedDossierDetail.auto_summary_source_count"
+              class="dossier-auto-summary-meta"
+            >
+              <span v-if="selectedDossierDetail.auto_summary_updated_at">
+                {{ `最近生成：${formatDossierConversationTime(selectedDossierDetail.auto_summary_updated_at)}` }}
+              </span>
+              <span>{{ `来源会话：${selectedDossierDetail.auto_summary_source_count || 0}` }}</span>
+            </div>
+            <div class="dossier-auto-summary-content">
+              {{ selectedDossierDetail.auto_summary || '暂无智能摘要，可基于已绑定会话生成。' }}
+            </div>
+          </div>
 
           <div class="dossier-detail-conversations">
             <div class="dossier-detail-conversations-title">绑定会话</div>
@@ -459,6 +487,7 @@ import {
   createConversation,
   createDossier,
   deleteConversation,
+  generateDossierSummary,
   getConversationGraph,
   getConversationMessages,
   getConversationSummary,
@@ -506,6 +535,7 @@ const selectedDossierId = ref(null)
 const selectedDossierDetail = ref(null)
 const dossierDetailLoading = ref(false)
 const dossierDetailSaving = ref(false)
+const dossierSummaryGenerating = ref(false)
 const dossierForm = reactive({
   title: '',
   case_type: '',
@@ -1007,6 +1037,24 @@ async function handleUpdateDossierDetail() {
     ElMessage.error('Failed to update dossier')
   } finally {
     dossierDetailSaving.value = false
+  }
+}
+
+async function handleGenerateDossierSummary() {
+  if (!selectedDossierId.value) return
+
+  dossierSummaryGenerating.value = true
+  try {
+    await generateDossierSummary(selectedDossierId.value)
+    await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
+    await refreshDossiers({ silent: true, preferredDossierId: selectedDossierId.value })
+    ElMessage.success('智能摘要已更新')
+  } catch (error) {
+    console.error('Failed to generate dossier summary:', error)
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '智能摘要生成失败')
+  } finally {
+    dossierSummaryGenerating.value = false
   }
 }
 
@@ -2299,6 +2347,37 @@ body,
   gap: 8px;
   font-size: 12px;
   color: #4b5563;
+}
+
+.dossier-auto-summary-section {
+  padding: 12px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.dossier-auto-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dossier-auto-summary-meta {
+  margin-top: 8px;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-auto-summary-content {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  line-height: 1.7;
+  font-size: 13px;
+  color: #111827;
 }
 
 .dossier-detail-conversations {

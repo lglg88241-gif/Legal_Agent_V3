@@ -18,7 +18,9 @@ from app.services.conversation_store import (
     serialize_dossier_detail,
     update_dossier_fields,
     archive_dossier_record,
+    update_dossier_auto_summary,
 )
+from app.services.dossier_summary import generate_dossier_auto_summary
 
 router = APIRouter(prefix="/dossiers", tags=["dossiers"])
 
@@ -144,3 +146,40 @@ async def archive_dossier(
         await db.refresh(dossier)
 
     return {"status": "success", "dossier": serialize_dossier(dossier)}
+
+
+@router.post("/{dossier_id}/generate-summary")
+async def generate_dossier_summary(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    try:
+        generated = await generate_dossier_auto_summary(
+            db,
+            user_id=current_user.user_id,
+            dossier=dossier,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    await update_dossier_auto_summary(
+        db,
+        dossier,
+        auto_summary=generated["auto_summary"],
+        auto_summary_source_count=generated["auto_summary_source_count"],
+    )
+    await db.commit()
+    await db.refresh(dossier)
+    conversations = await list_dossier_conversations(db, current_user.user_id, dossier.id)
+    return {
+        "status": "success",
+        "dossier": serialize_dossier_detail(dossier, conversations),
+    }
