@@ -11,9 +11,11 @@ from app.services.conversation_store import (
     create_dossier_record,
     ensure_storage_schema,
     get_dossier_for_user,
+    list_dossier_conversations,
     list_user_dossiers,
     normalize_dossier_status,
     serialize_dossier,
+    serialize_dossier_detail,
     update_dossier_fields,
     archive_dossier_record,
 )
@@ -76,7 +78,11 @@ async def get_dossier(
     dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
     if dossier is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
-    return {"status": "success", "dossier": serialize_dossier(dossier)}
+    conversations = await list_dossier_conversations(db, current_user.user_id, dossier.id)
+    return {
+        "status": "success",
+        "dossier": serialize_dossier_detail(dossier, conversations),
+    }
 
 
 @router.patch("/{dossier_id}")

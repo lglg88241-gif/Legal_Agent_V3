@@ -87,6 +87,7 @@ export const getConversationMessages = (conversationId) =>
 export const deleteConversation = (conversationId) =>
   api.delete(`/conversations/${conversationId}`)
 export const getDossiers = () => api.get('/dossiers')
+export const getDossierDetail = (dossierId) => api.get(`/dossiers/${dossierId}`)
 export const createDossier = (payload) => api.post('/dossiers', payload)
 export const updateDossier = (dossierId, payload) =>
   api.patch(`/dossiers/${dossierId}`, payload)

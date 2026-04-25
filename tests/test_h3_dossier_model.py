@@ -254,6 +254,113 @@ def test_get_other_users_dossier_returns_not_found(
     assert exc_info.value.status_code == 404
 
 
+def test_get_dossier_detail_includes_bound_conversations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=21,
+        user_id=4,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="解除劳动合同争议",
+        status="active",
+    )
+    conversations = [
+        Conversation(
+            id=101,
+            user_id=4,
+            dossier_id=21,
+            session_id="session-101",
+            title="第一次咨询",
+            conversation_mode="TRACKED_CASE",
+            persistence_consent="tracked",
+            case_type="劳动争议",
+        ),
+        Conversation(
+            id=102,
+            user_id=4,
+            dossier_id=21,
+            session_id="session-102",
+            title="补充证据",
+            conversation_mode="CASE_ANALYSIS",
+            persistence_consent="temporary",
+            case_type="劳动争议",
+        ),
+    ]
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_list_dossier_conversations(db, user_id: int, dossier_id: int):
+        assert user_id == 4
+        assert dossier_id == 21
+        return conversations
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+    monkeypatch.setattr(dossiers_api, "list_dossier_conversations", fake_list_dossier_conversations)
+
+    result = asyncio.run(
+        dossiers_api.get_dossier(
+            dossier_id=21,
+            current_user=AuthenticatedUser(user_id=4, username="owner"),
+            db=DummyDB(),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["dossier"]["conversation_count"] == 2
+    assert [item["id"] for item in result["dossier"]["conversations"]] == [101, 102]
+    assert result["dossier"]["conversations"][0]["conversation_mode"] == "TRACKED_CASE"
+    assert result["dossier"]["conversations"][1]["persistence_consent"] == "temporary"
+
+
+def test_get_dossier_detail_uses_current_user_scope_for_conversations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=22,
+        user_id=7,
+        title="我的案卷",
+        case_type="合同纠纷",
+        summary="summary",
+        status="active",
+    )
+    captured: dict[str, int] = {}
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_list_dossier_conversations(db, user_id: int, dossier_id: int):
+        captured["user_id"] = user_id
+        captured["dossier_id"] = dossier_id
+        return []
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+    monkeypatch.setattr(dossiers_api, "list_dossier_conversations", fake_list_dossier_conversations)
+
+    result = asyncio.run(
+        dossiers_api.get_dossier(
+            dossier_id=22,
+            current_user=AuthenticatedUser(user_id=7, username="owner"),
+            db=DummyDB(),
+        )
+    )
+
+    assert captured == {"user_id": 7, "dossier_id": 22}
+    assert result["dossier"]["conversation_count"] == 0
+    assert result["dossier"]["conversations"] == []
+
+
 def test_update_own_dossier_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

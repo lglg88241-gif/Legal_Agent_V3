@@ -265,6 +265,22 @@ async def list_user_dossiers(
     return list(result)
 
 
+async def list_dossier_conversations(
+    db: AsyncSession,
+    user_id: int,
+    dossier_id: int,
+) -> list[Conversation]:
+    result = await db.scalars(
+        select(Conversation)
+        .where(
+            Conversation.user_id == user_id,
+            Conversation.dossier_id == dossier_id,
+        )
+        .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+    )
+    return list(result)
+
+
 async def list_user_conversations_by_ids(
     db: AsyncSession,
     user_id: int,
@@ -592,6 +608,34 @@ def serialize_dossier(dossier: Dossier) -> dict[str, Any]:
         "created_at": dossier.created_at.isoformat() if dossier.created_at else None,
         "updated_at": dossier.updated_at.isoformat() if dossier.updated_at else None,
     }
+
+
+def serialize_dossier_conversation_summary(conversation: Conversation) -> dict[str, Any]:
+    return {
+        "id": conversation.id,
+        "title": conversation.title,
+        "conversation_mode": normalize_conversation_mode(
+            getattr(conversation, "conversation_mode", DEFAULT_CONVERSATION_MODE)
+        ),
+        "persistence_consent": normalize_persistence_consent(
+            getattr(conversation, "persistence_consent", DEFAULT_PERSISTENCE_CONSENT)
+        ),
+        "case_type": getattr(conversation, "case_type", None) or "",
+        "updated_at": conversation.updated_at.isoformat() if conversation.updated_at else None,
+    }
+
+
+def serialize_dossier_detail(
+    dossier: Dossier,
+    conversations: list[Conversation],
+) -> dict[str, Any]:
+    payload = serialize_dossier(dossier)
+    payload["conversation_count"] = len(conversations)
+    payload["conversations"] = [
+        serialize_dossier_conversation_summary(conversation)
+        for conversation in conversations
+    ]
+    return payload
 
 
 def serialize_conversation(conversation: Conversation) -> dict[str, Any]:
