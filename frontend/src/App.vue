@@ -9,7 +9,7 @@
       <div class="system-banner-meta">
         <span>Chroma {{ componentLabel(systemStatus.components.chroma) }}</span>
         <span>Neo4j {{ componentLabel(systemStatus.components.neo4j) }}</span>
-        <span>LLM {{ componentLabel(systemStatus.components.llm) }}</span>
+        <span>云端 LLM {{ componentLabel(systemStatus.components.llm) }}</span>
         <span>Celery {{ componentLabel(systemStatus.components.celery) }}</span>
       </div>
     </div>

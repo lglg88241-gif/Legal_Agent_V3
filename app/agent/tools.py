@@ -102,6 +102,45 @@ _query_expansion_local_llm_lock = threading.Lock()
 _query_expansion_fallback_llm: Any | None = None
 _query_expansion_fallback_llm_lock = threading.Lock()
 _ARTICLE_NUMBER_QUERY_PATTERN = re.compile(r"第[一二三四五六七八九十百零\d]+条")
+_EXPLICIT_ARTICLE_REFERENCE_PATTERN = re.compile(
+    r"第([零〇一二两三四五六七八九十百千\d]+)条"
+)
+_LAW_TITLE_SUFFIX_PATTERN = re.compile(
+    r"(?:《)?([\u4e00-\u9fff]{2,40}(?:法|条例|规定|办法|解释))(?:》)?"
+)
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CHINESE_UNITS = {
+    "十": 10,
+    "百": 100,
+    "千": 1000,
+    "万": 10000,
+}
+_LAW_TITLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "中华人民共和国劳动合同法": ("中华人民共和国劳动合同法", "劳动合同法"),
+    "中华人民共和国劳动法": ("中华人民共和国劳动法", "劳动法"),
+    "中华人民共和国民法典": ("中华人民共和国民法典", "民法典"),
+    "中华人民共和国刑法": ("中华人民共和国刑法", "刑法"),
+    "中华人民共和国社会保险法": ("中华人民共和国社会保险法", "社会保险法"),
+    "中华人民共和国民事诉讼法": ("中华人民共和国民事诉讼法", "民事诉讼法"),
+    "中华人民共和国劳动争议调解仲裁法": (
+        "中华人民共和国劳动争议调解仲裁法",
+        "劳动争议调解仲裁法",
+    ),
+    "工伤保险条例": ("工伤保险条例",),
+}
 
 
 def _extract_query_array_payload(content: str) -> str:
@@ -141,6 +180,242 @@ def _parse_expansion_queries(content: str) -> list[str]:
     else:
         queries = []
     return _coerce_expansion_queries(queries)
+
+
+def _normalize_law_title(value: str) -> str:
+    return (
+        (value or "")
+        .replace("《", "")
+        .replace("》", "")
+        .replace("中华人民共和国", "")
+        .replace("最高人民法院关于", "")
+        .replace("关于审理", "")
+        .replace("的解释", "解释")
+        .replace(" ", "")
+        .strip()
+    )
+
+
+def _law_titles_match(actual: str, expected: str) -> bool:
+    actual_core = _normalize_law_title(actual)
+    expected_core = _normalize_law_title(expected)
+    if not actual_core or not expected_core:
+        return False
+    return expected_core in actual_core or actual_core in expected_core
+
+
+def _parse_chinese_number(raw_value: str) -> int | None:
+    token = (raw_value or "").strip()
+    if not token:
+        return None
+    if token.isdigit():
+        return int(token)
+
+    total = 0
+    section = 0
+    number = 0
+    saw_numeric_token = False
+
+    for char in token:
+        if char in _CHINESE_DIGITS:
+            number = _CHINESE_DIGITS[char]
+            saw_numeric_token = True
+            continue
+        if char in _CHINESE_UNITS:
+            unit = _CHINESE_UNITS[char]
+            saw_numeric_token = True
+            if unit == 10000:
+                section = (section + (number or 0)) * unit
+                total += section
+                section = 0
+                number = 0
+                continue
+            section += (number or 1) * unit
+            number = 0
+            continue
+        return None
+
+    if not saw_numeric_token:
+        return None
+    return total + section + number
+
+
+def _int_to_chinese_number(value: int) -> str:
+    if value <= 0:
+        raise ValueError("Article number must be positive")
+
+    digits = "零一二三四五六七八九"
+    units = ["", "十", "百", "千"]
+    parts: list[str] = []
+    zero_pending = False
+
+    while value > 0:
+        parts.append(str(value % 10))
+        value //= 10
+
+    output: list[str] = []
+    for index, digit_str in enumerate(reversed(parts)):
+        digit = int(digit_str)
+        unit = units[len(parts) - index - 1]
+        if digit == 0:
+            zero_pending = bool(output)
+            continue
+        if zero_pending:
+            output.append("零")
+            zero_pending = False
+        if not (digit == 1 and unit == "十" and not output):
+            output.append(digits[digit])
+        output.append(unit)
+
+    return "".join(output)
+
+
+def _article_number_from_text(raw_value: str) -> int | None:
+    match = _EXPLICIT_ARTICLE_REFERENCE_PATTERN.search((raw_value or "").strip())
+    if not match:
+        return _parse_chinese_number(raw_value)
+    return _parse_chinese_number(match.group(1))
+
+
+def _extract_explicit_law_article_reference(query: str) -> dict[str, Any] | None:
+    normalized_query = " ".join((query or "").strip().split())
+    if not normalized_query:
+        return None
+
+    article_match = _EXPLICIT_ARTICLE_REFERENCE_PATTERN.search(normalized_query)
+    if not article_match:
+        return None
+
+    article_number = _parse_chinese_number(article_match.group(1))
+    if article_number is None:
+        return None
+
+    compact_query = normalized_query.replace("《", "").replace("》", "").replace(" ", "")
+    matched_law_title = ""
+
+    for canonical_title, aliases in sorted(
+        _LAW_TITLE_ALIASES.items(),
+        key=lambda item: max(len(alias) for alias in item[1]),
+        reverse=True,
+    ):
+        for alias in aliases:
+            if alias and alias in compact_query:
+                matched_law_title = canonical_title
+                break
+        if matched_law_title:
+            break
+
+    if not matched_law_title:
+        for candidate in _LAW_TITLE_SUFFIX_PATTERN.findall(compact_query):
+            if candidate and candidate in compact_query[: article_match.start() + len(candidate)]:
+                matched_law_title = candidate
+                break
+
+    if not matched_law_title:
+        return None
+
+    return {
+        "law_title": matched_law_title,
+        "article_number": article_number,
+        "article_label": f"第{_int_to_chinese_number(article_number)}条",
+        "query": normalized_query,
+    }
+
+
+def _mark_exact_match_metadata(
+    metadata: dict[str, Any],
+    query: str,
+    law_title: str,
+    article_label: str,
+) -> dict[str, Any]:
+    enriched_metadata = dict(metadata or {})
+    enriched_metadata["_exact_lookup"] = True
+    enriched_metadata["_exact_lookup_query"] = query
+    enriched_metadata["_exact_lookup_law_title"] = law_title
+    enriched_metadata["_exact_lookup_article"] = article_label
+    return enriched_metadata
+
+
+def _dedupe_candidates_preserve_order(
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for candidate in candidates:
+        candidate_id = str(candidate.get("candidate_id", "")).strip()
+        if not candidate_id or candidate_id in seen_ids:
+            continue
+        seen_ids.add(candidate_id)
+        deduped.append(candidate)
+    return deduped
+
+
+def _get_vectorstore_records(
+    vectorstore: Chroma,
+    *,
+    article_label: str,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    try:
+        payload = vectorstore.get(
+            where={"article": article_label},
+            include=["documents", "metadatas"],
+        )
+    except Exception:
+        payload = vectorstore.get(include=["documents", "metadatas"])
+
+    documents = payload.get("documents") or []
+    metadatas = payload.get("metadatas") or [{} for _ in documents]
+    return documents, metadatas
+
+
+def _lookup_exact_law_article_candidates(
+    query: str,
+    vectorstore: Chroma,
+) -> list[dict[str, Any]]:
+    reference = _extract_explicit_law_article_reference(query)
+    if reference is None:
+        return []
+
+    documents, metadatas = _get_vectorstore_records(
+        vectorstore,
+        article_label=reference["article_label"],
+    )
+
+    exact_candidates: list[dict[str, Any]] = []
+    for document, metadata in zip(documents, metadatas):
+        safe_metadata = metadata or {}
+        content = (document or "").strip()
+        if not content:
+            continue
+
+        if not _law_titles_match(str(safe_metadata.get("law_title", "")), reference["law_title"]):
+            continue
+
+        if _article_number_from_text(str(safe_metadata.get("article", ""))) != reference["article_number"]:
+            continue
+
+        exact_candidates.append(
+            _build_candidate(
+                content=content,
+                source=str(safe_metadata.get("source", "")).strip(),
+                metadata=_mark_exact_match_metadata(
+                    safe_metadata,
+                    reference["query"],
+                    reference["law_title"],
+                    reference["article_label"],
+                ),
+                score=0.0,
+                retrieval="exact",
+                matched_query=reference["query"],
+            )
+        )
+
+    return _dedupe_candidates_preserve_order(exact_candidates)
+
+
+def _is_exact_lookup_candidate(candidate: dict[str, Any]) -> bool:
+    metadata = candidate.get("metadata") or {}
+    return bool(metadata.get("_exact_lookup")) or candidate.get("retrieval") == "exact"
 
 
 def _multi_query_rerank_with_rrf(
@@ -226,9 +501,42 @@ def _serialize_reranked_documents(
     if not candidates:
         return json.dumps([], ensure_ascii=False)
 
+    exact_candidates = [
+        candidate for candidate in candidates
+        if _is_exact_lookup_candidate(candidate)
+    ]
+    remaining_candidates = [
+        candidate for candidate in candidates
+        if not _is_exact_lookup_candidate(candidate)
+    ]
+
     try:
-        ranked = _multi_query_rerank_with_rrf(queries, candidates, top_k=top_k)
         payload = []
+        for candidate in exact_candidates[:top_k]:
+            metadata = candidate.get("metadata") or {}
+            payload.append(
+                {
+                    "content": candidate["content"],
+                    "source": metadata.get("source", ""),
+                    "metadata": metadata,
+                    "score": candidate.get("score"),
+                    "fused_score": None,
+                    "coarse_score": candidate.get("score"),
+                    "retrieval": candidate.get("retrieval"),
+                    "candidate_id": candidate.get("candidate_id"),
+                    "matched_query": candidate.get("matched_query"),
+                }
+            )
+
+        remaining_slots = top_k - len(payload)
+        if remaining_slots <= 0:
+            return json.dumps(payload, ensure_ascii=False)
+
+        ranked = _multi_query_rerank_with_rrf(
+            queries,
+            remaining_candidates,
+            top_k=remaining_slots,
+        )
         for item in ranked:
             candidate = item["candidate"]
             metadata = candidate.get("metadata") or {}
@@ -249,7 +557,22 @@ def _serialize_reranked_documents(
     except Exception as exc:
         logger.warning("Reranker failed, fallback to hybrid recall: %s", exc)
         fallback_payload = []
-        for candidate in candidates[:top_k]:
+        for candidate in exact_candidates[:top_k]:
+            metadata = candidate.get("metadata") or {}
+            fallback_payload.append(
+                {
+                    "content": candidate["content"],
+                    "source": metadata.get("source", ""),
+                    "metadata": metadata,
+                    "score": candidate.get("score"),
+                    "retrieval": candidate.get("retrieval"),
+                    "candidate_id": candidate.get("candidate_id"),
+                    "matched_query": candidate.get("matched_query"),
+                }
+            )
+
+        remaining_slots = top_k - len(fallback_payload)
+        for candidate in remaining_candidates[:remaining_slots]:
             metadata = candidate.get("metadata") or {}
             fallback_payload.append(
                 {
@@ -548,14 +871,17 @@ def _retrieve_candidates(
 @tool
 def search_law_articles(query: str, chat_history: str = "") -> str:
     """用于查询法律条文、法规规定、量刑标准等纯法律理论问题。"""
+    vectorstore = _get_law_vectorstore()
+    exact_candidates = _lookup_exact_law_article_candidates(query, vectorstore)
     expanded_queries, candidates = _retrieve_candidates(
         query,
-        _get_law_vectorstore(),
+        vectorstore,
         corpus="law",
         chat_history=chat_history,
     )
     queries = expanded_queries or [query.strip()]
-    return _serialize_reranked_documents(queries, candidates, top_k=LAW_TOP_K)
+    merged_candidates = _dedupe_candidates_preserve_order([*exact_candidates, *candidates])
+    return _serialize_reranked_documents(queries, merged_candidates, top_k=LAW_TOP_K)
 
 
 @tool
