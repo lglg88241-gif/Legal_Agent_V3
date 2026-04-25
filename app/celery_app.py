@@ -14,6 +14,7 @@ from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
     get_message_for_conversation,
+    load_conversation_persistence_consent,
     list_recent_conversation_messages,
     load_conversation_case_summary,
     maybe_update_conversation_title,
@@ -22,6 +23,7 @@ from app.services.conversation_store import (
     update_conversation_case_summary,
     update_conversation_case_type,
 )
+from app.services.conversation_mode import normalize_persistence_consent
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 
@@ -118,6 +120,9 @@ async def _run_task_async(conversation_id: int) -> dict[str, Any]:
         async with session_factory() as db:
             saved_case_state = await load_conversation_case_state(db, conversation_id)
 
+        async with session_factory() as db:
+            persistence_consent = await load_conversation_persistence_consent(db, conversation_id)
+
         graph_memory = await format_graph_memory(conversation_id=conversation_id)
         return {
             "chat_history": chat_history,
@@ -125,6 +130,7 @@ async def _run_task_async(conversation_id: int) -> dict[str, Any]:
             "case_summary": case_summary,
             "graph_memory": graph_memory,
             "saved_case_state": saved_case_state,
+            "persistence_consent": persistence_consent,
         }
     finally:
         await celery_engine.dispose()
@@ -303,7 +309,10 @@ def ask_agent_task(
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
         case_state_dict = answer.get("case_state_snapshot") if isinstance(answer, dict) else None
         case_type = answer.get("case_type") if isinstance(answer, dict) else None
-        should_persist_case_state = route_intent == "CASE_UPDATE"
+        persistence_consent = normalize_persistence_consent(context.get("persistence_consent"))
+        should_persist_structured_case = (
+            route_intent == "CASE_UPDATE" and persistence_consent != "temporary"
+        )
 
         if route_intent == "GREETING":
             agent_actions = [
@@ -363,22 +372,35 @@ def ask_agent_task(
                         "latency_ms": latency_ms,
                         "route_intent": route_intent,
                     },
-                    case_summary=updated_case_summary if route_intent == "CASE_UPDATE" else "",
-                    case_state_dict=case_state_dict if should_persist_case_state else None,
-                    case_type=case_type if should_persist_case_state else None,
+                    case_summary=updated_case_summary if should_persist_structured_case else "",
+                    case_state_dict=case_state_dict if should_persist_structured_case else None,
+                    case_type=case_type if should_persist_structured_case else None,
                 )
             )
 
         if route_intent == "CASE_UPDATE":
-            user_message_id = persist_result.get("user_message_id")
-            if user_message_id:
-                update_graph_task.delay(conversation_id, user_id, user_message_id)
-            else:
-                logger.warning(
-                    "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
+            if not should_persist_structured_case:
+                logger.info(
+                    "Structured case persistence skipped due to temporary consent | conversation_id=%s user_id=%s route_intent=%s",
+                    conversation_id,
+                    user_id,
+                    route_intent,
+                )
+                logger.info(
+                    "Graph update skipped due to temporary consent | conversation_id=%s user_id=%s",
                     conversation_id,
                     user_id,
                 )
+            else:
+                user_message_id = persist_result.get("user_message_id")
+                if user_message_id:
+                    update_graph_task.delay(conversation_id, user_id, user_message_id)
+                else:
+                    logger.warning(
+                        "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
+                        conversation_id,
+                        user_id,
+                    )
 
         return result
 

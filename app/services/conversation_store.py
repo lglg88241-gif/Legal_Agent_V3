@@ -428,6 +428,18 @@ async def load_conversation_case_state(
     return conversation.case_state_json
 
 
+async def load_conversation_persistence_consent(
+    db: AsyncSession,
+    conversation_id: int,
+) -> str:
+    conversation = await db.get(Conversation, conversation_id)
+    if conversation is None:
+        return DEFAULT_PERSISTENCE_CONSENT
+    return normalize_persistence_consent(
+        getattr(conversation, "persistence_consent", DEFAULT_PERSISTENCE_CONSENT)
+    )
+
+
 async def search_user_cases(
     db: AsyncSession,
     user_id: int,
