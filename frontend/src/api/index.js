@@ -73,12 +73,23 @@ export const submitFeedback = (data) => api.post('/feedback', data)
 
 export const createConversation = (payload = {}) => api.post('/conversations', payload)
 export const getConversations = () => api.get('/conversations')
+export const searchConversations = (keyword, caseType = '') =>
+  api.get('/conversations/search', {
+    params: {
+      keyword: keyword || undefined,
+      case_type: caseType || undefined,
+    },
+  })
 export const updateConversationTitle = (conversationId, title) =>
   api.put(`/conversations/${conversationId}`, { title })
 export const getConversationMessages = (conversationId) =>
   api.get(`/conversations/${conversationId}/messages`)
 export const deleteConversation = (conversationId) =>
   api.delete(`/conversations/${conversationId}`)
+export const batchDeleteConversations = (conversationIds) =>
+  api.delete('/conversations/batch', {
+    data: { conversation_ids: conversationIds },
+  })
 export const clearConversationMessages = (conversationId) =>
   api.delete(`/conversations/${conversationId}/messages`)
 export const getConversationSummary = (conversationId) =>

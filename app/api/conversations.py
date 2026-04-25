@@ -15,6 +15,7 @@ from app.services.conversation_store import (
     delete_conversation_record,
     ensure_storage_schema,
     get_conversation_for_user,
+    list_user_conversations_by_ids,
     list_conversation_messages,
     list_user_conversations,
     search_user_cases,
@@ -35,6 +36,10 @@ class ConversationCreateRequest(BaseModel):
 
 class ConversationUpdateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
+
+
+class ConversationBatchDeleteRequest(BaseModel):
+    conversation_ids: list[int] = Field(default_factory=list, min_length=1)
 
 
 def _build_graph_cleanup_response(
@@ -64,6 +69,23 @@ def _build_graph_cleanup_response(
     )
     response["warning"] = "SQL data cleared but graph cleanup failed"
     return response
+
+
+async def _delete_conversation_with_graph_cleanup(
+    *,
+    db: AsyncSession,
+    conversation_id: int,
+    user_id: int,
+    success_message: str,
+) -> dict[str, object]:
+    await delete_conversation_record(db, conversation_id)
+    await db.commit()
+    return _build_graph_cleanup_response(
+        graph_cleanup_result=await delete_case_graph(conversation_id),
+        conversation_id=conversation_id,
+        user_id=user_id,
+        success_message=success_message,
+    )
 
 
 @router.post("")
@@ -115,7 +137,81 @@ async def search_cases(
     )
     return {
         "status": "success",
+        "conversations": [serialize_conversation(conv) for conv in results],
         "cases": [serialize_conversation(conv) for conv in results],
+    }
+
+
+@router.delete("/batch")
+async def batch_delete_conversations(
+    payload: ConversationBatchDeleteRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+
+    normalized_ids: list[int] = []
+    seen: set[int] = set()
+    for conversation_id in payload.conversation_ids:
+        if conversation_id <= 0 or conversation_id in seen:
+            continue
+        seen.add(conversation_id)
+        normalized_ids.append(conversation_id)
+
+    if not normalized_ids:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No valid conversation ids provided")
+
+    owned_conversations = await list_user_conversations_by_ids(db, current_user.user_id, normalized_ids)
+    owned_map = {conversation.id: conversation for conversation in owned_conversations}
+
+    deleted: list[int] = []
+    failed: list[int] = []
+    skipped: list[int] = []
+    graph_warnings: list[dict[str, object]] = []
+
+    for conversation_id in normalized_ids:
+        conversation = owned_map.get(conversation_id)
+        if conversation is None:
+            skipped.append(conversation_id)
+            continue
+
+        try:
+            delete_result = await _delete_conversation_with_graph_cleanup(
+                db=db,
+                conversation_id=conversation_id,
+                user_id=current_user.user_id,
+                success_message="Conversation batch delete graph cleanup failed",
+            )
+            deleted.append(conversation_id)
+            if not bool(delete_result.get("graph_cleanup_success")):
+                graph_warnings.append(
+                    {
+                        "conversation_id": conversation_id,
+                        "warning": str(delete_result.get("warning") or "").strip() or "Graph cleanup failed",
+                    }
+                )
+        except Exception as exc:
+            await db.rollback()
+            failed.append(conversation_id)
+            logger.exception(
+                "Conversation batch delete failed | conversation_id=%s user_id=%s",
+                conversation_id,
+                current_user.user_id,
+            )
+            graph_warnings.append(
+                {
+                    "conversation_id": conversation_id,
+                    "warning": f"Conversation delete failed: {exc}",
+                }
+            )
+
+    return {
+        "status": "success",
+        "success": True,
+        "deleted": deleted,
+        "failed": failed,
+        "skipped": skipped,
+        "graph_warnings": graph_warnings,
     }
 
 
@@ -186,11 +282,8 @@ async def delete_conversation(
     if conversation is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
 
-    await delete_conversation_record(db, conversation.id)
-    await db.commit()
-    graph_cleanup_result = await delete_case_graph(conversation.id)
-    return _build_graph_cleanup_response(
-        graph_cleanup_result=graph_cleanup_result,
+    return await _delete_conversation_with_graph_cleanup(
+        db=db,
         conversation_id=conversation.id,
         user_id=current_user.user_id,
         success_message="Conversation delete graph cleanup failed",

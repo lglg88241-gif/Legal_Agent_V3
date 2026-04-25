@@ -154,6 +154,26 @@ async def list_user_conversations(
     return list(result)
 
 
+async def list_user_conversations_by_ids(
+    db: AsyncSession,
+    user_id: int,
+    conversation_ids: list[int],
+) -> list[Conversation]:
+    normalized_ids = [conversation_id for conversation_id in conversation_ids if conversation_id > 0]
+    if not normalized_ids:
+        return []
+
+    result = await db.scalars(
+        select(Conversation)
+        .where(
+            Conversation.user_id == user_id,
+            Conversation.id.in_(normalized_ids),
+        )
+        .order_by(Conversation.id.asc())
+    )
+    return list(result)
+
+
 async def list_conversation_messages(
     db: AsyncSession,
     conversation_id: int,
@@ -340,11 +360,7 @@ async def search_user_cases(
     limit: int = 10,
 ) -> list[Conversation]:
     """Surgery #13: 按类型或关键词检索用户的历史案件。"""
-    query = select(Conversation).where(
-        Conversation.user_id == user_id,
-        Conversation.case_summary.is_not(None),
-        Conversation.case_summary != "",
-    )
+    query = select(Conversation).where(Conversation.user_id == user_id)
     if case_type:
         query = query.where(Conversation.case_type == case_type)
     if keyword:

@@ -34,8 +34,14 @@
         <el-button text @click="handleExport" :disabled="!currentConversationId">
           <el-icon><Download /></el-icon>导出
         </el-button>
-        <el-button text type="danger" @click="handleClear" :disabled="!currentConversationId">
-          <el-icon><Delete /></el-icon>清空当前会话
+        <el-button
+          class="clear-reset-button"
+          text
+          type="danger"
+          @click="handleClearReset"
+          :disabled="!currentConversationId"
+        >
+          <el-icon><Delete /></el-icon>清空聊天并重置案情
         </el-button>
         <el-button text type="danger" @click="handleLogout">退出登录</el-button>
       </div>
@@ -47,10 +53,17 @@
           :sessions="conversations"
           :current-id="currentConversationId"
           :active-summary="currentConversation?.case_summary || ''"
+          :loading="conversationListLoading"
+          :search-keyword="conversationSearchKeyword"
+          :batch-mode="sessionBatchMode"
+          :empty-text="conversationListEmptyText"
           @create="createNewConversation"
           @switch="switchConversation"
           @rename="promptRenameConversation"
-          @delete="removeConversation"
+          @delete="removeConversationV2"
+          @search="handleConversationSearch"
+          @batch-mode-change="handleSessionBatchModeChange"
+          @batch-delete="handleBatchDeleteV2"
         />
       </el-aside>
 
@@ -174,6 +187,7 @@ import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import SessionList from './components/SessionList.vue'
 import {
+  batchDeleteConversations,
   clearConversationMessages,
   createConversation,
   deleteConversation,
@@ -182,6 +196,7 @@ import {
   getConversationSummary,
   getConversations,
   getLocalModelStatus,
+  searchConversations,
   getSystemStatus,
   sendMessage,
   setLocalModelStatus,
@@ -207,6 +222,9 @@ const graphRefreshTimer = ref(null)
 const graphRefreshStopTimer = ref(null)
 const graphSidebarCollapsed = ref(false)
 const latestGraphRequestId = ref(0)
+const conversationListLoading = ref(false)
+const conversationSearchKeyword = ref('')
+const sessionBatchMode = ref(false)
 const localModel = reactive({
   enabled: false,
   healthy: false,
@@ -244,6 +262,9 @@ const currentGraph = reactive({
 const currentUsername = computed(() => getStoredUser()?.username || '已登录用户')
 const currentConversation = computed(() =>
   conversations.value.find((item) => item.id === currentConversationId.value) || null
+)
+const conversationListEmptyText = computed(() =>
+  conversationSearchKeyword.value.trim() ? '没有找到相关会话' : '暂无会话'
 )
 const localModelStatusText = computed(() => {
   if (localModel.loading) return '检查中...'
@@ -366,6 +387,14 @@ function resetGraph() {
   currentGraph.error = ''
 }
 
+function clearCurrentConversationState() {
+  currentConversationId.value = null
+  currentSessionId.value = ''
+  messages.value = []
+  resetAnalysis()
+  resetGraph()
+}
+
 function stopGraphRefreshPolling() {
   if (graphRefreshTimer.value) {
     clearInterval(graphRefreshTimer.value)
@@ -430,15 +459,27 @@ async function initializeConversations() {
 }
 
 async function refreshConversationList(preferredConversationId = null) {
-  const { data } = await getConversations()
-  const nextList = Array.isArray(data.conversations) ? data.conversations : []
-  setConversations(nextList)
+  conversationListLoading.value = true
+  try {
+    const keyword = conversationSearchKeyword.value.trim()
+    const { data } = keyword
+      ? await searchConversations(keyword)
+      : await getConversations()
+    const nextList = Array.isArray(data.conversations)
+      ? data.conversations
+      : Array.isArray(data.cases)
+        ? data.cases
+        : []
+    setConversations(nextList)
 
-  const activeId = preferredConversationId || currentConversationId.value
-  const active = conversations.value.find((item) => item.id === activeId)
-  if (active) {
-    currentConversationId.value = active.id
-    currentSessionId.value = active.session_id || ''
+    const activeId = preferredConversationId || currentConversationId.value
+    const active = conversations.value.find((item) => item.id === activeId)
+    if (active) {
+      currentConversationId.value = active.id
+      currentSessionId.value = active.session_id || ''
+    }
+  } finally {
+    conversationListLoading.value = false
   }
 }
 
@@ -446,6 +487,8 @@ async function createNewConversation(options = {}) {
   try {
     const { data } = await createConversation({})
     const conversation = data.conversation
+    conversationSearchKeyword.value = ''
+    sessionBatchMode.value = false
     upsertConversationLocal(conversation)
     await switchConversation(conversation.id)
     if (!options.silent) {
@@ -499,13 +542,75 @@ async function promptRenameConversation(session) {
   }
 }
 
+async function handleConversationSearch(keyword) {
+  conversationSearchKeyword.value = keyword || ''
+  await refreshConversationList(currentConversationId.value)
+}
+
+function handleSessionBatchModeChange(enabled) {
+  sessionBatchMode.value = Boolean(enabled)
+}
+
+async function handleBatchDelete(conversationIds) {
+  return handleBatchDeleteV2(conversationIds)
+  if (!conversationIds?.length) return
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${conversationIds.length} 个会话吗？该操作会同时尝试清理对应案情图谱。`,
+      '批量删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+  } catch (error) {
+    return
+  }
+
+  try {
+    const { data } = await batchDeleteConversations(conversationIds)
+    const deletedIds = new Set(data.deleted || [])
+    const currentDeleted = currentConversationId.value != null && deletedIds.has(currentConversationId.value)
+
+    sessionBatchMode.value = false
+    await refreshConversationList(currentDeleted ? null : currentConversationId.value)
+
+    if (currentDeleted) {
+      const nextConversation = conversations.value[0]
+      if (nextConversation) {
+        await switchConversation(nextConversation.id)
+      } else {
+        clearCurrentConversationState()
+        await createNewConversation({ silent: true })
+      }
+    }
+
+    if (Array.isArray(data.graph_warnings) && data.graph_warnings.length) {
+      console.warn('Batch graph cleanup warnings:', data.graph_warnings)
+      ElMessage.warning('部分图谱清理失败，请稍后重试或查看日志')
+    }
+
+    if (Array.isArray(data.skipped) && data.skipped.length) {
+      ElMessage.warning(`已跳过 ${data.skipped.length} 个无效会话`)
+    } else if ((data.deleted || []).length) {
+      ElMessage.success(`已删除 ${data.deleted.length} 个会话`)
+    }
+  } catch (error) {
+    console.error('Failed to batch delete conversations:', error)
+    ElMessage.error('批量删除会话失败')
+  }
+}
+
 async function removeConversation(conversationId) {
+  return removeConversationV2(conversationId)
   if (!conversationId) return
 
   ElMessageBox.confirm('确定删除该会话及其全部消息吗？', '删除确认', { type: 'warning' })
     .then(async () => {
       try {
-        await deleteConversation(conversationId)
+        const { data } = await deleteConversation(conversationId)
         removeConversationLocal(conversationId)
 
         if (conversationId === currentConversationId.value) {
@@ -513,9 +618,7 @@ async function removeConversation(conversationId) {
           if (nextConversation) {
             await switchConversation(nextConversation.id)
           } else {
-            currentConversationId.value = null
-            currentSessionId.value = ''
-            messages.value = []
+            clearCurrentConversationState()
             await createNewConversation({ silent: true })
           }
         }
@@ -814,6 +917,7 @@ function handleLogout() {
 }
 
 function handleClear() {
+  return handleClearReset()
   if (!currentConversationId.value) return
 
   ElMessageBox.confirm('确定清空当前会话的全部消息吗？', '清空确认', { type: 'warning' })
@@ -827,6 +931,160 @@ function handleClear() {
       } catch (error) {
         console.error('Failed to clear conversation:', error)
         ElMessage.error('清空会话失败。')
+      }
+    })
+    .catch(() => {})
+}
+
+function handleClearLegacy() {
+  return handleClearReset()
+  if (!currentConversationId.value) return
+
+  ElMessageBox.confirm(
+    '这会删除当前会话的聊天记录，并重置案情摘要、结构化案情状态和案情图谱。确定继续吗？',
+    '清空聊天并重置案情',
+    {
+      confirmButtonText: '继续',
+      cancelButtonText: '取消',
+      type: 'warning',
+    }
+  )
+    .then(async () => {
+      try {
+        const { data } = await clearConversationMessages(currentConversationId.value)
+        messages.value = []
+        resetAnalysis()
+        resetGraph()
+        touchConversationLocal(currentConversationId.value, {
+          case_summary: '',
+          case_type: '',
+          case_state: null,
+        })
+        if (data?.warning) {
+          ElMessage.warning('聊天已清空，但图谱清理可能未完成。')
+        } else {
+          ElMessage.success('聊天已清空，案情状态已重置。')
+        }
+      } catch (error) {
+        console.error('Failed to clear conversation:', error)
+        ElMessage.error('清空当前会话失败')
+      }
+    })
+    .catch(() => {})
+}
+
+async function handleBatchDeleteV2(conversationIds) {
+  if (!conversationIds?.length) return
+
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${conversationIds.length} 个会话吗？该操作会同时尝试清理对应案情图谱。`,
+      '批量删除确认',
+      {
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+  } catch (error) {
+    return
+  }
+
+  try {
+    const { data } = await batchDeleteConversations(conversationIds)
+    const deletedIds = new Set(data.deleted || [])
+    const currentDeleted = currentConversationId.value != null && deletedIds.has(currentConversationId.value)
+
+    sessionBatchMode.value = false
+    await refreshConversationList(currentDeleted ? null : currentConversationId.value)
+
+    if (currentDeleted) {
+      const nextConversation = conversations.value[0]
+      if (nextConversation) {
+        await switchConversation(nextConversation.id)
+      } else {
+        clearCurrentConversationState()
+      }
+    }
+
+    if (Array.isArray(data.graph_warnings) && data.graph_warnings.length) {
+      console.warn('Batch graph cleanup warnings:', data.graph_warnings)
+      ElMessage.warning('部分图谱清理失败，请稍后重试或查看日志')
+    }
+
+    if (Array.isArray(data.skipped) && data.skipped.length) {
+      ElMessage.warning(`已跳过 ${data.skipped.length} 个无效会话`)
+    } else if ((data.deleted || []).length) {
+      ElMessage.success(`已删除 ${data.deleted.length} 个会话`)
+    }
+  } catch (error) {
+    console.error('Failed to batch delete conversations:', error)
+    ElMessage.error('批量删除会话失败')
+  }
+}
+
+async function removeConversationV2(conversationId) {
+  if (!conversationId) return
+
+  ElMessageBox.confirm('确定删除该会话及其全部消息吗？', '删除确认', { type: 'warning' })
+    .then(async () => {
+      try {
+        const { data } = await deleteConversation(conversationId)
+        removeConversationLocal(conversationId)
+
+        if (conversationId === currentConversationId.value) {
+          const nextConversation = conversations.value[0]
+          if (nextConversation) {
+            await switchConversation(nextConversation.id)
+          } else {
+            clearCurrentConversationState()
+          }
+        }
+
+        if (data?.warning) {
+          ElMessage.warning('会话已删除，但图谱清理可能未完成。')
+        } else {
+          ElMessage.success('会话已删除。')
+        }
+      } catch (error) {
+        console.error('Failed to delete conversation:', error)
+        ElMessage.error('删除会话失败。')
+      }
+    })
+    .catch(() => {})
+}
+
+function handleClearReset() {
+  if (!currentConversationId.value) return
+
+  ElMessageBox.confirm(
+    '这会删除当前会话的聊天记录，并重置案情摘要、结构化案情状态和案情图谱。确定继续吗？',
+    '清空聊天并重置案情',
+    {
+      confirmButtonText: '继续',
+      cancelButtonText: '取消',
+      type: 'warning',
+    }
+  )
+    .then(async () => {
+      try {
+        const { data } = await clearConversationMessages(currentConversationId.value)
+        messages.value = []
+        resetAnalysis()
+        resetGraph()
+        touchConversationLocal(currentConversationId.value, {
+          case_summary: '',
+          case_type: '',
+          case_state: null,
+        })
+        if (data?.warning) {
+          ElMessage.warning('聊天已清空，但图谱清理可能未完成。')
+        } else {
+          ElMessage.success('聊天已清空，案情状态已重置。')
+        }
+      } catch (error) {
+        console.error('Failed to clear conversation:', error)
+        ElMessage.error('清空当前会话失败')
       }
     })
     .catch(() => {})
@@ -1012,6 +1270,16 @@ body,
   font-size: 12px;
   font-weight: 700;
 }
+
+.clear-reset-button {
+  font-size: 14px;
+}
+
+.clear-reset-button :deep(.el-icon) {
+  font-size: 14px;
+  margin-right: 4px;
+}
+
 
 .main-area {
   height: calc(100vh - 100px);
