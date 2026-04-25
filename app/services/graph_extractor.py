@@ -997,10 +997,12 @@ def _delete_case_graph_sync(conversation_id: int) -> None:
         driver.close()
 
 
-async def delete_case_graph(conversation_id: int) -> None:
+async def delete_case_graph(conversation_id: int) -> dict[str, Any]:
     try:
         await asyncio.to_thread(_delete_case_graph_sync, conversation_id)
+        return {"success": True, "error": None}
     except Exception as exc:
         logger.warning("Failed to delete case graph for conversation %s: %s", conversation_id, exc)
+        return {"success": False, "error": str(exc)}
 
 

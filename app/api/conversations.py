@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +25,7 @@ from app.services.conversation_store import (
 from app.services.graph_extractor import delete_case_graph, get_case_graph
 from app.services.llm_service import llm_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
@@ -32,6 +35,35 @@ class ConversationCreateRequest(BaseModel):
 
 class ConversationUpdateRequest(BaseModel):
     title: str = Field(..., min_length=1, max_length=255)
+
+
+def _build_graph_cleanup_response(
+    *,
+    graph_cleanup_result: dict[str, object] | None,
+    conversation_id: int,
+    user_id: int,
+    success_message: str,
+) -> dict[str, object]:
+    cleanup = graph_cleanup_result or {}
+    graph_cleanup_success = bool(cleanup.get("success"))
+    response: dict[str, object] = {
+        "status": "success",
+        "success": True,
+        "graph_cleanup_success": graph_cleanup_success,
+    }
+    if graph_cleanup_success:
+        return response
+
+    error = str(cleanup.get("error") or "").strip() or "unknown error"
+    logger.warning(
+        "%s | conversation_id=%s user_id=%s error=%s",
+        success_message,
+        conversation_id,
+        user_id,
+        error,
+    )
+    response["warning"] = "SQL data cleared but graph cleanup failed"
+    return response
 
 
 @router.post("")
@@ -156,8 +188,13 @@ async def delete_conversation(
 
     await delete_conversation_record(db, conversation.id)
     await db.commit()
-    await delete_case_graph(conversation.id)
-    return {"status": "success"}
+    graph_cleanup_result = await delete_case_graph(conversation.id)
+    return _build_graph_cleanup_response(
+        graph_cleanup_result=graph_cleanup_result,
+        conversation_id=conversation.id,
+        user_id=current_user.user_id,
+        success_message="Conversation delete graph cleanup failed",
+    )
 
 
 @router.delete("/{conversation_id}/messages")
@@ -173,8 +210,13 @@ async def clear_messages(
 
     await clear_conversation_messages(db, conversation.id)
     await db.commit()
-    await delete_case_graph(conversation.id)
-    return {"status": "success"}
+    graph_cleanup_result = await delete_case_graph(conversation.id)
+    return _build_graph_cleanup_response(
+        graph_cleanup_result=graph_cleanup_result,
+        conversation_id=conversation.id,
+        user_id=current_user.user_id,
+        success_message="Conversation clear graph cleanup failed",
+    )
 
 
 @router.post("/{conversation_id}/summary")

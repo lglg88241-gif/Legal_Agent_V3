@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
+    get_message_for_conversation,
     list_recent_conversation_messages,
     load_conversation_case_summary,
     maybe_update_conversation_title,
@@ -138,15 +139,15 @@ async def _persist_dialog_turn_async(
     case_summary: str = "",
     case_state_dict: dict[str, Any] | None = None,
     case_type: str | None = None,
-) -> None:
+) -> dict[str, int | None]:
     celery_engine, session_factory = _create_celery_session_factory()
     try:
         await ensure_storage_schema(bind_engine=celery_engine)
         async with session_factory() as db:
             conversation = await get_conversation_for_user(db, user_id, conversation_id)
             if conversation is None:
-                return
-            await store_message(
+                return {"user_message_id": None, "assistant_message_id": None}
+            user_message = await store_message(
                 db,
                 conversation_id=conversation_id,
                 role="user",
@@ -160,7 +161,7 @@ async def _persist_dialog_turn_async(
                 await update_conversation_case_state(db, conversation, case_state_dict)
             if case_type:
                 await update_conversation_case_type(db, conversation, case_type)
-            await store_message(
+            assistant_message = await store_message(
                 db,
                 conversation_id=conversation_id,
                 role="assistant",
@@ -168,12 +169,16 @@ async def _persist_dialog_turn_async(
                 metadata=metadata,
             )
             await db.commit()
+            return {
+                "user_message_id": user_message.id,
+                "assistant_message_id": assistant_message.id,
+            }
     finally:
         await celery_engine.dispose()
 
 
 @celery_app.task(name="update_graph_task")
-def update_graph_task(conversation_id: int, user_id: int = 0):
+def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | None = None):
     try:
         from app.memory.redis_mgr import get_redis_saver_for_current_loop
 
@@ -184,25 +189,43 @@ def update_graph_task(conversation_id: int, user_id: int = 0):
             try:
                 await ensure_storage_schema(bind_engine=celery_engine)
                 async with session_factory() as db:
-                    case_summary = await load_conversation_case_summary(db, conversation_id)
-                async with session_factory() as db:
-                    messages = await list_recent_conversation_messages(
-                        db, conversation_id=conversation_id, limit=12
+                    if user_id <= 0:
+                        raise ValueError("user_id is required for graph updates")
+
+                    conversation = await get_conversation_for_user(db, user_id, conversation_id)
+                    if conversation is None:
+                        raise ValueError("conversation not found for current user")
+
+                    if message_id is None:
+                        raise ValueError("message_id is required for graph updates")
+
+                    user_message = await get_message_for_conversation(
+                        db,
+                        conversation_id=conversation_id,
+                        message_id=message_id,
                     )
+                    if user_message is None:
+                        raise ValueError("message_id not found in conversation")
+                    if user_message.role != "user":
+                        raise ValueError("message_id must point to a user message")
+
+                    case_summary = await load_conversation_case_summary(db, conversation_id)
+                    user_input = " ".join((user_message.content or "").strip().split())
+                    if not user_input:
+                        raise ValueError("message content is empty")
             finally:
                 await celery_engine.dispose()
 
-            latest_user_input = ""
-            for message in reversed(messages):
-                if message.role == "user":
-                    content = " ".join((message.content or "").strip().split())
-                    if content:
-                        latest_user_input = content
-                        break
+            logger.info(
+                "Graph update task using bound message_id | conversation_id=%s user_id=%s message_id=%s",
+                conversation_id,
+                user_id,
+                message_id,
+            )
 
             return await refresh_case_graph(
                 conversation_id=conversation_id,
-                user_input=latest_user_input,
+                user_input=user_input,
                 case_summary=case_summary,
                 user_id=user_id,
             )
@@ -217,14 +240,21 @@ def update_graph_task(conversation_id: int, user_id: int = 0):
         return {
             "status": "success",
             "conversation_id": conversation_id,
+            "message_id": message_id,
             "actions_applied": update_result.get("actions_applied", 0),
             "actions": update_result.get("actions", []),
         }
     except Exception as exc:
-        logger.exception("update_graph_task failed | conversation_id=%s", conversation_id)
+        logger.exception(
+            "update_graph_task failed | conversation_id=%s user_id=%s message_id=%s",
+            conversation_id,
+            user_id,
+            message_id,
+        )
         return {
             "status": "failed",
             "conversation_id": conversation_id,
+            "message_id": message_id,
             "error": str(exc),
         }
 
@@ -314,8 +344,10 @@ def ask_agent_task(
             "latency_ms": latency_ms,
         }
 
+        persist_result = {"user_message_id": None, "assistant_message_id": None}
+
         if route_intent != "GREETING":
-            asyncio.run(
+            persist_result = asyncio.run(
                 _persist_dialog_turn_async(
                     user_id=user_id,
                     conversation_id=conversation_id,
@@ -337,7 +369,15 @@ def ask_agent_task(
             )
 
         if route_intent == "CASE_UPDATE":
-            update_graph_task.delay(conversation_id, user_id)
+            user_message_id = persist_result.get("user_message_id")
+            if user_message_id:
+                update_graph_task.delay(conversation_id, user_id, user_message_id)
+            else:
+                logger.warning(
+                    "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
+                    conversation_id,
+                    user_id,
+                )
 
         return result
 

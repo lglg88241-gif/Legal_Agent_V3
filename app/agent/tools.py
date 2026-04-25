@@ -25,18 +25,41 @@ from app.database.chroma_utils import resolve_persist_dir
 logger = logging.getLogger(__name__)
 
 GRAPH_QUERY = """
-MATCH (n)-[r]-(m)
-WHERE coalesce(n.name, '') CONTAINS $entity_name
-   OR coalesce(n.content, '') CONTAINS $entity_name
-   OR coalesce(m.name, '') CONTAINS $entity_name
-   OR coalesce(m.content, '') CONTAINS $entity_name
-RETURN labels(n) AS source_labels,
-       properties(n) AS source_node,
-       type(r) AS relation,
-       labels(m) AS target_labels,
-       properties(m) AS target_node
+MATCH (source:LawArticle)-[rel:REFERENCES]-(target:LawArticle)
+WHERE any(token IN $tokens WHERE
+    coalesce(source.law_title, '') CONTAINS token OR
+    coalesce(source.article_label, '') CONTAINS token OR
+    toString(coalesce(source.article_num, '')) CONTAINS token OR
+    coalesce(target.law_title, '') CONTAINS token OR
+    coalesce(target.article_label, '') CONTAINS token OR
+    toString(coalesce(target.article_num, '')) CONTAINS token
+)
+RETURN labels(source) AS source_labels,
+       properties(source) AS source_node,
+       type(rel) AS relation,
+       labels(target) AS target_labels,
+       properties(target) AS target_node
 LIMIT 5
 """
+
+
+def _extract_graph_query_tokens(entity_name: str) -> list[str]:
+    cleaned = " ".join((entity_name or "").strip().split())
+    if not cleaned:
+        return []
+
+    tokens = [cleaned]
+    tokens.extend(re.findall(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,12}", cleaned))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for token in tokens:
+        value = token.strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped[:8]
 
 QUERY_EXPANSION_SYSTEM_PROMPT = """
 你是一个法律检索扩写助手。你必须先做指代消解，再做语义重写，最后做法律术语化。
@@ -528,6 +551,10 @@ def search_case_text(query: str, chat_history: str = "") -> str:
 @tool
 def query_neo4j_graph(entity_name: str) -> str:
     """当你需要查询特定的原告、被告名字，或者特定的罪名/案由的具体判决结果时，必须调用此工具。"""
+    tokens = _extract_graph_query_tokens(entity_name)
+    if not tokens:
+        return json.dumps([], ensure_ascii=False)
+
     driver = GraphDatabase.driver(
         settings.NEO4J_URI,
         auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
@@ -535,7 +562,7 @@ def query_neo4j_graph(entity_name: str) -> str:
 
     try:
         with driver.session() as session:
-            records = session.run(GRAPH_QUERY, {"entity_name": entity_name}).data()
+            records = session.run(GRAPH_QUERY, {"tokens": tokens}).data()
     finally:
         driver.close()
 

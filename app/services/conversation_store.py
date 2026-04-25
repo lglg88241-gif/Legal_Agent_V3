@@ -180,6 +180,19 @@ async def list_recent_conversation_messages(
     return list(reversed(list(result)))
 
 
+async def get_message_for_conversation(
+    db: AsyncSession,
+    conversation_id: int,
+    message_id: int,
+) -> Message | None:
+    return await db.scalar(
+        select(Message).where(
+            Message.id == message_id,
+            Message.conversation_id == conversation_id,
+        )
+    )
+
+
 async def touch_conversation(
     db: AsyncSession,
     conversation: Conversation | None = None,
@@ -276,6 +289,8 @@ async def clear_conversation_messages(
     conversation = await db.get(Conversation, conversation_id)
     if conversation is not None:
         conversation.case_summary = ""
+        conversation.case_state_json = None
+        conversation.case_type = None
         await touch_conversation(db, conversation=conversation)
 
 
