@@ -532,11 +532,75 @@
                 </div>
               </div>
 
-              <div
-                v-if="selectedDossierGraphIsEmpty && !dossierGraphState.warning"
-                class="dossier-graph-empty"
-              >
-                {{ selectedDossierGraphEmptyText }}
+              <div class="dossier-graph-preview">
+                <div class="dossier-graph-preview-header">
+                  <div class="dossier-detail-conversations-title">图谱预览</div>
+                  <span
+                    v-if="selectedDossierGraphPreviewTruncated"
+                    class="dossier-graph-preview-note"
+                  >
+                    仅展示部分图谱
+                  </span>
+                </div>
+                <div class="dossier-graph-preview-hint">
+                  案卷图谱由该案卷绑定会话中的结构化案情信息聚合生成，可能包含系统推断的未确认关系。
+                </div>
+
+                <div v-if="selectedDossierGraphHasPreview" class="dossier-graph-preview-body">
+                  <div class="dossier-graph-preview-section">
+                    <div class="dossier-graph-preview-subtitle">节点</div>
+                    <div class="dossier-graph-node-chips">
+                      <div
+                        v-for="node in selectedDossierGraphPreviewNodes"
+                        :key="node.id"
+                        class="dossier-graph-node-chip"
+                        :title="formatGraphPropertiesTitle(node.properties)"
+                      >
+                        <strong>{{ node.label || `Node ${node.id}` }}</strong>
+                        <span>{{ node.type || '未分类' }}</span>
+                        <span>
+                          {{
+                            formatGraphConversationLabel(
+                              node.conversation_id ?? node.properties?.conversation_id
+                            )
+                          }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="dossier-graph-preview-section">
+                    <div class="dossier-graph-preview-subtitle">关系</div>
+                    <div v-if="selectedDossierGraphPreviewEdges.length" class="dossier-graph-edge-list">
+                      <div
+                        v-for="edge in selectedDossierGraphPreviewEdges"
+                        :key="edge.id"
+                        class="dossier-graph-edge-item"
+                        :title="formatGraphPropertiesTitle(edge.properties)"
+                      >
+                        <span class="dossier-graph-edge-source">{{ edge.sourceLabel }}</span>
+                        <span class="dossier-graph-edge-relation">{{ edge.relationLabel }}</span>
+                        <span class="dossier-graph-edge-target">{{ edge.targetLabel }}</span>
+                        <span class="dossier-graph-edge-meta">
+                          {{ formatGraphConversationLabel(edge.conversationId) }}
+                        </span>
+                      </div>
+                    </div>
+                    <div v-else class="dossier-graph-preview-empty">
+                      暂无关系边预览
+                    </div>
+                  </div>
+
+                  <div
+                    v-if="selectedDossierGraphPreviewTruncated"
+                    class="dossier-graph-preview-truncation"
+                  >
+                    仅展示前 12 个节点和前 20 条关系，完整数据已聚合。
+                  </div>
+                </div>
+                <div v-else class="dossier-graph-preview-empty">
+                  暂无图谱数据
+                </div>
               </div>
             </div>
           </div>
@@ -722,6 +786,8 @@ const dossierDrawerVisible = ref(false)
 const dossierListLoading = ref(false)
 const dossierSaving = ref(false)
 const dossierBindingId = ref(null)
+const DOSSIER_GRAPH_PREVIEW_NODE_LIMIT = 12
+const DOSSIER_GRAPH_PREVIEW_EDGE_LIMIT = 20
 const selectedDossierId = ref(null)
 const selectedDossierDetail = ref(null)
 const dossierDetailLoading = ref(false)
@@ -737,6 +803,8 @@ const dossierGraphState = reactive({
   conversationCount: 0,
   nodeCount: 0,
   edgeCount: 0,
+  nodes: [],
+  edges: [],
   generatedAt: '',
   warning: '',
   error: '',
@@ -857,6 +925,58 @@ const selectedDossierGraphOpposingAlias = computed(() =>
 )
 const selectedDossierGraphIsEmpty = computed(
   () => dossierGraphLoaded.value && dossierGraphState.nodeCount === 0 && dossierGraphState.edgeCount === 0
+)
+const selectedDossierGraphPreviewNodes = computed(() =>
+  Array.isArray(dossierGraphState.nodes)
+    ? dossierGraphState.nodes.slice(0, DOSSIER_GRAPH_PREVIEW_NODE_LIMIT)
+    : []
+)
+const selectedDossierGraphNodeLookup = computed(() => {
+  const lookup = {}
+  for (const node of Array.isArray(dossierGraphState.nodes) ? dossierGraphState.nodes : []) {
+    const nodeId = String(node?.id || '').trim()
+    if (!nodeId) continue
+    lookup[nodeId] = node
+  }
+  return lookup
+})
+const selectedDossierGraphPreviewEdges = computed(() => {
+  const lookup = selectedDossierGraphNodeLookup.value
+  const edges = Array.isArray(dossierGraphState.edges)
+    ? dossierGraphState.edges.slice(0, DOSSIER_GRAPH_PREVIEW_EDGE_LIMIT)
+    : []
+
+  return edges.map((edge) => {
+    const sourceId = String(edge?.source || '').trim()
+    const targetId = String(edge?.target || '').trim()
+    const sourceNode = lookup[sourceId] || null
+    const targetNode = lookup[targetId] || null
+    const properties = edge?.properties && typeof edge.properties === 'object' ? edge.properties : {}
+
+    return {
+      ...edge,
+      sourceLabel: sourceNode?.label || sourceId || 'Unknown',
+      targetLabel: targetNode?.label || targetId || 'Unknown',
+      relationLabel: String(edge?.label || edge?.type || 'CASE_RELATION').trim() || 'CASE_RELATION',
+      conversationId:
+        properties.conversation_id ??
+        sourceNode?.conversation_id ??
+        sourceNode?.properties?.conversation_id ??
+        targetNode?.conversation_id ??
+        targetNode?.properties?.conversation_id ??
+        null,
+    }
+  })
+})
+const selectedDossierGraphHasPreview = computed(
+  () =>
+    selectedDossierGraphPreviewNodes.value.length > 0 ||
+    selectedDossierGraphPreviewEdges.value.length > 0
+)
+const selectedDossierGraphPreviewTruncated = computed(
+  () =>
+    dossierGraphState.nodeCount > DOSSIER_GRAPH_PREVIEW_NODE_LIMIT ||
+    dossierGraphState.edgeCount > DOSSIER_GRAPH_PREVIEW_EDGE_LIMIT
 )
 const selectedDossierGraphEmptyText = computed(() => {
   if (!selectedDossierGraphIsEmpty.value) return ''
@@ -1079,6 +1199,8 @@ function resetDossierGraphState() {
   dossierGraphState.conversationCount = 0
   dossierGraphState.nodeCount = 0
   dossierGraphState.edgeCount = 0
+  dossierGraphState.nodes = []
+  dossierGraphState.edges = []
   dossierGraphState.generatedAt = ''
   dossierGraphState.warning = ''
   dossierGraphState.error = ''
@@ -1088,11 +1210,14 @@ function resetDossierGraphState() {
 
 function applyDossierGraphPayload(dossierId, payload) {
   const stats = payload?.graph?.stats || {}
+  const graph = payload?.graph || {}
   const participantAliases = payload?.participant_aliases
   dossierGraphState.dossierId = dossierId
   dossierGraphState.conversationCount = Number(stats.conversation_count || 0)
   dossierGraphState.nodeCount = Number(stats.node_count || 0)
   dossierGraphState.edgeCount = Number(stats.edge_count || 0)
+  dossierGraphState.nodes = Array.isArray(graph.nodes) ? graph.nodes : []
+  dossierGraphState.edges = Array.isArray(graph.edges) ? graph.edges : []
   dossierGraphState.generatedAt = payload?.generated_at || ''
   dossierGraphState.warning = typeof payload?.warning === 'string' ? payload.warning : ''
   dossierGraphState.error = ''
@@ -1912,6 +2037,23 @@ function formatParticipantAliasSummary(alias) {
   if (label) return label
   if (role) return role
   return '未设置'
+}
+
+function formatGraphConversationLabel(conversationId) {
+  if (conversationId === null || conversationId === undefined || conversationId === '') {
+    return '会话未标注'
+  }
+  return `会话 #${conversationId}`
+}
+
+function formatGraphPropertiesTitle(properties) {
+  if (!properties || typeof properties !== 'object') return ''
+
+  return Object.entries(properties)
+    .filter(([, value]) => value !== null && value !== undefined && typeof value !== 'object')
+    .slice(0, 6)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join('\n')
 }
 
 function buildParticipantAliasesPayload(form) {
@@ -3102,6 +3244,132 @@ body,
   color: #111827;
 }
 
+.dossier-graph-preview {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid #dbeafe;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-graph-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dossier-graph-preview-note {
+  font-size: 12px;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
+.dossier-graph-preview-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
+.dossier-graph-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dossier-graph-preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dossier-graph-preview-subtitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1f2937;
+}
+
+.dossier-graph-node-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dossier-graph-node-chip {
+  min-width: 0;
+  max-width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dossier-graph-node-chip strong,
+.dossier-graph-edge-source,
+.dossier-graph-edge-target {
+  font-size: 13px;
+  color: #111827;
+  word-break: break-word;
+}
+
+.dossier-graph-node-chip span,
+.dossier-graph-edge-meta {
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.dossier-graph-edge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dossier-graph-edge-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #f8fafc;
+  border: 1px solid #dbeafe;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.dossier-graph-edge-relation {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1d4ed8;
+  white-space: nowrap;
+}
+
+.dossier-graph-preview-empty,
+.dossier-graph-preview-truncation {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dossier-graph-preview-empty {
+  color: #6b7280;
+  background: #f8fafc;
+  border: 1px dashed #bfdbfe;
+}
+
+.dossier-graph-preview-truncation {
+  color: #92400e;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+}
+
 .tracked-onboarding-copy {
   display: flex;
   flex-direction: column;
@@ -3286,6 +3554,10 @@ body,
   .dossier-graph-aliases,
   .dossier-participants-grid,
   .tracked-onboarding-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dossier-graph-edge-item {
     grid-template-columns: 1fr;
   }
 }
