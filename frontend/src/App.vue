@@ -277,15 +277,27 @@
 
       <div class="dossier-list-card">
         <div class="dossier-section-title">我的案卷</div>
+        <div class="dossier-list-filters">
+          <el-input
+            v-model="dossierSearchKeyword"
+            clearable
+            placeholder="搜索标题、案由或摘要"
+          />
+          <el-radio-group v-model="dossierStatusFilter" size="small" class="dossier-status-filter">
+            <el-radio-button label="all">全部</el-radio-button>
+            <el-radio-button label="active">进行中</el-radio-button>
+            <el-radio-button label="archived">已归档</el-radio-button>
+          </el-radio-group>
+        </div>
         <div v-if="dossierListLoading" class="dossier-list-status">正在加载案卷...</div>
         <el-empty
-          v-else-if="!dossiers.length"
-          description="暂无案卷，可先创建一个"
+          v-else-if="!filteredDossiers.length"
+          :description="dossierListEmptyDescription"
           :image-size="64"
         />
         <div v-else class="dossier-list">
           <div
-            v-for="dossier in dossiers"
+            v-for="dossier in filteredDossiers"
             :key="dossier.id"
             class="dossier-item"
             :class="{ active: dossier.id === selectedDossierId }"
@@ -303,20 +315,37 @@
                   <span v-if="dossier.case_type">{{ dossier.case_type }}</span>
                   <span v-else>未分类</span>
                 </div>
+                <div class="dossier-item-meta dossier-item-meta-secondary">
+                  <span>{{ `最近更新：${formatDossierConversationTime(dossier.updated_at) || '未知'}` }}</span>
+                  <span v-if="dossier.conversation_count !== undefined && dossier.conversation_count !== null">
+                    {{ `绑定会话 ${dossier.conversation_count || 0} 个` }}
+                  </span>
+                </div>
                 <div class="dossier-item-summary">
                   {{ dossier.summary || '暂无案卷摘要' }}
                 </div>
               </div>
-              <el-button
-                size="small"
-                type="primary"
-                plain
-                :disabled="!currentConversationId || dossierBindingId === dossier.id || dossier.id === currentConversation?.dossier_id"
-                :loading="dossierBindingId === dossier.id"
-                @click.stop="handleAttachDossier(dossier)"
-              >
-                {{ dossier.id === currentConversation?.dossier_id ? '已绑定当前会话' : '绑定当前会话' }}
-              </el-button>
+              <div class="dossier-item-actions">
+                <el-button
+                  size="small"
+                  type="primary"
+                  plain
+                  :disabled="!currentConversationId || dossierBindingId === dossier.id || dossier.id === currentConversation?.dossier_id || dossier.status === 'archived'"
+                  :loading="dossierBindingId === dossier.id"
+                  @click.stop="handleAttachDossier(dossier)"
+                >
+                  {{ dossier.id === currentConversation?.dossier_id ? '已绑定当前会话' : '绑定当前会话' }}
+                </el-button>
+                <el-button
+                  size="small"
+                  text
+                  type="danger"
+                  :disabled="dossier.status === 'archived'"
+                  @click.stop="handleArchiveDossier(dossier)"
+                >
+                  {{ dossier.status === 'archived' ? '已归档' : '归档' }}
+                </el-button>
+              </div>
             </div>
           </div>
         </div>
@@ -328,24 +357,33 @@
             <span class="dossier-section-title">案卷详情</span>
             <span class="dossier-toolbar-subtitle">查看案卷摘要并编辑基本信息</span>
           </div>
-          <el-button
-            v-if="selectedDossierId"
-            size="small"
-            type="primary"
-            plain
-            @click="handleCreateConversationFromSelectedDossier"
-          >
-            基于此案卷新建会话
-          </el-button>
-          <el-button
-            v-if="selectedDossierId"
-            size="small"
-            plain
-            @click="loadSelectedDossierDetail(selectedDossierId)"
-            :loading="dossierDetailLoading"
-          >
-            刷新详情
-          </el-button>
+          <div v-if="selectedDossierId" class="dossier-detail-actions">
+            <el-button
+              size="small"
+              type="primary"
+              plain
+              @click="handleCreateConversationFromSelectedDossier"
+            >
+              基于此案卷新建会话
+            </el-button>
+            <el-button
+              size="small"
+              plain
+              @click="loadSelectedDossierDetail(selectedDossierId)"
+              :loading="dossierDetailLoading"
+            >
+              刷新详情
+            </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :disabled="selectedDossierDetail?.status === 'archived'"
+              @click="handleArchiveDossier(selectedDossierDetail)"
+            >
+              {{ selectedDossierDetail?.status === 'archived' ? '已归档' : '归档案卷' }}
+            </el-button>
+          </div>
         </div>
 
         <div v-if="dossierDetailLoading" class="dossier-list-status">正在加载案卷详情...</div>
@@ -961,6 +999,7 @@ import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
 import SessionList from './components/SessionList.vue'
 import {
+  archiveDossier,
   attachConversationToDossier,
   batchDeleteConversations,
   clearConversationMessages,
@@ -1016,6 +1055,8 @@ const sessionBatchMode = ref(false)
 const dossiers = ref([])
 const dossierDrawerVisible = ref(false)
 const dossierListLoading = ref(false)
+const dossierSearchKeyword = ref('')
+const dossierStatusFilter = ref('all')
 const dossierSaving = ref(false)
 const dossierBindingId = ref(null)
 const DOSSIER_GRAPH_PREVIEW_NODE_LIMIT = 12
@@ -1169,6 +1210,29 @@ const currentConversationDossierLabel = computed(() => {
 const selectedDossierConversationCount = computed(
   () => selectedDossierDetail.value?.conversation_count || 0
 )
+const filteredDossiers = computed(() => {
+  const keyword = String(dossierSearchKeyword.value || '').trim().toLowerCase()
+  const statusFilter = String(dossierStatusFilter.value || 'all').trim().toLowerCase()
+
+  return dossiers.value.filter((dossier) => {
+    const dossierStatus = String(dossier?.status || 'active').toLowerCase()
+    if (statusFilter === 'active' && dossierStatus !== 'active') return false
+    if (statusFilter === 'archived' && dossierStatus !== 'archived') return false
+
+    if (!keyword) return true
+    const haystack = [dossier?.title, dossier?.case_type, dossier?.summary]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    return haystack.includes(keyword)
+  })
+})
+const dossierListEmptyDescription = computed(() => {
+  if (!dossiers.value.length) {
+    return '创建第一个案卷，用于持续跟踪同一法律问题'
+  }
+  return '没有找到符合条件的案卷'
+})
 const selectedDossierResolvedParticipants = computed(() =>
   Array.isArray(dossierParticipantRegistryState.participants)
     ? dossierParticipantRegistryState.participants
@@ -1934,6 +1998,46 @@ async function handleAttachDossier(dossier) {
 async function handleSelectDossier(dossier) {
   if (!dossier?.id) return
   await loadSelectedDossierDetail(dossier.id)
+}
+
+async function handleArchiveDossier(dossier) {
+  if (!dossier?.id) return
+
+  try {
+    await ElMessageBox.confirm(
+      '归档后不会删除历史会话和主体信息，可在归档筛选中查看。',
+      '归档案卷确认',
+      {
+        confirmButtonText: '确认归档',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    console.error('Failed to confirm dossier archive:', error)
+    ElMessage.error('归档确认失败')
+    return
+  }
+
+  try {
+    await archiveDossier(dossier.id)
+    await refreshDossiers({ silent: true })
+    if (dossierStatusFilter.value === 'active' && selectedDossierId.value === dossier.id) {
+      selectedDossierId.value = filteredDossiers.value[0]?.id || null
+    }
+    if (selectedDossierId.value) {
+      await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
+    } else {
+      applySelectedDossierDetail(null)
+      resetDossierGraphState()
+    }
+    ElMessage.success('案卷已归档')
+  } catch (error) {
+    console.error('Failed to archive dossier:', error)
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '归档案卷失败')
+  }
 }
 
 async function handleUpdateDossierDetail() {
@@ -3553,6 +3657,17 @@ body,
   gap: 10px;
 }
 
+.dossier-list-filters {
+  margin: 10px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-status-filter {
+  width: 100%;
+}
+
 .dossier-item {
   padding: 12px;
   border: 1px solid #e5e7eb;
@@ -3594,10 +3709,23 @@ body,
   color: #4b5563;
 }
 
+.dossier-item-meta-secondary {
+  color: #6b7280;
+}
+
 .dossier-item-summary {
   font-size: 12px;
   line-height: 1.5;
   color: #6b7280;
+}
+
+.dossier-item-actions,
+.dossier-detail-actions,
+.dossier-inline-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .dossier-detail-card {
