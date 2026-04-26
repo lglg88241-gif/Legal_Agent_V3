@@ -239,7 +239,10 @@ async def generate_dossier_summary(
     await db.commit()
     await db.refresh(dossier)
     conversations = await list_dossier_conversations(db, current_user.user_id, dossier.id)
-    return {
+    response = {
         "status": "success",
         "dossier": serialize_dossier_detail(dossier, conversations),
     }
+    if generated.get("warning"):
+        response["warning"] = generated["warning"]
+    return response

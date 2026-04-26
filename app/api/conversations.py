@@ -124,6 +124,15 @@ async def create_conversation(
         title=(payload.title if payload else DEFAULT_CONVERSATION_TITLE),
         dossier_id=dossier_id,
     )
+    if dossier_id is not None:
+        await update_conversation_mode_state(
+            db,
+            conversation,
+            conversation_mode="TRACKED_CASE",
+            persistence_consent="tracked",
+            mode_reason="created_from_dossier",
+            mark_confirmed=True,
+        )
     await db.commit()
     await db.refresh(conversation)
     return {"status": "success", "conversation": serialize_conversation(conversation)}

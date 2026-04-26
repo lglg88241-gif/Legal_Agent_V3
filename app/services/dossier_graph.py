@@ -300,6 +300,8 @@ def build_dossier_graph_summary(
         "- 如图谱内容与本轮用户输入冲突，应优先澄清。",
         "- 图谱不能替代法律检索依据。",
         "- 不得把图谱中的推断关系直接当作已证实事实。",
+        "- participant aliases 只在当前案卷内表示用户确认的称呼，不等同真实姓名。",
+        "- 不得跨案卷自动合并同名主体；不同案卷中的“我”“公司”“对方”默认不是同一实体。",
     ]
     if len(nodes) > max_nodes:
         note_lines.append(f"- 仅展示前 {max_nodes} 个实体。")

@@ -77,6 +77,8 @@ def test_format_dossier_context_block_contains_summary_and_bound_conversations()
     assert "label=\u6211" in block
     assert "current_conversation=true" in block
     assert "\u4e0d\u7b49\u540c\u771f\u5b9e\u59d3\u540d" in block
+    assert "\u4ec5\u5728\u5f53\u524d\u6848\u5377\u5185\u751f\u6548" in block
+    assert "\u4e0d\u540c\u6848\u5377\u4e2d\u7684\u201c\u6211\u201d\u201c\u516c\u53f8\u201d\u201c\u5bf9\u65b9\u201d\u9ed8\u8ba4\u4e0d\u662f\u540c\u4e00\u5b9e\u4f53" in block
     assert "\u4e0d\u80fd\u66ff\u4ee3\u68c0\u7d22\u5230\u7684\u6cd5\u5f8b\u539f\u6587" in block
 
 
@@ -122,8 +124,12 @@ def test_build_advisor_system_prompt_includes_dossier_context_when_present() -> 
     assert "label=\u6211" in prompt
     assert "\u4e0d\u7b49\u540c\u771f\u5b9e\u59d3\u540d" in prompt
     assert "\u4e0d\u5f97\u7f16\u9020\u5176\u771f\u5b9e\u8eab\u4efd" in prompt
+    assert "\u4ec5\u5728\u5f53\u524d\u6848\u5377\u5185\u751f\u6548" in prompt
+    assert "\u4e0d\u540c\u6848\u5377\u4e2d\u7684\u201c\u6211\u201d\u201c\u516c\u53f8\u201d\u201c\u5bf9\u65b9\u201d\u9ed8\u8ba4\u4e0d\u662f\u540c\u4e00\u5b9e\u4f53" in prompt
     assert "\u4e0d\u80fd\u66ff\u4ee3\u68c0\u7d22\u5230\u7684\u6cd5\u5f8b\u539f\u6587" in prompt
     assert "\u4f18\u5148\u6307\u51fa\u51b2\u7a81\u5e76\u5411\u7528\u6237\u6f84\u6e05" in prompt
+    assert "\u5fc5\u987b\u5148\u76f4\u63a5\u56de\u7b54\u8be5\u95ee\u9898" in prompt
+    assert "\u4e0d\u8981\u53ea\u8bf4\u201c\u6211\u53ef\u4ee5\u5e2e\u4f60\u6574\u7406\u201d" in prompt
 
 
 def test_build_advisor_system_prompt_stays_unchanged_without_dossier_context() -> None:

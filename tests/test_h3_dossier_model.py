@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+from datetime import datetime
 from types import ModuleType
 
 import pytest
@@ -756,13 +757,37 @@ def test_create_conversation_with_owned_dossier_succeeds(
             dossier_id=dossier_id,
             session_id="session-32",
             title=title,
-            conversation_mode="TRACKED_CASE",
-            persistence_consent="tracked",
+            conversation_mode="UNKNOWN",
+            persistence_consent="unknown",
         )
+
+    async def fake_update_conversation_mode_state(
+        db,
+        conversation: Conversation,
+        *,
+        conversation_mode: str | None = None,
+        persistence_consent: str | None = None,
+        mode_reason: str | None = None,
+        mark_confirmed: bool = False,
+    ):
+        captured["conversation_mode"] = conversation_mode
+        captured["persistence_consent"] = persistence_consent
+        captured["mode_reason"] = mode_reason
+        captured["mark_confirmed"] = mark_confirmed
+        conversation.conversation_mode = conversation_mode or conversation.conversation_mode
+        conversation.persistence_consent = persistence_consent or conversation.persistence_consent
+        conversation.mode_reason = mode_reason
+        conversation.mode_confirmed_at = datetime(2026, 4, 26, 12, 0, 0) if mark_confirmed else None
+        return conversation
 
     monkeypatch.setattr(conversations_api, "ensure_storage_schema", fake_ensure_storage_schema)
     monkeypatch.setattr(conversations_api, "get_dossier_for_user", fake_get_dossier_for_user)
     monkeypatch.setattr(conversations_api, "create_conversation_record", fake_create_conversation_record)
+    monkeypatch.setattr(
+        conversations_api,
+        "update_conversation_mode_state",
+        fake_update_conversation_mode_state,
+    )
 
     result = asyncio.run(
         conversations_api.create_conversation(
@@ -772,8 +797,20 @@ def test_create_conversation_with_owned_dossier_succeeds(
         )
     )
 
-    assert captured == {"user_id": 8, "title": "基于案卷的新会话", "dossier_id": 15}
+    assert captured == {
+        "user_id": 8,
+        "title": "基于案卷的新会话",
+        "dossier_id": 15,
+        "conversation_mode": "TRACKED_CASE",
+        "persistence_consent": "tracked",
+        "mode_reason": "created_from_dossier",
+        "mark_confirmed": True,
+    }
     assert result["conversation"]["dossier_id"] == 15
+    assert result["conversation"]["conversation_mode"] == "TRACKED_CASE"
+    assert result["conversation"]["persistence_consent"] == "tracked"
+    assert result["conversation"]["mode_reason"] == "created_from_dossier"
+    assert result["conversation"]["mode_confirmed_at"] == "2026-04-26T12:00:00"
 
 
 def test_create_conversation_with_other_users_dossier_fails(

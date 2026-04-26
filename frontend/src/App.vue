@@ -439,6 +439,9 @@
             <div class="dossier-participants-hint">
               这些称呼是用户确认的案卷别名，可使用化名或角色名，不等同于真实姓名。
             </div>
+            <div class="dossier-participants-hint">
+              当事人称呼仅在当前案卷内用于持续跟踪，不会自动与其他案卷同名主体合并。
+            </div>
             <div class="dossier-participants-grid">
               <el-input
                 v-model="dossierParticipantForm.primary_label"
@@ -478,6 +481,12 @@
             </div>
             <div class="dossier-graph-hint">
               当前展示的是案卷下已绑定会话的聚合图谱统计，只读查看，不会改动图谱写入。
+            </div>
+            <div class="dossier-graph-hint">
+              当前图谱为案卷局部图谱；节点和关系来自绑定会话中的结构化案情，可能包含未确认推断。
+            </div>
+            <div class="dossier-graph-hint">
+              如绑定了不同案情会话，图谱可能出现混杂，建议结合案卷摘要和原始会话继续确认。
             </div>
             <div v-if="dossierGraphLoading && !dossierGraphLoaded" class="dossier-list-status">
               正在加载图谱状态...
@@ -544,6 +553,9 @@
                 </div>
                 <div class="dossier-graph-preview-hint">
                   案卷图谱由该案卷绑定会话中的结构化案情信息聚合生成，可能包含系统推断的未确认关系。
+                </div>
+                <div class="dossier-graph-preview-hint">
+                  同名“我 / 公司 / 对方”只在当前案卷内按用户确认称呼展示，不会自动与其他案卷同名主体合并。
                 </div>
 
                 <div v-if="selectedDossierGraphHasPreview" class="dossier-graph-preview-body">
@@ -1118,6 +1130,22 @@ function touchConversationLocal(conversationId, patch = {}) {
   })
 }
 
+function resolveConversationRecord(conversationId) {
+  if (!conversationId) return null
+  if (currentConversation.value?.id === conversationId) {
+    return currentConversation.value
+  }
+  return conversations.value.find((item) => item.id === conversationId) || null
+}
+
+function isTrackedDossierConversation(conversation) {
+  if (!conversation?.dossier_id) return false
+  return (
+    String(conversation?.persistence_consent || '').trim() === 'tracked' ||
+    String(conversation?.conversation_mode || '').trim() === 'TRACKED_CASE'
+  )
+}
+
 function resetDossierForm() {
   dossierForm.title = ''
   dossierForm.case_type = ''
@@ -1490,6 +1518,23 @@ async function handleCreateDossier() {
 async function handleAttachDossier(dossier) {
   if (!currentConversationId.value || !dossier?.id) return
 
+  try {
+    await ElMessageBox.confirm(
+      '请确认当前会话属于该案卷。若将不同案情的会话绑定到同一案卷，可能导致案卷摘要和图谱混杂。',
+      '绑定案卷确认',
+      {
+        confirmButtonText: '确认绑定',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    console.error('Failed to confirm dossier attachment:', error)
+    ElMessage.error('绑定案卷确认失败')
+    return
+  }
+
   dossierBindingId.value = dossier.id
   try {
     const { data } = await attachConversationToDossier(currentConversationId.value, dossier.id)
@@ -1587,10 +1632,14 @@ async function handleGenerateDossierSummary() {
 
   dossierSummaryGenerating.value = true
   try {
-    await generateDossierSummary(selectedDossierId.value)
+    const { data } = await generateDossierSummary(selectedDossierId.value)
     await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
     await refreshDossiers({ silent: true, preferredDossierId: selectedDossierId.value })
-    ElMessage.success('智能摘要已更新')
+    if (typeof data?.warning === 'string' && data.warning) {
+      ElMessage.warning(data.warning)
+    } else {
+      ElMessage.success('智能摘要已更新')
+    }
   } catch (error) {
     console.error('Failed to generate dossier summary:', error)
     const detail = error?.response?.data?.detail
@@ -2177,7 +2226,10 @@ async function sendImpl(textOverride = null, options = {}) {
   const draftText = text
 
   const forceCurrentCase = Boolean(options.forceCurrentCase)
-  const modeConsentEnabled = options.modeConsentEnabled !== false
+  const modeConsentEnabled =
+    options.modeConsentEnabled === false
+      ? false
+      : !isTrackedDossierConversation(resolveConversationRecord(baseConversationId))
   const restoreDraftOnErrorText =
     typeof options.restoreDraftOnErrorText === 'string' ? options.restoreDraftOnErrorText : null
   const tempKey = `temp-user-${Date.now()}`

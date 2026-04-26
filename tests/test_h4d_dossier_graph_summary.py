@@ -374,3 +374,39 @@ def test_ask_agent_task_passes_dossier_graph_summary_without_breaking_advisor(
 
     assert result["status"] == "success"
     assert str(captured["dossier_graph_summary"]).startswith("<dossier_graph_summary>")
+
+
+def test_build_dossier_graph_summary_marks_aliases_as_dossier_local_only() -> None:
+    summary = dossier_graph.build_dossier_graph_summary(
+        {
+            "status": "success",
+            "dossier_id": 88,
+            "participant_aliases": {
+                "primary_party": {
+                    "label": "我",
+                    "role": "劳动者",
+                    "party_side": "claimant",
+                    "confirmed_by_user": True,
+                },
+                "opposing_party": {
+                    "label": "公司",
+                    "role": "用人单位",
+                    "party_side": "opponent",
+                    "confirmed_by_user": True,
+                },
+            },
+            "graph": {
+                "nodes": [],
+                "edges": [],
+                "stats": {
+                    "conversation_count": 1,
+                    "node_count": 0,
+                    "edge_count": 0,
+                },
+            },
+        }
+    )
+
+    assert summary is not None
+    assert "participant aliases 只在当前案卷内表示用户确认的称呼" in summary
+    assert "不得跨案卷自动合并同名主体" in summary
