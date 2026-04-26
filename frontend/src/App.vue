@@ -463,6 +463,84 @@
             </div>
           </div>
 
+          <div class="dossier-graph-section">
+            <div class="dossier-auto-summary-header">
+              <div class="dossier-detail-conversations-title">图谱状态</div>
+              <el-button
+                size="small"
+                type="primary"
+                plain
+                :loading="dossierGraphLoading"
+                @click="handleRefreshDossierGraph"
+              >
+                刷新图谱状态
+              </el-button>
+            </div>
+            <div class="dossier-graph-hint">
+              当前展示的是案卷下已绑定会话的聚合图谱统计，只读查看，不会改动图谱写入。
+            </div>
+            <div v-if="dossierGraphLoading && !dossierGraphLoaded" class="dossier-list-status">
+              正在加载图谱状态...
+            </div>
+            <div v-else-if="dossierGraphState.error" class="dossier-graph-error">
+              {{ dossierGraphState.error }}
+            </div>
+            <div v-else class="dossier-graph-body">
+              <div class="dossier-graph-stats">
+                <div class="dossier-graph-stat">
+                  <span class="dossier-graph-stat-label">绑定会话</span>
+                  <strong class="dossier-graph-stat-value">
+                    {{ dossierGraphState.conversationCount }}
+                  </strong>
+                </div>
+                <div class="dossier-graph-stat">
+                  <span class="dossier-graph-stat-label">实体节点</span>
+                  <strong class="dossier-graph-stat-value">
+                    {{ dossierGraphState.nodeCount }}
+                  </strong>
+                </div>
+                <div class="dossier-graph-stat">
+                  <span class="dossier-graph-stat-label">关系边</span>
+                  <strong class="dossier-graph-stat-value">
+                    {{ dossierGraphState.edgeCount }}
+                  </strong>
+                </div>
+              </div>
+
+              <div
+                v-if="selectedDossierGraphGeneratedAtLabel || dossierGraphLoading"
+                class="dossier-graph-meta"
+              >
+                <span v-if="selectedDossierGraphGeneratedAtLabel">
+                  {{ `最近聚合：${selectedDossierGraphGeneratedAtLabel}` }}
+                </span>
+                <span v-if="dossierGraphLoading">刷新中...</span>
+              </div>
+
+              <div v-if="dossierGraphState.warning" class="dossier-graph-warning">
+                图谱服务暂不可用，当前显示为空状态。
+              </div>
+
+              <div class="dossier-graph-aliases">
+                <div class="dossier-graph-alias-item">
+                  <span>主要当事人</span>
+                  <strong>{{ selectedDossierGraphPrimaryAlias }}</strong>
+                </div>
+                <div class="dossier-graph-alias-item">
+                  <span>对方</span>
+                  <strong>{{ selectedDossierGraphOpposingAlias }}</strong>
+                </div>
+              </div>
+
+              <div
+                v-if="selectedDossierGraphIsEmpty && !dossierGraphState.warning"
+                class="dossier-graph-empty"
+              >
+                {{ selectedDossierGraphEmptyText }}
+              </div>
+            </div>
+          </div>
+
           <div class="dossier-detail-conversations">
             <div class="dossier-detail-conversations-title">绑定会话</div>
             <el-empty
@@ -604,6 +682,7 @@ import {
   getConversationSummary,
   getConversations,
   getDossierDetail,
+  getDossierGraph,
   getDossiers,
   getLocalModelStatus,
   searchConversations,
@@ -649,8 +728,20 @@ const dossierDetailLoading = ref(false)
 const dossierDetailSaving = ref(false)
 const dossierParticipantsSaving = ref(false)
 const dossierSummaryGenerating = ref(false)
+const dossierGraphLoading = ref(false)
+const dossierGraphLoaded = ref(false)
 const trackedOnboardingVisible = ref(false)
 const trackedOnboardingSubmitting = ref(false)
+const dossierGraphState = reactive({
+  dossierId: null,
+  conversationCount: 0,
+  nodeCount: 0,
+  edgeCount: 0,
+  generatedAt: '',
+  warning: '',
+  error: '',
+  participantAliases: {},
+})
 const dossierForm = reactive({
   title: '',
   case_type: '',
@@ -748,6 +839,35 @@ const currentConversationDossierLabel = computed(() => {
 const selectedDossierConversationCount = computed(
   () => selectedDossierDetail.value?.conversation_count || 0
 )
+const selectedDossierGraphParticipantAliases = computed(() => {
+  const aliases = dossierGraphState.participantAliases
+  if (aliases && Object.keys(aliases).length) {
+    return aliases
+  }
+  return selectedDossierDetail.value?.participant_aliases || {}
+})
+const selectedDossierGraphGeneratedAtLabel = computed(() =>
+  formatDossierConversationTime(dossierGraphState.generatedAt)
+)
+const selectedDossierGraphPrimaryAlias = computed(() =>
+  formatParticipantAliasSummary(selectedDossierGraphParticipantAliases.value?.primary_party)
+)
+const selectedDossierGraphOpposingAlias = computed(() =>
+  formatParticipantAliasSummary(selectedDossierGraphParticipantAliases.value?.opposing_party)
+)
+const selectedDossierGraphIsEmpty = computed(
+  () => dossierGraphLoaded.value && dossierGraphState.nodeCount === 0 && dossierGraphState.edgeCount === 0
+)
+const selectedDossierGraphEmptyText = computed(() => {
+  if (!selectedDossierGraphIsEmpty.value) return ''
+  if (dossierGraphState.warning) {
+    return '图谱服务暂不可用，当前显示为空状态。'
+  }
+  if (!dossierGraphState.conversationCount) {
+    return '当前案卷尚未绑定会话，图谱状态为空。'
+  }
+  return '当前案卷下已绑定会话，但尚未聚合出实体节点或关系。'
+})
 const conversationListEmptyText = computed(() =>
   conversationSearchKeyword.value.trim() ? '没有找到相关会话' : '暂无会话'
 )
@@ -954,6 +1074,35 @@ function applySelectedDossierDetail(dossier) {
   )
 }
 
+function resetDossierGraphState() {
+  dossierGraphState.dossierId = null
+  dossierGraphState.conversationCount = 0
+  dossierGraphState.nodeCount = 0
+  dossierGraphState.edgeCount = 0
+  dossierGraphState.generatedAt = ''
+  dossierGraphState.warning = ''
+  dossierGraphState.error = ''
+  dossierGraphState.participantAliases = {}
+  dossierGraphLoaded.value = false
+}
+
+function applyDossierGraphPayload(dossierId, payload) {
+  const stats = payload?.graph?.stats || {}
+  const participantAliases = payload?.participant_aliases
+  dossierGraphState.dossierId = dossierId
+  dossierGraphState.conversationCount = Number(stats.conversation_count || 0)
+  dossierGraphState.nodeCount = Number(stats.node_count || 0)
+  dossierGraphState.edgeCount = Number(stats.edge_count || 0)
+  dossierGraphState.generatedAt = payload?.generated_at || ''
+  dossierGraphState.warning = typeof payload?.warning === 'string' ? payload.warning : ''
+  dossierGraphState.error = ''
+  dossierGraphState.participantAliases =
+    participantAliases && typeof participantAliases === 'object'
+      ? participantAliases
+      : selectedDossierDetail.value?.participant_aliases || {}
+  dossierGraphLoaded.value = true
+}
+
 function resetAnalysis() {
   currentAnalysis.actions = []
   currentAnalysis.sources = []
@@ -1075,6 +1224,7 @@ async function refreshDossiers(options = {}) {
     if (!nextDossiers.length) {
       selectedDossierId.value = null
       applySelectedDossierDetail(null)
+      resetDossierGraphState()
       return
     }
 
@@ -1101,27 +1251,74 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
   if (!dossierId) {
     selectedDossierId.value = null
     applySelectedDossierDetail(null)
+    resetDossierGraphState()
     return
   }
 
   selectedDossierId.value = dossierId
   dossierDetailLoading.value = true
+  let detailLoaded = false
   try {
     const { data } = await getDossierDetail(dossierId)
     const dossier = data?.dossier || null
     applySelectedDossierDetail(dossier)
     if (dossier) {
       upsertDossierLocal(dossier)
+      detailLoaded = true
     }
   } catch (error) {
     console.error('Failed to fetch dossier detail:', error)
     applySelectedDossierDetail(null)
+    resetDossierGraphState()
     if (!options.silent) {
       ElMessage.error('Failed to load dossier detail')
     }
   } finally {
     dossierDetailLoading.value = false
   }
+
+  if (detailLoaded && options.loadGraph !== false) {
+    await loadSelectedDossierGraph(dossierId, { silent: true })
+  }
+}
+
+async function loadSelectedDossierGraph(dossierId, options = {}) {
+  if (!dossierId) {
+    resetDossierGraphState()
+    return
+  }
+
+  const isSameDossier = dossierGraphState.dossierId === dossierId
+  if (!isSameDossier) {
+    resetDossierGraphState()
+    dossierGraphState.dossierId = dossierId
+  }
+
+  dossierGraphLoading.value = true
+  dossierGraphState.error = ''
+  try {
+    const { data } = await getDossierGraph(dossierId)
+    applyDossierGraphPayload(dossierId, data)
+  } catch (error) {
+    console.error('Failed to fetch dossier graph:', error)
+    dossierGraphState.dossierId = dossierId
+    dossierGraphState.warning = ''
+    dossierGraphState.error =
+      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
+        ? error.response.data.detail
+        : '图谱状态加载失败，请稍后重试'
+    dossierGraphLoaded.value = true
+    if (!options.silent) {
+      ElMessage.error(dossierGraphState.error)
+    }
+  } finally {
+    dossierGraphLoading.value = false
+  }
+}
+
+async function handleRefreshDossierGraph() {
+  if (!selectedDossierId.value) return
+  await loadSelectedDossierGraph(selectedDossierId.value)
 }
 
 async function openDossierDrawer() {
@@ -1706,6 +1903,15 @@ function formatDossierConversationTime(value) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function formatParticipantAliasSummary(alias) {
+  const label = String(alias?.label || '').trim()
+  const role = String(alias?.role || '').trim()
+  if (label && role) return `${label} / ${role}`
+  if (label) return label
+  if (role) return role
+  return '未设置'
 }
 
 function buildParticipantAliasesPayload(form) {
@@ -2747,6 +2953,13 @@ body,
   background: #f8fafc;
 }
 
+.dossier-graph-section {
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff, #eef6ff);
+}
+
 .dossier-auto-summary-header {
   display: flex;
   align-items: center;
@@ -2755,6 +2968,13 @@ body,
 }
 
 .dossier-participants-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
+.dossier-graph-hint {
   margin-top: 8px;
   font-size: 12px;
   line-height: 1.6;
@@ -2782,6 +3002,102 @@ body,
   margin-top: 10px;
   white-space: pre-wrap;
   line-height: 1.7;
+  font-size: 13px;
+  color: #111827;
+}
+
+.dossier-graph-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-graph-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dossier-graph-stat {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid #dbeafe;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dossier-graph-stat-label {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-graph-stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1e3a8a;
+}
+
+.dossier-graph-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #4b5563;
+}
+
+.dossier-graph-warning,
+.dossier-graph-error,
+.dossier-graph-empty {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dossier-graph-warning {
+  background: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+}
+
+.dossier-graph-error {
+  margin-top: 10px;
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+}
+
+.dossier-graph-empty {
+  background: rgba(255, 255, 255, 0.82);
+  color: #6b7280;
+  border: 1px dashed #bfdbfe;
+}
+
+.dossier-graph-aliases {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dossier-graph-alias-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid #dbeafe;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dossier-graph-alias-item span {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-graph-alias-item strong {
   font-size: 13px;
   color: #111827;
 }
@@ -2966,6 +3282,8 @@ body,
 }
 
 @media (max-width: 768px) {
+  .dossier-graph-stats,
+  .dossier-graph-aliases,
   .dossier-participants-grid,
   .tracked-onboarding-grid {
     grid-template-columns: 1fr;
