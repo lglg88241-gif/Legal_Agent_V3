@@ -29,11 +29,11 @@ WHERE any(token IN $tokens WHERE
     coalesce(m.article_label, '') CONTAINS token OR
     toString(coalesce(m.article_num, '')) CONTAINS token
 )
-RETURN id(n) AS source_id,
+RETURN elementId(n) AS source_id,
        labels(n) AS source_labels,
        properties(n) AS source_properties,
        type(r) AS relation,
-       id(m) AS target_id,
+       elementId(m) AS target_id,
        labels(m) AS target_labels,
        properties(m) AS target_properties
 LIMIT 20

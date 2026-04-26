@@ -270,11 +270,11 @@ def test_fetch_dossier_graph_sync_uses_user_and_conversation_scope(
             calls.append((query, params))
             assert params["user_id"] == 9
             assert params["conversation_ids"] == [101, 102]
-            if "RETURN id(n) AS node_id" in query:
+            if "RETURN elementId(n) AS node_id" in query:
                 return FakeResult(
                     [
                         {
-                            "node_id": 1,
+                            "node_id": "4:node-1",
                             "labels": ["DynamicCaseEntity", "主体"],
                             "properties": {
                                 "name": "公司",
@@ -284,7 +284,7 @@ def test_fetch_dossier_graph_sync_uses_user_and_conversation_scope(
                             },
                         },
                         {
-                            "node_id": 2,
+                            "node_id": "4:node-2",
                             "labels": ["DynamicCaseEntity"],
                             "properties": {
                                 "title": "违法辞退",
@@ -298,9 +298,9 @@ def test_fetch_dossier_graph_sync_uses_user_and_conversation_scope(
             return FakeResult(
                 [
                     {
-                        "edge_id": 5,
-                        "source_id": 1,
-                        "target_id": 2,
+                        "edge_id": "5:edge-1",
+                        "source_id": "4:node-1",
+                        "target_id": "4:node-2",
                         "edge_type": "CASE_RELATION",
                         "properties": {
                             "relation": "涉及",
@@ -323,16 +323,16 @@ def test_fetch_dossier_graph_sync_uses_user_and_conversation_scope(
     result = dossier_graph._fetch_dossier_graph_sync(9, [101, 102, 101, 0, -1])  # noqa: SLF001
 
     assert len(result["nodes"]) == 2
-    assert result["nodes"][0]["id"] == "1"
+    assert result["nodes"][0]["id"] == "4:node-1"
     assert result["nodes"][0]["label"] == "公司"
     assert result["nodes"][0]["type"] == "主体"
     assert result["nodes"][1]["label"] == "违法辞退"
     assert result["nodes"][1]["type"] == "事件"
     assert result["edges"] == [
         {
-            "id": "5",
-            "source": "1",
-            "target": "2",
+            "id": "5:edge-1",
+            "source": "4:node-1",
+            "target": "4:node-2",
             "type": "CASE_RELATION",
             "label": "涉及",
             "properties": {
@@ -342,7 +342,11 @@ def test_fetch_dossier_graph_sync_uses_user_and_conversation_scope(
             },
         }
     ]
-    assert sum(1 for query, _ in calls if isinstance(query, str) and "RETURN id(" in query) == 2
+    assert sum(
+        1
+        for query, _ in calls
+        if isinstance(query, str) and "RETURN elementId(" in query
+    ) == 2
     assert calls[-1] == ("close", None)
 
 

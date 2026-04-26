@@ -26,10 +26,10 @@ logger = logging.getLogger(__name__)
 DOSSIER_GRAPH_NODES_QUERY = """
 MATCH (n:DynamicCaseEntity {user_id: $user_id})
 WHERE n.conversation_id IN $conversation_ids
-RETURN id(n) AS node_id,
+RETURN elementId(n) AS node_id,
        labels(n) AS labels,
        properties(n) AS properties
-ORDER BY toString(id(n))
+ORDER BY elementId(n)
 LIMIT 2000
 """
 
@@ -38,12 +38,12 @@ MATCH (source:DynamicCaseEntity {user_id: $user_id})-[rel:CASE_RELATION]->(targe
 WHERE source.conversation_id IN $conversation_ids
   AND target.conversation_id IN $conversation_ids
   AND rel.conversation_id IN $conversation_ids
-RETURN id(rel) AS edge_id,
-       id(source) AS source_id,
-       id(target) AS target_id,
+RETURN elementId(rel) AS edge_id,
+       elementId(source) AS source_id,
+       elementId(target) AS target_id,
        type(rel) AS edge_type,
        properties(rel) AS properties
-ORDER BY toString(id(rel))
+ORDER BY elementId(rel)
 LIMIT 4000
 """
 
