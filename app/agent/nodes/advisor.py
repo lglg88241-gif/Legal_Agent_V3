@@ -32,6 +32,7 @@ from app.agent.guards import (
     sanitize_unverified_claims,
 )
 from app.core.llm_provider import LLMProvider
+from app.services.dossier_graph_tool import classify_dossier_graph_query
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ _PAYLOAD_FACT_KEYWORDS = (
 )
 _RAG_PREVIEW_LIMIT = 350
 _MAX_OTHER_REFERENCE_ITEMS = 5
+_DOSSIER_QUESTION_DEFAULT = "default"
+_DOSSIER_QUESTION_MEMORY = "dossier_memory"
+_DOSSIER_QUESTION_ADVICE = "dossier_advice"
 
 
 def _normalize_number_token(raw: str) -> str:
@@ -98,6 +102,56 @@ def _clean_rag_snippet(snippet: str, *prefixes: str) -> str:
         if cleaned_prefix and result.startswith(cleaned_prefix):
             result = result[len(cleaned_prefix):].lstrip("：:，,;；。 \n")
     return result.strip()
+
+
+def _normalize_dossier_question_mode(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if normalized in {
+        _DOSSIER_QUESTION_DEFAULT,
+        _DOSSIER_QUESTION_MEMORY,
+        _DOSSIER_QUESTION_ADVICE,
+    }:
+        return normalized
+    return _DOSSIER_QUESTION_DEFAULT
+
+
+def _classify_dossier_question_mode(
+    *,
+    question: str,
+    dossier_context: dict[str, Any] | None,
+    dossier_graph_context: dict[str, Any] | None,
+) -> str:
+    if not isinstance(dossier_context, dict) and not isinstance(dossier_graph_context, dict):
+        return _DOSSIER_QUESTION_DEFAULT
+
+    query_kind = classify_dossier_graph_query(question)
+    if query_kind == "memory":
+        return _DOSSIER_QUESTION_MEMORY
+    if query_kind == "advice":
+        return _DOSSIER_QUESTION_ADVICE
+    return _DOSSIER_QUESTION_DEFAULT
+
+
+def _build_advisor_user_instruction(question: str, question_mode: str) -> str:
+    normalized_mode = _normalize_dossier_question_mode(question_mode)
+    if normalized_mode == _DOSSIER_QUESTION_MEMORY:
+        return (
+            f"用户的问题：{question}\n"
+            "当前问题属于案卷记忆查询。请优先依据 system 中的案卷上下文、案卷图谱摘要和案卷图谱查询结果，"
+            "直接回答案卷里记录的主体、事实、证据或关系。"
+            "不要为了补充背景而主动展开无关法律条文、刑法内容或不相干案例。"
+        )
+    if normalized_mode == _DOSSIER_QUESTION_ADVICE:
+        return (
+            f"用户的问题：{question}\n"
+            "请结合 system 中的案卷上下文、案卷图谱背景和相关法律检索结果，先直接回答用户的具体任务问题，"
+            "再补充真正相关的法律依据与下一步建议。"
+        )
+    return (
+        f"用户的问题：{question}\n"
+        "请基于 system 中的【已确认事实】【相关法条原文】【参考案例】给出回答。"
+        "必须引用法条编号，必须有下一步建议。"
+    )
 
 
 def _split_rag_by_type(tool_results: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -820,6 +874,7 @@ def build_advisor_system_prompt(
     dossier_context: str = "",
     dossier_graph_summary: str = "",
     dossier_graph_context: str = "",
+    question_mode: str = _DOSSIER_QUESTION_DEFAULT,
 ) -> str:
     """
     Build the full advisor system prompt.
@@ -870,14 +925,65 @@ def build_advisor_system_prompt(
     amount_verification_block = _build_amount_verification_block(question, payload)
     statute_verification_block = _build_statute_verification_block(question, rag_context)
 
+    normalized_question_mode = _normalize_dossier_question_mode(question_mode)
     payload_facts = payload_facts or _extract_payload_facts(payload)
     laws_block = laws_block or "无"
     cases_block = cases_block or "无"
     rag_context = rag_context or "无"
+    memory_only_mode = normalized_question_mode == _DOSSIER_QUESTION_MEMORY
+
+    if memory_only_mode:
+        laws_block = "当前问题属于案卷记忆查询，本轮不强制使用法律检索结果。"
+        cases_block = "当前问题属于案卷记忆查询，本轮不强制使用案例材料。"
+        rag_context = "当前问题属于案卷记忆查询；如用户未追问法律依据，请忽略法律检索材料。"
 
     dossier_block = dossier_context.strip()
     dossier_graph_block = dossier_graph_summary.strip()
     dossier_graph_context_block = dossier_graph_context.strip()
+    retrieval_relevance_guard = """
+
+<retrieval_relevance_guard>
+如果检索材料与当前问题或当前案型明显无关，例如劳动争议问题却检索到刑法、环境犯罪或其他不相干案例，不得为了“补充依据”而硬塞进回答。
+与当前问题无关的法条、案例和其他 RAG 材料应直接忽略。
+</retrieval_relevance_guard>"""
+    if memory_only_mode:
+        rag_binding_block = """
+
+<rag_binding>
+当前问题属于案卷记忆 / 主体关系 / 历史事实回顾。
+你应优先依据 <dossier_context>、<dossier_graph_summary>、<dossier_graph_context> 回答，直接说明案卷中已记录或已确认的信息。
+除非用户明确追问法律依据，否则不要主动展开法条解释、案例引用或其他法律检索内容。
+</rag_binding>"""
+        output_contract_block = """
+
+<output_contract>
+1. 只返回 JSON，格式：{"answer": "...", "sources": [...]}
+2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
+3. answer：当前问题若属于案卷记忆查询，应先直接回答“案卷里记录了什么 / 主体是谁 / 关键事实有哪些 / 证据有哪些”，必要时用条目列出。
+4. 除非用户明确追问法律依据，否则不要主动引用法条编号、案例名称或展开法律 RAG 内容。
+5. 如果案卷信息不足，直接说明“当前案卷已记录的信息有限”，不要编造或补齐未确认事实。
+6. sources：只能填写检索材料中真实出现过的来源，不能编造；如果本轮回答未实际使用法律检索来源，可返回空数组。
+</output_contract>"""
+    else:
+        rag_binding_block = """
+
+<rag_binding>
+你必须优先依据【相关法条原文】和【参考案例】作答；<rag_context> 只作为补充背景材料。
+若【相关法条原文】中出现了具体法律名称和条文编号，应自然引用到回答中。
+若【参考案例】中存在与当前问题直接相关的案例名称和裁判要点，应在用户询问类案时加以说明。
+</rag_binding>"""
+        output_contract_block = """
+
+<output_contract>
+1. 只返回 JSON，格式：{"answer": "...", "sources": [...]}
+2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
+3. answer：必须明确引用法条编号，但仅限【相关法条原文】或 <rag_context> 中已出现的编号。
+4. answer：当【参考案例】中存在与当前问题直接相关的案例时，应在回答中引用至少 1 个案件名简称（如“郑某诉霍尼韦尔案”“某途教育公司诉王某华案”），并用一句话总结裁判要点；如果检索到的案例与当前问题不相关，应明确忽略，不要为了满足格式硬塞进回答。
+5. answer：结尾给出 1 到 2 个明确的下一步行动建议。
+6. 如果用户提出的是具体任务型问题，例如“准备哪些证据”“下一步怎么办”“仲裁请求怎么写”“风险是什么”，必须先直接回答该问题，给出明确清单、步骤或判断，不要只说“我可以帮你整理”。
+7. 只有当用户没有提出明确任务时，才可以使用“如果你愿意，我可以继续帮你整理成证据目录/仲裁申请书”这类补充性表达；该类表达不能替代直接回答。
+8. sources：只能填写检索材料中真实出现过的来源，不能编造。
+</output_contract>"""
 
     prompt = f"""
 你不是普通的文本精校员，而是一位资深的中国法律咨询律师。请基于下面给定的事实、法条原文和参考案例，给出一段专业、有共情、可落地的回答。
@@ -916,12 +1022,8 @@ def build_advisor_system_prompt(
 2. 涉及金额时，必须沿用【已确认事实】中的计算结果，不得自行重算。
 3. 不得使用“算账与确权层”“高风险执行层”“下一步落地动作”这类内部分层标签。
 4. 如果【相关法条原文】为空或为“无”，直接说明“暂未检索到精确法条原文，以下基于通用规则给出方向性建议”，禁止伪造条款号。
-
-<rag_binding>
-你必须优先依据【相关法条原文】和【参考案例】作答；<rag_context> 只作为补充背景材料。
-若【相关法条原文】中出现了具体法律名称和条文编号，应自然引用到回答中。
-若【参考案例】中出现了案例名称和裁判要点，应在用户询问类案时加以说明。
-</rag_binding>
+{retrieval_relevance_guard}
+{rag_binding_block}
 
 <dossier_graph_context_guard>
 如果 system 中出现 dossier_graph_context，它只能作为当前案卷的结构化案情背景，不是法律依据。
@@ -955,16 +1057,7 @@ def build_advisor_system_prompt(
 历史案件参考只可作为背景提示，严禁当作当前案件事实参与计算、抽取月薪、工龄或案型。
 </grounded_context>
 
-<output_contract>
-1. 只返回 JSON，格式：{{"answer": "...", "sources": [...]}}
-2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
-3. answer：必须明确引用法条编号，但仅限【相关法条原文】或 <rag_context> 中已出现的编号。
-4. answer：当【参考案例】不为“无”时，必须在回答中引用至少 1 个案件名简称（如“郑某诉霍尼韦尔案”“某途教育公司诉王某华案”），并用一句话总结裁判要点。若你判断案例与用户问题不相关，仍需在回答末尾说明“参考案例 X 与本案情形不完全相同，仅供参考”。严禁完全忽略【参考案例】段。
-5. answer：结尾给出 1 到 2 个明确的下一步行动建议。
-6. 如果用户提出的是具体任务型问题，例如“准备哪些证据”“下一步怎么办”“仲裁请求怎么写”“风险是什么”，必须先直接回答该问题，给出明确清单、步骤或判断，不要只说“我可以帮你整理”。
-7. 只有当用户没有提出明确任务时，才可以使用“如果你愿意，我可以继续帮你整理成证据目录/仲裁申请书”这类补充性表达；该类表达不能替代直接回答。
-8. sources：只能填写检索材料中真实出现过的来源，不能编造。
-</output_contract>
+{output_contract_block}
 
 <examples>
 【示例：正确回答】
@@ -1039,6 +1132,11 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
     dossier_graph_context_block = _format_dossier_graph_context_block(
         state.get("dossier_graph_context")
     )
+    dossier_question_mode = _classify_dossier_question_mode(
+        question=state["question"],
+        dossier_context=state.get("dossier_context"),
+        dossier_graph_context=state.get("dossier_graph_context"),
+    )
 
     advisor_system_prompt = build_advisor_system_prompt(
         question=state["question"],
@@ -1053,6 +1151,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         dossier_context=dossier_context_block,
         dossier_graph_summary=dossier_graph_summary_block,
         dossier_graph_context=dossier_graph_context_block,
+        question_mode=dossier_question_mode,
     )
 
     fallback = {"answer": layered_payload.answer, "sources": []}
@@ -1070,10 +1169,9 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
             {"role": "system", "content": advisor_system_prompt},
             {
                 "role": "user",
-                "content": (
-                    f"用户的问题：{state['question']}\n"
-                    "请基于 system 中的【已确认事实】【相关法条原文】【参考案例】给出回答。"
-                    "必须引用法条编号，必须有下一步建议。"
+                "content": _build_advisor_user_instruction(
+                    state["question"],
+                    dossier_question_mode,
                 ),
             },
         ],

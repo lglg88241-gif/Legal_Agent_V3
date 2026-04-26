@@ -46,8 +46,11 @@ _SUMMARY_QUERY_HINTS = (
 
 _GRAPH_CONTEXT_WARNING = "graph_context 仅代表案卷结构化背景，不构成法律依据。"
 _DOSSIER_GRAPH_MEMORY_HINTS = (
-    "之前",
-    "案卷",
+    "之前提到",
+    "之前说过",
+    "之前记录",
+    "案卷里",
+    "案卷中",
     "这个案子",
     "这个案件",
     "这个案卷",
@@ -56,18 +59,62 @@ _DOSSIER_GRAPH_MEMORY_HINTS = (
     "哪些主体",
     "有哪些证据",
     "哪些证据",
-    "我和公司",
+    "我和公司之间",
     "已有案情",
     "历史记录",
     "历史案情",
-    "之前提到",
     "当前案卷",
     "已记录",
     "已确认",
+    "关键事实",
+    "记录了什么",
+)
+_DOSSIER_GRAPH_MEMORY_CONTEXT_HINTS = (
+    "案卷",
+    "案子",
+    "案件",
+    "历史",
+    "之前",
+    "记录",
+    "确认",
+)
+_DOSSIER_GRAPH_MEMORY_TOPIC_HINTS = (
     "主体",
     "证据",
     "关系",
+    "事实",
+    "公司",
+    "对方",
+)
+_DOSSIER_GRAPH_ADVICE_HINTS = (
+    "根据这个案子",
+    "根据这个案件",
     "结合这个案卷",
+    "结合这个案子",
+    "下一步",
+    "接下来",
+    "准备哪些证据",
+    "需要准备什么证据",
+    "需要准备什么材料",
+    "仲裁请求怎么写",
+    "仲裁申请书怎么写",
+    "仲裁申请怎么写",
+    "证据目录",
+    "证据清单",
+    "帮我整理",
+    "帮我起草",
+    "帮我生成",
+    "怎么维权",
+    "怎么主张",
+    "该怎么做",
+    "应该怎么做",
+    "我该怎么办",
+    "下一步怎么办",
+    "接下来怎么办",
+    "风险",
+    "胜算",
+    "申请劳动仲裁",
+    "劳动仲裁",
 )
 _PURE_LEGAL_QUERY_HINTS = (
     "法条",
@@ -137,7 +184,19 @@ def _looks_like_memory_query(text: str) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return False
-    return any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_HINTS)
+    if any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_HINTS):
+        return True
+    return (
+        any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_CONTEXT_HINTS)
+        and any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_TOPIC_HINTS)
+    )
+
+
+def _looks_like_advice_query(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    return any(hint in normalized for hint in _DOSSIER_GRAPH_ADVICE_HINTS)
 
 
 def _looks_like_pure_legal_query(text: str) -> bool:
@@ -147,10 +206,27 @@ def _looks_like_pure_legal_query(text: str) -> bool:
     if _looks_like_explicit_law_article_query(normalized):
         return True
     if any(keyword.lower() in normalized for keyword in LEGAL_QA_KEYWORDS):
-        return not _looks_like_memory_query(normalized)
-    return any(hint.lower() in normalized for hint in _PURE_LEGAL_QUERY_HINTS) and not _looks_like_memory_query(
-        normalized
+        return not (_looks_like_memory_query(normalized) or _looks_like_advice_query(normalized))
+    return any(hint.lower() in normalized for hint in _PURE_LEGAL_QUERY_HINTS) and not (
+        _looks_like_memory_query(normalized) or _looks_like_advice_query(normalized)
     )
+
+
+def classify_dossier_graph_query(text: str | None) -> str:
+    normalized = " ".join((text or "").strip().split())
+    if not normalized:
+        return "none"
+    if _looks_like_explicit_law_article_query(normalized) or _looks_like_pure_legal_query(normalized):
+        return "legal"
+    if _looks_like_advice_query(normalized):
+        return "advice"
+    if _looks_like_memory_query(normalized):
+        return "memory"
+    return "other"
+
+
+def is_dossier_memory_query(text: str | None) -> bool:
+    return classify_dossier_graph_query(text) == "memory"
 
 
 def should_query_dossier_graph_context(
@@ -179,11 +255,10 @@ def should_query_dossier_graph_context(
         return False
     if normalized_mode == "LEGAL_QA" or normalized_route == "LEGAL_QA":
         return False
-    if _looks_like_explicit_law_article_query(normalized_message):
+    query_kind = classify_dossier_graph_query(normalized_message)
+    if query_kind == "legal":
         return False
-    if _looks_like_pure_legal_query(normalized_message):
-        return False
-    if not _looks_like_memory_query(normalized_message):
+    if query_kind not in {"memory", "advice"}:
         return False
 
     return normalized_mode in {"TRACKED_CASE", "CASE_ANALYSIS", "UNKNOWN"}
