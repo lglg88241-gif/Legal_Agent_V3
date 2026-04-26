@@ -463,50 +463,77 @@
 
           <div class="dossier-participants-section">
             <div class="dossier-auto-summary-header">
-              <div class="dossier-detail-conversations-title">当事人称呼</div>
-              <el-button
-                size="small"
-                type="primary"
-                plain
-                :loading="dossierParticipantsSaving"
-                @click="handleUpdateDossierParticipants"
+              <div class="dossier-toolbar-copy">
+                <div class="dossier-detail-conversations-title">主体与关系</div>
+                <span class="dossier-toolbar-subtitle">
+                  “主体”指案卷中的人、公司或机构；“确认主体”就是确认不同说法是否指同一个人或公司。
+                </span>
+              </div>
+              <div class="dossier-inline-actions">
+                <el-button size="small" plain @click="openParticipantCandidateDialog">
+                  处理建议
+                </el-button>
+                <el-button size="small" plain @click="toggleDossierParticipantSection('create')">
+                  手动新建主体
+                </el-button>
+              </div>
+            </div>
+            <div class="dossier-participants-hint">
+              系统只会提出主体候选，不会自动合并；确认后，案卷图谱和案卷记忆会更稳定。
+            </div>
+            <div class="dossier-participants-hint">
+              当事人称呼与主体确认都只在当前案卷内生效，不会自动与其他案卷的同名主体合并。
+            </div>
+            <div class="dossier-participant-summary-grid">
+              <div class="dossier-participant-summary-card">
+                <span>已确认主体</span>
+                <strong>{{ selectedDossierResolvedParticipants.length }}</strong>
+              </div>
+              <div class="dossier-participant-summary-card">
+                <span>待确认建议</span>
+                <strong>{{ selectedDossierPendingParticipantCount }}</strong>
+              </div>
+              <div class="dossier-participant-summary-card">
+                <span>已确认映射</span>
+                <strong>{{ selectedDossierParticipantMentions.length }}</strong>
+              </div>
+            </div>
+            <div
+              v-if="selectedDossierPendingParticipantCount"
+              class="dossier-participant-smart-tip"
+            >
+              {{ `有 ${selectedDossierPendingParticipantCount} 个主体关系待确认，确认后图谱会更清晰。` }}
+            </div>
+            <div
+              v-if="selectedDossierResolvedParticipants.length"
+              class="dossier-participant-pill-list"
+            >
+              <div
+                v-for="participant in selectedDossierResolvedParticipants"
+                :key="participant.id"
+                class="dossier-participant-pill"
               >
-                保存当事人称呼
-              </el-button>
+                <strong>{{ participant.label || `主体 #${participant.id}` }}</strong>
+                <span>{{ participant.role || '未分类角色' }}</span>
+                <span>
+                  {{ `${participant.party_side || 'unknown'} · ${participant.entity_type || 'unknown'}` }}
+                </span>
+                <span>
+                  {{ `已确认 mentions ${selectedDossierParticipantMentionCountMap[participant.id] || 0}` }}
+                </span>
+                <el-button size="small" text @click="ensureDossierParticipantSection('participants')">
+                  编辑
+                </el-button>
+              </div>
             </div>
-            <div class="dossier-participants-hint">
-              这些称呼是用户确认的案卷别名，可使用化名或角色名，不等同于真实姓名。
-            </div>
-            <div class="dossier-participants-hint">
-              当事人称呼仅在当前案卷内用于持续跟踪，不会自动与其他案卷同名主体合并。
-            </div>
-            <div class="dossier-participants-grid">
-              <el-input
-                v-model="dossierParticipantForm.primary_label"
-                maxlength="100"
-                placeholder="主要当事人称呼，例如：我"
-              />
-              <el-input
-                v-model="dossierParticipantForm.primary_role"
-                maxlength="100"
-                placeholder="主要当事人角色，例如：劳动者"
-              />
-              <el-input
-                v-model="dossierParticipantForm.opposing_label"
-                maxlength="100"
-                placeholder="对方称呼，例如：公司"
-              />
-              <el-input
-                v-model="dossierParticipantForm.opposing_role"
-                maxlength="100"
-                placeholder="对方角色，例如：用人单位"
-              />
+            <div v-else class="dossier-graph-empty">
+              暂无已确认主体。你可以先处理待确认建议，也可以手动新建主体。
             </div>
           </div>
 
           <div class="dossier-resolved-participants-section">
             <div class="dossier-auto-summary-header">
-              <div class="dossier-detail-conversations-title">主体确认</div>
+              <div class="dossier-detail-conversations-title">主体确认详情</div>
               <el-button
                 size="small"
                 plain
@@ -516,12 +543,6 @@
                 刷新主体
               </el-button>
             </div>
-            <div class="dossier-participants-hint">
-              这里的主体是案卷内用户确认过的稳定称呼，用于在“我 / 公司 / 用人单位 / HR / 老板”等代称之间做同一性对齐。
-            </div>
-            <div class="dossier-participants-hint">
-              系统只会给出候选建议，不会自动确认；未确认的主体不得当作同一主体使用，也不会跨案卷自动合并。
-            </div>
 
             <div v-if="dossierParticipantRegistryState.error" class="dossier-graph-error">
               {{ dossierParticipantRegistryState.error }}
@@ -530,189 +551,249 @@
               正在加载主体确认...
             </div>
             <div v-else class="dossier-resolved-participants-body">
-              <div class="dossier-resolved-participant-list">
-                <div
-                  v-for="participant in selectedDossierResolvedParticipants"
-                  :key="participant.id"
-                  class="dossier-resolved-participant-card"
-                >
-                  <div class="dossier-resolved-participant-grid">
-                    <el-input
-                      v-model="participant.label"
-                      maxlength="100"
-                      placeholder="主体称呼"
-                    />
-                    <el-input
-                      v-model="participant.role"
-                      maxlength="100"
-                      placeholder="角色"
-                    />
-                    <el-select v-model="participant.party_side" placeholder="立场">
-                      <el-option
-                        v-for="option in dossierParticipantPartySideOptions"
-                        :key="option.value"
-                        :label="option.label"
-                        :value="option.value"
-                      />
-                    </el-select>
-                    <el-select v-model="participant.entity_type" placeholder="类型">
-                      <el-option
-                        v-for="option in dossierParticipantEntityTypeOptions"
-                        :key="option.value"
-                        :label="option.label"
-                        :value="option.value"
-                      />
-                    </el-select>
-                  </div>
-                  <el-input
-                    v-model="participant.description"
-                    maxlength="1000"
-                    placeholder="备注（可选）"
-                  />
-                  <div class="dossier-resolved-participant-actions">
-                    <span>
-                      {{
-                        `已确认 mentions：${selectedDossierParticipantMentions.filter((item) => item.participant_id === participant.id).length}`
-                      }}
-                    </span>
+              <el-collapse v-model="dossierParticipantSections" class="dossier-participant-collapse">
+                <el-collapse-item name="aliases">
+                  <template #title>
+                    <div class="dossier-collapse-title">
+                      <strong>案卷称呼锚点</strong>
+                      <span>固定“我 / 对方 / 公司”等常用称呼，便于持续跟踪。</span>
+                    </div>
+                  </template>
+                  <div class="dossier-inline-actions dossier-inline-actions-spread">
+                    <div class="dossier-participants-hint">
+                      这些称呼是用户确认的案卷别名，可使用化名或角色名，不等同于真实姓名。
+                    </div>
                     <el-button
                       size="small"
                       type="primary"
                       plain
-                      :loading="dossierParticipantActionLoading"
-                      @click="handleUpdateResolvedParticipant(participant)"
+                      :loading="dossierParticipantsSaving"
+                      @click="handleUpdateDossierParticipants"
                     >
-                      保存主体
+                      保存当事人称呼
                     </el-button>
                   </div>
-                </div>
-                <div v-if="!selectedDossierResolvedParticipants.length" class="dossier-graph-empty">
-                  暂无已确认主体，可先从下方候选中确认，或手动新建一个主体。
-                </div>
-              </div>
-
-              <div class="dossier-participant-create-card">
-                <div class="dossier-detail-conversations-title">手动新建主体</div>
-                <div class="dossier-resolved-participant-grid">
-                  <el-input
-                    v-model="dossierParticipantCreateForm.label"
-                    maxlength="100"
-                    placeholder="主体称呼，例如：A公司 / 张三"
-                  />
-                  <el-input
-                    v-model="dossierParticipantCreateForm.role"
-                    maxlength="100"
-                    placeholder="角色，例如：用人单位 / HR / 劳动者"
-                  />
-                  <el-select v-model="dossierParticipantCreateForm.party_side" placeholder="立场">
-                    <el-option
-                      v-for="option in dossierParticipantPartySideOptions"
-                      :key="option.value"
-                      :label="option.label"
-                      :value="option.value"
+                  <div class="dossier-participants-grid">
+                    <el-input
+                      v-model="dossierParticipantForm.primary_label"
+                      maxlength="100"
+                      placeholder="主要当事人称呼，例如：我"
                     />
-                  </el-select>
-                  <el-select v-model="dossierParticipantCreateForm.entity_type" placeholder="类型">
-                    <el-option
-                      v-for="option in dossierParticipantEntityTypeOptions"
-                      :key="option.value"
-                      :label="option.label"
-                      :value="option.value"
+                    <el-input
+                      v-model="dossierParticipantForm.primary_role"
+                      maxlength="100"
+                      placeholder="主要当事人角色，例如：劳动者"
                     />
-                  </el-select>
-                </div>
-                <el-input
-                  v-model="dossierParticipantCreateForm.description"
-                  maxlength="1000"
-                  placeholder="备注（可选）"
-                />
-                <div class="dossier-resolved-participant-actions">
-                  <span>不要求真实姓名，可使用化名或角色名。</span>
-                  <el-button
-                    size="small"
-                    type="primary"
-                    :loading="dossierParticipantActionLoading"
-                    @click="handleCreateResolvedParticipant"
-                  >
-                    新建主体
-                  </el-button>
-                </div>
-              </div>
+                    <el-input
+                      v-model="dossierParticipantForm.opposing_label"
+                      maxlength="100"
+                      placeholder="对方称呼，例如：公司"
+                    />
+                    <el-input
+                      v-model="dossierParticipantForm.opposing_role"
+                      maxlength="100"
+                      placeholder="对方角色，例如：用人单位"
+                    />
+                  </div>
+                </el-collapse-item>
 
-              <div class="dossier-participant-candidates-card">
-                <div class="dossier-auto-summary-header">
-                  <div class="dossier-detail-conversations-title">候选对齐项</div>
-                  <span class="dossier-participant-candidate-meta">
-                    {{ `候选 ${selectedDossierParticipantCandidates.length} 项` }}
-                  </span>
-                </div>
-                <div v-if="dossierParticipantCandidatesLoading" class="dossier-list-status">
-                  正在生成候选主体...
-                </div>
-                <div
-                  v-else-if="selectedDossierParticipantCandidates.length"
-                  class="dossier-participant-candidate-list"
-                >
-                  <div
-                    v-for="candidate in selectedDossierParticipantCandidates"
-                    :key="candidate.candidate_key"
-                    class="dossier-participant-candidate-card"
-                  >
-                    <div class="dossier-participant-candidate-title">
-                      {{ candidate.raw_labels?.join(' / ') || candidate.suggested_label }}
+                <el-collapse-item name="participants">
+                  <template #title>
+                    <div class="dossier-collapse-title">
+                      <strong>已确认主体</strong>
+                      <span>{{ `共 ${selectedDossierResolvedParticipants.length} 个，可继续编辑显示名、角色和立场。` }}</span>
                     </div>
-                    <div class="dossier-participant-candidate-meta">
-                      {{
-                        `建议称呼：${candidate.suggested_label || '未命名主体'} · 角色：${candidate.suggested_role || '未分类'} · mentions：${candidate.mentions?.length || 0}`
-                      }}
-                    </div>
-                    <div v-if="candidate.existing_participant_label" class="dossier-participant-candidate-meta">
-                      {{ `系统建议可映射到：${candidate.existing_participant_label}` }}
-                    </div>
-                    <el-select
-                      v-model="dossierParticipantCandidateSelections[candidate.candidate_key]"
-                      clearable
-                      placeholder="选择已有主体"
+                  </template>
+                  <div class="dossier-resolved-participant-list">
+                    <div
+                      v-for="participant in selectedDossierResolvedParticipants"
+                      :key="participant.id"
+                      class="dossier-resolved-participant-card"
                     >
-                      <el-option
-                        v-for="participant in selectedDossierResolvedParticipants"
-                        :key="participant.id"
-                        :label="participant.label || `主体 #${participant.id}`"
-                        :value="participant.id"
+                      <div class="dossier-resolved-participant-grid">
+                        <el-input
+                          v-model="participant.label"
+                          maxlength="100"
+                          placeholder="主体称呼"
+                        />
+                        <el-input
+                          v-model="participant.role"
+                          maxlength="100"
+                          placeholder="角色"
+                        />
+                        <el-select v-model="participant.party_side" placeholder="立场">
+                          <el-option
+                            v-for="option in dossierParticipantPartySideOptions"
+                            :key="option.value"
+                            :label="option.label"
+                            :value="option.value"
+                          />
+                        </el-select>
+                        <el-select v-model="participant.entity_type" placeholder="类型">
+                          <el-option
+                            v-for="option in dossierParticipantEntityTypeOptions"
+                            :key="option.value"
+                            :label="option.label"
+                            :value="option.value"
+                          />
+                        </el-select>
+                      </div>
+                      <el-input
+                        v-model="participant.description"
+                        maxlength="1000"
+                        placeholder="备注（可选）"
                       />
-                    </el-select>
-                    <div class="dossier-participant-candidate-actions">
+                      <div class="dossier-resolved-participant-actions">
+                        <span>
+                          {{ `已确认 mentions：${selectedDossierParticipantMentionCountMap[participant.id] || 0}` }}
+                        </span>
+                        <el-button
+                          size="small"
+                          type="primary"
+                          plain
+                          :loading="dossierParticipantActionLoading"
+                          @click="handleUpdateResolvedParticipant(participant)"
+                        >
+                          保存主体
+                        </el-button>
+                      </div>
+                    </div>
+                    <div v-if="!selectedDossierResolvedParticipants.length" class="dossier-graph-empty">
+                      暂无已确认主体，可先从待确认建议中处理，或手动新建一个主体。
+                    </div>
+                  </div>
+                </el-collapse-item>
+
+                <el-collapse-item name="create">
+                  <template #title>
+                    <div class="dossier-collapse-title">
+                      <strong>手动新建主体</strong>
+                      <span>适合提前登记案卷中的人、公司或机构，不要求真实姓名。</span>
+                    </div>
+                  </template>
+                  <div class="dossier-participant-create-card">
+                    <div class="dossier-resolved-participant-grid">
+                      <el-input
+                        v-model="dossierParticipantCreateForm.label"
+                        maxlength="100"
+                        placeholder="主体称呼，例如：A公司 / 张三"
+                      />
+                      <el-input
+                        v-model="dossierParticipantCreateForm.role"
+                        maxlength="100"
+                        placeholder="角色，例如：用人单位 / HR / 劳动者"
+                      />
+                      <el-select v-model="dossierParticipantCreateForm.party_side" placeholder="立场">
+                        <el-option
+                          v-for="option in dossierParticipantPartySideOptions"
+                          :key="option.value"
+                          :label="option.label"
+                          :value="option.value"
+                        />
+                      </el-select>
+                      <el-select v-model="dossierParticipantCreateForm.entity_type" placeholder="类型">
+                        <el-option
+                          v-for="option in dossierParticipantEntityTypeOptions"
+                          :key="option.value"
+                          :label="option.label"
+                          :value="option.value"
+                        />
+                      </el-select>
+                    </div>
+                    <el-input
+                      v-model="dossierParticipantCreateForm.description"
+                      maxlength="1000"
+                      placeholder="备注（可选）"
+                    />
+                    <div class="dossier-resolved-participant-actions">
+                      <span>不要求真实姓名，可使用化名或角色名。</span>
                       <el-button
                         size="small"
                         type="primary"
-                        plain
-                        :disabled="!dossierParticipantCandidateSelections[candidate.candidate_key]"
                         :loading="dossierParticipantActionLoading"
-                        @click="handleResolveParticipantCandidate(candidate, { participantId: dossierParticipantCandidateSelections[candidate.candidate_key] })"
-                      >
-                        确认为已有主体
-                      </el-button>
-                      <el-button
-                        size="small"
-                        type="primary"
-                        :loading="dossierParticipantActionLoading"
-                        @click="handleResolveParticipantCandidate(candidate)"
+                        @click="handleCreateResolvedParticipant"
                       >
                         新建主体
                       </el-button>
-                      <el-button
-                        size="small"
-                        @click="handleIgnoreParticipantCandidate(candidate)"
-                      >
-                        忽略
-                      </el-button>
                     </div>
                   </div>
-                </div>
-                <div v-else class="dossier-graph-empty">
-                  暂无待确认主体候选。若后续绑定更多会话或图谱新增主体称呼，可刷新后再看。
-                </div>
-              </div>
+                </el-collapse-item>
+
+                <el-collapse-item name="candidates">
+                  <template #title>
+                    <div class="dossier-collapse-title">
+                      <strong>待确认建议</strong>
+                      <span>{{ `共 ${selectedDossierParticipantCandidates.length} 项；系统只建议，不会自动合并。` }}</span>
+                    </div>
+                  </template>
+                  <div v-if="dossierParticipantCandidatesLoading" class="dossier-list-status">
+                    正在生成候选主体...
+                  </div>
+                  <div
+                    v-else-if="selectedDossierParticipantCandidates.length"
+                    class="dossier-participant-candidate-list"
+                  >
+                    <div
+                      v-for="candidate in selectedDossierParticipantCandidates"
+                      :key="candidate.candidate_key"
+                      class="dossier-participant-candidate-card"
+                    >
+                      <div class="dossier-participant-candidate-title">
+                        {{ candidate.raw_labels?.join(' / ') || candidate.suggested_label }}
+                      </div>
+                      <div class="dossier-participant-candidate-meta">
+                        {{
+                          `建议称呼：${candidate.suggested_label || '未命名主体'} · 角色：${candidate.suggested_role || '未分类'} · mentions：${candidate.mentions?.length || 0}`
+                        }}
+                      </div>
+                      <div v-if="candidate.existing_participant_label" class="dossier-participant-candidate-meta">
+                        {{ `系统建议可映射到：${candidate.existing_participant_label}` }}
+                      </div>
+                      <el-select
+                        v-model="dossierParticipantCandidateSelections[candidate.candidate_key]"
+                        clearable
+                        placeholder="选择已有主体"
+                      >
+                        <el-option
+                          v-for="participant in selectedDossierResolvedParticipants"
+                          :key="participant.id"
+                          :label="participant.label || `主体 #${participant.id}`"
+                          :value="participant.id"
+                        />
+                      </el-select>
+                      <div class="dossier-participant-candidate-actions">
+                        <el-button
+                          size="small"
+                          type="primary"
+                          plain
+                          :disabled="!dossierParticipantCandidateSelections[candidate.candidate_key]"
+                          :loading="dossierParticipantActionLoading"
+                          @click="handleResolveParticipantCandidate(candidate, { participantId: dossierParticipantCandidateSelections[candidate.candidate_key] })"
+                        >
+                          确认为已有主体
+                        </el-button>
+                        <el-button
+                          size="small"
+                          type="primary"
+                          :loading="dossierParticipantActionLoading"
+                          @click="handleResolveParticipantCandidate(candidate)"
+                        >
+                          新建为独立主体
+                        </el-button>
+                        <el-button
+                          size="small"
+                          @click="handleIgnoreParticipantCandidate(candidate)"
+                        >
+                          暂不处理
+                        </el-button>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="dossier-graph-empty">
+                    暂无待确认主体候选。若后续绑定更多会话或图谱新增主体称呼，可刷新后再看。
+                  </div>
+                </el-collapse-item>
+              </el-collapse>
             </div>
           </div>
 
@@ -778,6 +859,9 @@
 
               <div v-if="dossierGraphState.warning" class="dossier-graph-warning">
                 图谱服务暂不可用，当前显示为空状态。
+              </div>
+              <div v-if="selectedDossierPendingParticipantCount" class="dossier-graph-warning dossier-graph-warning-soft">
+                {{ `有 ${selectedDossierPendingParticipantCount} 个主体关系待确认，确认后图谱会更清晰。` }}
               </div>
 
               <div class="dossier-graph-aliases">
@@ -864,7 +948,7 @@
                   </div>
                 </div>
                 <div v-else class="dossier-graph-preview-empty">
-                  暂无图谱数据
+                  {{ selectedDossierGraphEmptyText || '暂无图谱数据' }}
                 </div>
               </div>
             </div>
@@ -909,6 +993,82 @@
       </div>
     </div>
   </el-drawer>
+
+  <el-dialog
+    v-model="dossierParticipantCandidateDialogVisible"
+    title="确认主体建议"
+    width="560px"
+  >
+    <div class="dossier-participants-hint">
+      新会话或新图谱中出现了可能重复的称呼。请确认哪些说法指向同一个人、公司或机构；系统不会自动合并。
+    </div>
+    <div
+      v-if="selectedDossierParticipantCandidates.length"
+      class="dossier-participant-candidate-list"
+    >
+      <div
+        v-for="candidate in selectedDossierParticipantCandidates"
+        :key="candidate.candidate_key"
+        class="dossier-participant-candidate-card"
+      >
+        <div class="dossier-participant-candidate-title">
+          {{ candidate.raw_labels?.join(' / ') || candidate.suggested_label }}
+        </div>
+        <div class="dossier-participant-candidate-meta">
+          {{
+            `建议称呼：${candidate.suggested_label || '未命名主体'} · 角色：${candidate.suggested_role || '未分类'} · mentions：${candidate.mentions?.length || 0}`
+          }}
+        </div>
+        <div v-if="candidate.existing_participant_label" class="dossier-participant-candidate-meta">
+          {{ `系统建议可映射到：${candidate.existing_participant_label}` }}
+        </div>
+        <el-select
+          v-model="dossierParticipantCandidateSelections[candidate.candidate_key]"
+          clearable
+          placeholder="选择已有主体"
+        >
+          <el-option
+            v-for="participant in selectedDossierResolvedParticipants"
+            :key="participant.id"
+            :label="participant.label || `主体 #${participant.id}`"
+            :value="participant.id"
+          />
+        </el-select>
+        <div class="dossier-participant-candidate-actions">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :disabled="!dossierParticipantCandidateSelections[candidate.candidate_key]"
+            :loading="dossierParticipantActionLoading"
+            @click="handleResolveParticipantCandidate(candidate, { participantId: dossierParticipantCandidateSelections[candidate.candidate_key] })"
+          >
+            确认为已有主体
+          </el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :loading="dossierParticipantActionLoading"
+            @click="handleResolveParticipantCandidate(candidate)"
+          >
+            新建为独立主体
+          </el-button>
+          <el-button size="small" @click="handleIgnoreParticipantCandidate(candidate)">
+            暂不处理
+          </el-button>
+        </div>
+      </div>
+    </div>
+    <div v-else class="dossier-graph-empty">
+      当前没有待确认的主体建议。
+    </div>
+
+    <template #footer>
+      <el-button @click="dossierParticipantCandidateDialogVisible = false">
+        我稍后处理
+      </el-button>
+    </template>
+  </el-dialog>
 
   <el-dialog
     v-model="trackedOnboardingVisible"
@@ -983,7 +1143,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   CircleCheckFilled,
@@ -1069,6 +1229,8 @@ const dossierParticipantsSaving = ref(false)
 const dossierParticipantRegistryLoading = ref(false)
 const dossierParticipantCandidatesLoading = ref(false)
 const dossierParticipantActionLoading = ref(false)
+const dossierParticipantSections = ref([])
+const dossierParticipantCandidateDialogVisible = ref(false)
 const dossierSummaryGenerating = ref(false)
 const dossierGraphLoading = ref(false)
 const dossierGraphLoaded = ref(false)
@@ -1220,7 +1382,11 @@ const filteredDossiers = computed(() => {
     if (statusFilter === 'archived' && dossierStatus !== 'archived') return false
 
     if (!keyword) return true
-    const haystack = [dossier?.title, dossier?.case_type, dossier?.summary]
+    const haystack = [
+      dossier?.title,
+      dossier?.case_type,
+      dossier?.summary,
+    ]
       .filter(Boolean)
       .join(' ')
       .toLowerCase()
@@ -1250,6 +1416,18 @@ const selectedDossierParticipantCandidates = computed(() =>
       )
     : []
 )
+const selectedDossierPendingParticipantCount = computed(
+  () => selectedDossierParticipantCandidates.value.length
+)
+const selectedDossierParticipantMentionCountMap = computed(() => {
+  const lookup = {}
+  for (const mention of selectedDossierParticipantMentions.value) {
+    const participantId = Number(mention?.participant_id || 0)
+    if (!participantId) continue
+    lookup[participantId] = (lookup[participantId] || 0) + 1
+  }
+  return lookup
+})
 const selectedDossierGraphParticipantAliases = computed(() => {
   const aliases = dossierGraphState.participantAliases
   if (aliases && Object.keys(aliases).length) {
@@ -1326,10 +1504,7 @@ const selectedDossierGraphEmptyText = computed(() => {
   if (dossierGraphState.warning) {
     return '图谱服务暂不可用，当前显示为空状态。'
   }
-  if (!dossierGraphState.conversationCount) {
-    return '当前案卷尚未绑定会话，图谱状态为空。'
-  }
-  return '当前案卷下已绑定会话，但尚未聚合出实体节点或关系。'
+  return '当前案卷还没有形成结构化关系。继续在持续跟踪会话中补充案情后，系统会自动整理。'
 })
 const conversationListEmptyText = computed(() =>
   conversationSearchKeyword.value.trim() ? '没有找到相关会话' : '暂无会话'
@@ -1360,6 +1535,12 @@ onMounted(async () => {
 onUnmounted(() => {
   stopSystemStatusPolling()
   stopGraphRefreshPolling()
+})
+
+watch(dossierDrawerVisible, (visible) => {
+  if (!visible) {
+    dossierParticipantCandidateDialogVisible.value = false
+  }
 })
 
 function componentLabel(value) {
@@ -1477,6 +1658,39 @@ function isTrackedDossierConversation(conversation) {
   )
 }
 
+function ensureDossierParticipantSection(sectionName) {
+  if (!sectionName) return
+  const current = Array.isArray(dossierParticipantSections.value)
+    ? [...dossierParticipantSections.value]
+    : []
+  if (!current.includes(sectionName)) {
+    current.push(sectionName)
+    dossierParticipantSections.value = current
+  }
+}
+
+function toggleDossierParticipantSection(sectionName) {
+  if (!sectionName) return
+  const current = Array.isArray(dossierParticipantSections.value)
+    ? [...dossierParticipantSections.value]
+    : []
+  if (current.includes(sectionName)) {
+    dossierParticipantSections.value = current.filter((item) => item !== sectionName)
+    return
+  }
+  current.push(sectionName)
+  dossierParticipantSections.value = current
+}
+
+function openParticipantCandidateDialog() {
+  if (!selectedDossierPendingParticipantCount.value) {
+    ElMessage.info('当前没有待确认的主体建议')
+    return
+  }
+  ensureDossierParticipantSection('candidates')
+  dossierParticipantCandidateDialogVisible.value = true
+}
+
 function resetDossierForm() {
   dossierForm.title = ''
   dossierForm.case_type = ''
@@ -1572,6 +1786,8 @@ function resetDossierParticipantRegistryState() {
   dossierParticipantRegistryState.mentions = []
   dossierParticipantRegistryState.candidates = []
   dossierParticipantRegistryState.error = ''
+  dossierParticipantSections.value = []
+  dossierParticipantCandidateDialogVisible.value = false
   resetDossierParticipantCreateForm()
   Object.keys(dossierParticipantCandidateSelections).forEach((key) => {
     delete dossierParticipantCandidateSelections[key]
@@ -1772,9 +1988,8 @@ async function refreshDossiers(options = {}) {
       currentConversation.value?.dossier_id ??
       nextDossiers[0]?.id
 
-    if (preferredId) {
-      selectedDossierId.value = preferredId
-    }
+    selectedDossierId.value =
+      nextDossiers.find((item) => item.id === preferredId)?.id || nextDossiers[0]?.id || null
   } catch (error) {
     console.error('Failed to fetch dossiers:', error)
     if (!options.silent) {
@@ -1987,12 +2202,33 @@ async function handleAttachDossier(dossier) {
     await refreshDossiers({ silent: true, preferredDossierId: dossier.id })
     await loadSelectedDossierDetail(dossier.id, { silent: true })
     ElMessage.success('当前会话已绑定到案卷')
+    await maybePromptParticipantResolutionAfterAttachment(dossier)
   } catch (error) {
     console.error('Failed to attach conversation to dossier:', error)
     ElMessage.error('绑定案卷失败')
   } finally {
     dossierBindingId.value = null
   }
+}
+
+async function maybePromptParticipantResolutionAfterAttachment(dossier) {
+  const pendingCount = selectedDossierPendingParticipantCount.value
+  if (!pendingCount) return
+
+  ensureDossierParticipantSection('candidates')
+  dossierParticipantCandidateDialogVisible.value = true
+
+  const firstCandidate = selectedDossierParticipantCandidates.value[0]
+  const rawLabels = firstCandidate?.raw_labels?.join(' / ') || firstCandidate?.suggested_label || '新主体'
+  const existingLabel = String(firstCandidate?.existing_participant_label || '').trim()
+  const tip =
+    pendingCount === 1
+      ? existingLabel
+        ? `新会话中出现“${rawLabels}”，可能与案卷中的“${existingLabel}”是同一主体。请确认是否合并。`
+        : `新会话中出现“${rawLabels}”这个新称呼。请确认它是否属于已有主体，或新建为独立主体。`
+      : `新会话中出现 ${pendingCount} 个待确认主体称呼。请确认哪些指向同一主体，哪些应保留为独立主体。`
+
+  ElMessage.warning(tip)
 }
 
 async function handleSelectDossier(dossier) {
@@ -2022,6 +2258,9 @@ async function handleArchiveDossier(dossier) {
 
   try {
     await archiveDossier(dossier.id)
+    if (selectedDossierId.value === dossier.id) {
+      dossierParticipantCandidateDialogVisible.value = false
+    }
     await refreshDossiers({ silent: true })
     if (dossierStatusFilter.value === 'active' && selectedDossierId.value === dossier.id) {
       selectedDossierId.value = filteredDossiers.value[0]?.id || null
@@ -2117,6 +2356,9 @@ async function refreshSelectedDossierParticipantViews(options = {}) {
   await loadSelectedDossierParticipants(selectedDossierId.value, { silent: true })
   await loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true })
   await loadSelectedDossierGraph(selectedDossierId.value, { silent: true })
+  if (!selectedDossierParticipantCandidates.value.length) {
+    dossierParticipantCandidateDialogVisible.value = false
+  }
   if (!options.silent) {
     ElMessage.success('主体确认已更新')
   }
@@ -2225,6 +2467,11 @@ function handleIgnoreParticipantCandidate(candidate) {
   const candidateKey = candidate?.candidate_key
   if (!candidateKey) return
   dossierParticipantCandidateDismissed[candidateKey] = true
+  nextTick(() => {
+    if (!selectedDossierParticipantCandidates.value.length) {
+      dossierParticipantCandidateDialogVisible.value = false
+    }
+  })
   ElMessage.info('已忽略该候选，可刷新后重新查看')
 }
 
@@ -3793,10 +4040,81 @@ body,
   gap: 12px;
 }
 
+.dossier-inline-actions-spread {
+  justify-content: space-between;
+}
+
 .dossier-participants-hint {
   margin-top: 8px;
   font-size: 12px;
   line-height: 1.6;
+  color: #6b7280;
+}
+
+.dossier-participant-summary-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dossier-participant-summary-card {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dbeafe;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dossier-participant-summary-card span {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-participant-summary-card strong {
+  font-size: 20px;
+  color: #1d4ed8;
+}
+
+.dossier-participant-smart-tip {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dossier-participant-pill-list {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.dossier-participant-pill {
+  min-width: 0;
+  max-width: 100%;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dbeafe;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dossier-participant-pill strong {
+  font-size: 13px;
+  color: #111827;
+}
+
+.dossier-participant-pill span {
+  font-size: 12px;
   color: #6b7280;
 }
 
@@ -3805,6 +4123,29 @@ body,
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.dossier-participant-collapse {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-collapse-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.5;
+}
+
+.dossier-collapse-title strong {
+  font-size: 13px;
+  color: #111827;
+}
+
+.dossier-collapse-title span {
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .dossier-resolved-participant-list,
@@ -3941,6 +4282,12 @@ body,
   background: #fef3c7;
   color: #92400e;
   border: 1px solid #fcd34d;
+}
+
+.dossier-graph-warning-soft {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
 }
 
 .dossier-graph-error {
@@ -4290,10 +4637,18 @@ body,
 @media (max-width: 768px) {
   .dossier-graph-stats,
   .dossier-graph-aliases,
+  .dossier-participant-summary-grid,
   .dossier-participants-grid,
   .dossier-resolved-participant-grid,
   .tracked-onboarding-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dossier-item-main,
+  .dossier-detail-header,
+  .dossier-auto-summary-header {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .dossier-graph-edge-item {
