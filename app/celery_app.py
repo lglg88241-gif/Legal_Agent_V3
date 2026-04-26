@@ -25,6 +25,7 @@ from app.services.conversation_store import (
     update_conversation_case_type,
 )
 from app.services.conversation_mode import normalize_persistence_consent
+from app.services.dossier_graph import build_dossier_graph_summary_for_conversation
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 
@@ -130,6 +131,20 @@ async def _run_task_async(conversation_id: int, user_id: int) -> dict[str, Any]:
                 user_id,
                 conversation_id,
             )
+            try:
+                dossier_graph_summary = await build_dossier_graph_summary_for_conversation(
+                    db,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to build dossier graph summary | conversation_id=%s user_id=%s error=%s",
+                    conversation_id,
+                    user_id,
+                    exc,
+                )
+                dossier_graph_summary = None
 
         graph_memory = await format_graph_memory(conversation_id=conversation_id)
         return {
@@ -140,6 +155,7 @@ async def _run_task_async(conversation_id: int, user_id: int) -> dict[str, Any]:
             "saved_case_state": saved_case_state,
             "persistence_consent": persistence_consent,
             "dossier_context": dossier_context,
+            "dossier_graph_summary": dossier_graph_summary,
         }
     finally:
         await celery_engine.dispose()
@@ -309,6 +325,7 @@ def ask_agent_task(
                 conversation_id=conversation_id,
                 saved_case_state=context.get("saved_case_state"),
                 dossier_context=context.get("dossier_context"),
+                dossier_graph_summary=context.get("dossier_graph_summary"),
             )
         )
 

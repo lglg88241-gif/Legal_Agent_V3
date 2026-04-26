@@ -6,8 +6,15 @@ from datetime import datetime, timezone
 from typing import Any
 
 from neo4j import GraphDatabase
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.conversation_store import (
+    get_conversation_for_user,
+    get_dossier_for_user,
+    list_dossier_conversations,
+    serialize_dossier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -187,3 +194,173 @@ async def get_dossier_graph_payload(
         },
     }
     return response
+
+
+def _format_participant_alias_line(
+    key: str,
+    participant_aliases: dict[str, Any] | None,
+) -> str | None:
+    if not isinstance(participant_aliases, dict):
+        return None
+
+    alias = participant_aliases.get(key)
+    if not isinstance(alias, dict):
+        return None
+
+    label = str(alias.get("label") or "").strip()
+    role = str(alias.get("role") or "").strip()
+    if not label and not role:
+        return None
+
+    alias_title = "主要当事人" if key == "primary_party" else "对方"
+    if label and role:
+        return f"- {alias_title}：{label}（{role}）"
+    if label:
+        return f"- {alias_title}：{label}"
+    return f"- {alias_title}：{role}"
+
+
+def build_dossier_graph_summary(
+    payload: dict[str, Any] | None,
+    *,
+    max_nodes: int = 12,
+    max_edges: int = 20,
+) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    graph = payload.get("graph") if isinstance(payload.get("graph"), dict) else {}
+    stats = graph.get("stats") if isinstance(graph.get("stats"), dict) else {}
+    nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
+    edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
+    participant_aliases = (
+        payload.get("participant_aliases")
+        if isinstance(payload.get("participant_aliases"), dict)
+        else {}
+    )
+
+    node_lookup: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_id = str(node.get("id") or "").strip()
+        if node_id:
+            node_lookup[node_id] = node
+
+    node_lines: list[str] = []
+    for node in nodes[: max(max_nodes, 0)]:
+        if not isinstance(node, dict):
+            continue
+        label = str(node.get("label") or "").strip() or f"node:{node.get('id')}"
+        node_type = str(node.get("type") or "").strip() or "未分类"
+        conversation_id = node.get("conversation_id")
+        if conversation_id is None:
+            conversation_id = (
+                node.get("properties", {}).get("conversation_id")
+                if isinstance(node.get("properties"), dict)
+                else None
+            )
+        suffix = f"（conversation_id={conversation_id}）" if conversation_id is not None else ""
+        node_lines.append(f"- {label} [{node_type}]{suffix}")
+    if not node_lines:
+        node_lines.append("- 暂无实体")
+
+    edge_lines: list[str] = []
+    for edge in edges[: max(max_edges, 0)]:
+        if not isinstance(edge, dict):
+            continue
+        source_node = node_lookup.get(str(edge.get("source") or "").strip(), {})
+        target_node = node_lookup.get(str(edge.get("target") or "").strip(), {})
+        source_label = str(source_node.get("label") or edge.get("source") or "").strip() or "未知实体"
+        target_label = str(target_node.get("label") or edge.get("target") or "").strip() or "未知实体"
+        relation_label = (
+            str(edge.get("label") or edge.get("type") or "CASE_RELATION").strip()
+            or "CASE_RELATION"
+        )
+        properties = edge.get("properties", {}) if isinstance(edge.get("properties"), dict) else {}
+        conversation_id = properties.get("conversation_id")
+        suffix = f"（conversation_id={conversation_id}）" if conversation_id is not None else ""
+        edge_lines.append(f"- {source_label} --{relation_label}--> {target_label}{suffix}")
+    if not edge_lines:
+        edge_lines.append("- 暂无关系")
+
+    alias_lines = [
+        line
+        for line in (
+            _format_participant_alias_line("primary_party", participant_aliases),
+            _format_participant_alias_line("opposing_party", participant_aliases),
+        )
+        if line
+    ]
+    if not alias_lines:
+        alias_lines.append("- 暂无用户确认的当事人称呼")
+
+    note_lines = [
+        "- 图谱由绑定会话中的结构化案情信息聚合生成，可能包含系统推断的未确认关系。",
+        "- 如图谱内容与本轮用户输入冲突，应优先澄清。",
+        "- 图谱不能替代法律检索依据。",
+        "- 不得把图谱中的推断关系直接当作已证实事实。",
+    ]
+    if len(nodes) > max_nodes:
+        note_lines.append(f"- 仅展示前 {max_nodes} 个实体。")
+    if len(edges) > max_edges:
+        note_lines.append(f"- 仅展示前 {max_edges} 条关系。")
+    warning = str(payload.get("warning") or "").strip()
+    if warning:
+        note_lines.append(f"- 图谱服务提示：{warning}。")
+
+    return (
+        "<dossier_graph_summary>\n"
+        f"图谱统计：绑定会话 {int(stats.get('conversation_count') or 0)} 个，"
+        f"实体 {int(stats.get('node_count') or 0)} 个，"
+        f"关系 {int(stats.get('edge_count') or 0)} 条。\n"
+        "用户确认的当事人称呼：\n"
+        f"{chr(10).join(alias_lines)}\n\n"
+        "主要实体：\n"
+        f"{chr(10).join(node_lines)}\n\n"
+        "主要关系：\n"
+        f"{chr(10).join(edge_lines)}\n\n"
+        "注意：\n"
+        f"{chr(10).join(note_lines)}\n"
+        "</dossier_graph_summary>"
+    )
+
+
+async def build_dossier_graph_summary_for_conversation(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    conversation_id: int,
+    max_nodes: int = 12,
+    max_edges: int = 20,
+) -> str | None:
+    conversation = await get_conversation_for_user(db, user_id, conversation_id)
+    if conversation is None:
+        return None
+
+    dossier_id = getattr(conversation, "dossier_id", None)
+    if dossier_id is None:
+        return None
+
+    dossier = await get_dossier_for_user(db, user_id, dossier_id)
+    if dossier is None:
+        return None
+
+    conversations = await list_dossier_conversations(db, user_id, dossier.id)
+    conversation_ids = [
+        item.id
+        for item in conversations
+        if isinstance(getattr(item, "id", None), int) and item.id > 0
+    ]
+    participant_aliases = serialize_dossier(dossier).get("participant_aliases", {})
+    payload = await get_dossier_graph_payload(
+        user_id=user_id,
+        dossier_id=dossier.id,
+        conversation_ids=conversation_ids,
+        participant_aliases=participant_aliases,
+    )
+    return build_dossier_graph_summary(
+        payload,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+    )

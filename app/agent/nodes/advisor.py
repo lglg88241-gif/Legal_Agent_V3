@@ -338,6 +338,12 @@ def _format_dossier_context_block(dossier_context: dict[str, Any] | None) -> str
     )
 
 
+def _format_dossier_graph_summary_block(dossier_graph_summary: str | None) -> str:
+    if not isinstance(dossier_graph_summary, str):
+        return ""
+    return dossier_graph_summary.strip()
+
+
 def _build_guard_rag_context(
     laws_block: str,
     cases_block: str,
@@ -561,6 +567,7 @@ def build_advisor_system_prompt(
     cases_block: str = "",
     payload_facts: str = "",
     dossier_context: str = "",
+    dossier_graph_summary: str = "",
 ) -> str:
     """
     Build the full advisor system prompt.
@@ -617,10 +624,12 @@ def build_advisor_system_prompt(
     rag_context = rag_context or "无"
 
     dossier_block = dossier_context.strip()
+    dossier_graph_block = dossier_graph_summary.strip()
 
     prompt = f"""
 你不是普通的文本精校员，而是一位资深的中国法律咨询律师。请基于下面给定的事实、法条原文和参考案例，给出一段专业、有共情、可落地的回答。
 {dossier_block}
+{dossier_graph_block}
 {correction_block}
 <number_lock>
 【数字锁定 — 最高优先级，任何其他规则均不得推翻此条】
@@ -760,6 +769,9 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         ).strip()
 
     dossier_context_block = _format_dossier_context_block(state.get("dossier_context"))
+    dossier_graph_summary_block = _format_dossier_graph_summary_block(
+        state.get("dossier_graph_summary")
+    )
 
     advisor_system_prompt = build_advisor_system_prompt(
         question=state["question"],
@@ -772,6 +784,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         cases_block=cases_block,
         payload_facts=payload_facts,
         dossier_context=dossier_context_block,
+        dossier_graph_summary=dossier_graph_summary_block,
     )
 
     fallback = {"answer": layered_payload.answer, "sources": []}

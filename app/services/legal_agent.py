@@ -219,6 +219,7 @@ class LegalGraphAgent:
         conversation_id: int | None = None,
         saved_case_state: dict | None = None,
         dossier_context: dict[str, Any] | None = None,
+        dossier_graph_summary: str | None = None,
     ) -> dict[str, Any]:
         initial_state: AgentState = {
             "user_id": user_id,
@@ -230,6 +231,7 @@ class LegalGraphAgent:
             "chat_history": chat_history,
             "case_summary": case_summary,
             "dossier_context": dossier_context,
+            "dossier_graph_summary": (dossier_graph_summary or "").strip(),
             "graph_context": graph_memory,
             "graph_memory": graph_memory,
             "historical_reference": "",

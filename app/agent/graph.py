@@ -21,6 +21,7 @@ class AgentState(TypedDict, total=False):
     chat_history: str
     case_summary: str
     dossier_context: dict[str, Any] | None
+    dossier_graph_summary: str
     graph_context: str
     graph_memory: str
     historical_reference: str
