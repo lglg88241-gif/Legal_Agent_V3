@@ -1,5 +1,17 @@
 # Legal Agent V3
 
+## 个性化法律工作台文档
+
+- 进展文档：[docs/personalized_workspace_progress.md](docs/personalized_workspace_progress.md)
+- 答辩提纲：[docs/defense_outline.md](docs/defense_outline.md)
+
+当前 `feat/personalized-legal-workspace` 分支已经形成从 H2 到 H4i 的个性化工作台闭环，包括：
+
+- mode consent 与 `temporary / tracked / unknown` 持久化边界
+- Dossier 案卷模型、会话绑定、手动摘要与智能摘要
+- dossier_context / dossier_graph_summary 注入 advisor
+- dossier 级只读图谱聚合、participant resolution 与 schema hardening
+
 ## 项目简介
 
 法律智能问答和通用聊天问答不同，它对真实性、可解释性和稳定性要求更高。系统不仅要“会说”，还要尽量避免法条幻觉、金额乱算、案例乱引，以及多轮对话中事实丢失等问题。对于劳动争议、合同纠纷、婚姻家事、民间借贷、工伤赔偿、刑事咨询等场景，这些问题都会直接影响回答质量。
