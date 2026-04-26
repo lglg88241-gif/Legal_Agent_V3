@@ -21,6 +21,7 @@ from app.services.conversation_store import (
     update_dossier_auto_summary,
     update_dossier_participant_aliases,
 )
+from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.dossier_summary import generate_dossier_auto_summary
 
 router = APIRouter(prefix="/dossiers", tags=["dossiers"])
@@ -96,6 +97,32 @@ async def get_dossier(
         "status": "success",
         "dossier": serialize_dossier_detail(dossier, conversations),
     }
+
+
+@router.get("/{dossier_id}/graph")
+async def get_dossier_graph(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    conversations = await list_dossier_conversations(db, current_user.user_id, dossier.id)
+    conversation_ids = [
+        conversation.id
+        for conversation in conversations
+        if isinstance(getattr(conversation, "id", None), int)
+    ]
+    participant_aliases = serialize_dossier(dossier).get("participant_aliases", {})
+    return await get_dossier_graph_payload(
+        user_id=current_user.user_id,
+        dossier_id=dossier.id,
+        conversation_ids=conversation_ids,
+        participant_aliases=participant_aliases,
+    )
 
 
 @router.patch("/{dossier_id}")
