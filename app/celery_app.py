@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import Any
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
+from app.core.security import AuthenticatedUser
 from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
@@ -27,6 +29,7 @@ from app.services.conversation_store import (
 from app.services.conversation_mode import normalize_persistence_consent
 from app.services.case_followup import is_case_fact_update_message, is_dossier_followup_question
 from app.services.dossier_graph import build_dossier_graph_summary_for_conversation
+from app.services.dossier_graph_tool import load_dossier_graph_context_for_conversation
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 
@@ -76,7 +79,36 @@ def _create_celery_session_factory() -> tuple[Any, async_sessionmaker[AsyncSessi
     return celery_engine, session_factory
 
 
-async def _run_task_async(conversation_id: int, user_id: int) -> dict[str, Any]:
+async def _load_controlled_dossier_graph_context_async(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    conversation_id: int,
+    user_message: str,
+) -> dict[str, Any] | None:
+    try:
+        return await load_dossier_graph_context_for_conversation(
+            db,
+            current_user=AuthenticatedUser(user_id=user_id, username="worker"),
+            conversation_id=conversation_id,
+            user_message=(user_message or "").strip(),
+            limit=12,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to load controlled dossier graph context | conversation_id=%s user_id=%s error=%s",
+            conversation_id,
+            user_id,
+            exc,
+        )
+        return None
+
+
+async def _run_task_async(
+    conversation_id: int,
+    user_id: int,
+    current_question: str | None = None,
+) -> dict[str, Any]:
     """
     将原本分散的多个 asyncio.run() 调用合并到单一协程中统一执行。
 
@@ -146,6 +178,12 @@ async def _run_task_async(conversation_id: int, user_id: int) -> dict[str, Any]:
                     exc,
                 )
                 dossier_graph_summary = None
+            dossier_graph_context = await _load_controlled_dossier_graph_context_async(
+                db,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                user_message=(current_question or latest_user_input or "").strip(),
+            )
 
         graph_memory = await format_graph_memory(conversation_id=conversation_id)
         return {
@@ -157,6 +195,7 @@ async def _run_task_async(conversation_id: int, user_id: int) -> dict[str, Any]:
             "persistence_consent": persistence_consent,
             "dossier_context": dossier_context,
             "dossier_graph_summary": dossier_graph_summary,
+            "dossier_graph_context": dossier_graph_context,
         }
     finally:
         await celery_engine.dispose()
@@ -308,7 +347,17 @@ def ask_agent_task(
 
         get_redis_saver_for_current_loop()
         # 所有 IO 合并到单一事件循环，避免多次 asyncio.run() 的开销
-        context = asyncio.run(_run_task_async(conversation_id, user_id))
+        run_task_signature = inspect.signature(_run_task_async)
+        if "current_question" in run_task_signature.parameters:
+            context = asyncio.run(
+                _run_task_async(
+                    conversation_id,
+                    user_id,
+                    current_question=question,
+                )
+            )
+        else:
+            context = asyncio.run(_run_task_async(conversation_id, user_id))
         chat_history = context["chat_history"]
         case_summary = context["case_summary"]
         graph_memory = context["graph_memory"]
@@ -327,6 +376,7 @@ def ask_agent_task(
                 saved_case_state=context.get("saved_case_state"),
                 dossier_context=context.get("dossier_context"),
                 dossier_graph_summary=context.get("dossier_graph_summary"),
+                dossier_graph_context=context.get("dossier_graph_context"),
             )
         )
 

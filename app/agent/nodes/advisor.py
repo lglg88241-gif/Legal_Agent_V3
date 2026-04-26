@@ -345,6 +345,153 @@ def _format_dossier_graph_summary_block(dossier_graph_summary: str | None) -> st
     return dossier_graph_summary.strip()
 
 
+def _format_dossier_graph_context_block(dossier_graph_context: dict[str, Any] | None) -> str:
+    if not isinstance(dossier_graph_context, dict):
+        return ""
+
+    if str(dossier_graph_context.get("source") or "").strip() != "graph_context":
+        return ""
+
+    scope = dossier_graph_context.get("scope") if isinstance(dossier_graph_context.get("scope"), dict) else {}
+    stats = dossier_graph_context.get("stats") if isinstance(dossier_graph_context.get("stats"), dict) else {}
+    participants = (
+        dossier_graph_context.get("participants")
+        if isinstance(dossier_graph_context.get("participants"), list)
+        else []
+    )
+    mentions = (
+        dossier_graph_context.get("participant_mentions")
+        if isinstance(dossier_graph_context.get("participant_mentions"), list)
+        else []
+    )
+    matched_nodes = (
+        dossier_graph_context.get("matched_nodes")
+        if isinstance(dossier_graph_context.get("matched_nodes"), list)
+        else []
+    )
+    matched_edges = (
+        dossier_graph_context.get("matched_edges")
+        if isinstance(dossier_graph_context.get("matched_edges"), list)
+        else []
+    )
+    warnings = (
+        dossier_graph_context.get("warnings")
+        if isinstance(dossier_graph_context.get("warnings"), list)
+        else []
+    )
+    notes = (
+        dossier_graph_context.get("notes")
+        if isinstance(dossier_graph_context.get("notes"), list)
+        else []
+    )
+    truncated = bool(dossier_graph_context.get("truncated", False))
+    query_type = str(dossier_graph_context.get("query_type") or "").strip() or "summary"
+    query = str(dossier_graph_context.get("query") or "").strip()
+    legal_basis = bool(dossier_graph_context.get("legal_basis", False))
+
+    participant_lines: list[str] = []
+    for item in participants[:5]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        role = str(item.get("role") or "").strip()
+        side = str(item.get("party_side") or "").strip() or "unknown"
+        entity_type = str(item.get("entity_type") or "").strip() or "unknown"
+        if not label and not role:
+            continue
+        participant_lines.append(
+            f"- label={label or '未填写'}; role={role or '未填写'}; party_side={side}; entity_type={entity_type}"
+        )
+    if not participant_lines:
+        participant_lines.append("- none")
+
+    mention_lines: list[str] = []
+    for item in mentions[:6]:
+        if not isinstance(item, dict):
+            continue
+        raw_label = str(item.get("raw_label") or "").strip()
+        participant_label = str(item.get("participant_label") or "").strip()
+        source = str(item.get("source") or "").strip() or "graph"
+        if not raw_label and not participant_label:
+            continue
+        mention_lines.append(
+            f"- raw_label={raw_label or '未填写'}; participant_label={participant_label or '未确认'}; source={source}"
+        )
+    if not mention_lines:
+        mention_lines.append("- none")
+
+    node_lines: list[str] = []
+    for item in matched_nodes[:8]:
+        if not isinstance(item, dict):
+            continue
+        display_label = str(item.get("display_label") or item.get("label") or "").strip()
+        raw_label = str(item.get("raw_label") or "").strip()
+        node_type = str(item.get("type") or "").strip() or "unknown"
+        conversation_id = item.get("conversation_id")
+        if not display_label and not raw_label:
+            continue
+        suffix = f"; conversation_id={conversation_id}" if conversation_id is not None else ""
+        raw_suffix = f"; raw_label={raw_label}" if raw_label and raw_label != display_label else ""
+        node_lines.append(
+            f"- label={display_label or raw_label}; type={node_type}{suffix}{raw_suffix}"
+        )
+    if not node_lines:
+        node_lines.append("- none")
+
+    edge_lines: list[str] = []
+    for item in matched_edges[:8]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("type") or "").strip() or "CASE_RELATION"
+        source = str(item.get("source") or "").strip() or "unknown"
+        target = str(item.get("target") or "").strip() or "unknown"
+        edge_lines.append(f"- source={source}; relation={label}; target={target}")
+    if not edge_lines:
+        edge_lines.append("- none")
+
+    warning_lines = [f"- {str(item).strip()}" for item in warnings if str(item).strip()]
+    if not warning_lines:
+        warning_lines.append("- none")
+
+    note_lines = [f"- {str(item).strip()}" for item in notes if str(item).strip()]
+    note_lines.extend(
+        [
+            "- 以上 graph_context 仅作案情背景，不是法律依据，不能作为法条或案例来源引用。",
+            "- 回答引用这部分信息时，应表述为：根据你当前案卷中已记录/已确认的信息……",
+            "- 如 graph_context 与本轮用户输入冲突，应先澄清，不得直接沿用历史图谱结论。",
+            "- 未经用户确认的主体不能直接视为同一主体；同名主体也不得跨案卷自动合并。",
+        ]
+    )
+    if truncated:
+        note_lines.append("- 本次 graph_context 已按条数限制截断，只展示部分案情图谱结果。")
+
+    return (
+        "<dossier_graph_context>\n"
+        "案卷图谱查询结果（仅作案情背景，不是法律依据）\n"
+        f"query_type={query_type}\n"
+        f"query={query or 'none'}\n"
+        f"legal_basis={str(legal_basis).lower()}\n"
+        f"scope.user_id={scope.get('user_id')}\n"
+        f"scope.dossier_id={scope.get('dossier_id')}\n"
+        f"scope.conversation_id={scope.get('conversation_id')}\n"
+        f"stats: conversation_count={int(stats.get('conversation_count') or 0)}, "
+        f"node_count={int(stats.get('node_count') or 0)}, edge_count={int(stats.get('edge_count') or 0)}\n"
+        "confirmed_participants:\n"
+        f"{chr(10).join(participant_lines)}\n"
+        "participant_mentions:\n"
+        f"{chr(10).join(mention_lines)}\n"
+        "matched_nodes:\n"
+        f"{chr(10).join(node_lines)}\n"
+        "matched_edges:\n"
+        f"{chr(10).join(edge_lines)}\n"
+        "warnings:\n"
+        f"{chr(10).join(warning_lines)}\n"
+        "notes:\n"
+        f"{chr(10).join(note_lines)}\n"
+        "</dossier_graph_context>"
+    )
+
+
 def _format_dossier_context_block_v2(dossier_context: dict[str, Any] | None) -> str:
     if not isinstance(dossier_context, dict):
         return ""
@@ -672,6 +819,7 @@ def build_advisor_system_prompt(
     payload_facts: str = "",
     dossier_context: str = "",
     dossier_graph_summary: str = "",
+    dossier_graph_context: str = "",
 ) -> str:
     """
     Build the full advisor system prompt.
@@ -729,11 +877,13 @@ def build_advisor_system_prompt(
 
     dossier_block = dossier_context.strip()
     dossier_graph_block = dossier_graph_summary.strip()
+    dossier_graph_context_block = dossier_graph_context.strip()
 
     prompt = f"""
 你不是普通的文本精校员，而是一位资深的中国法律咨询律师。请基于下面给定的事实、法条原文和参考案例，给出一段专业、有共情、可落地的回答。
 {dossier_block}
 {dossier_graph_block}
+{dossier_graph_context_block}
 {correction_block}
 <number_lock>
 【数字锁定 — 最高优先级，任何其他规则均不得推翻此条】
@@ -772,6 +922,14 @@ def build_advisor_system_prompt(
 若【相关法条原文】中出现了具体法律名称和条文编号，应自然引用到回答中。
 若【参考案例】中出现了案例名称和裁判要点，应在用户询问类案时加以说明。
 </rag_binding>
+
+<dossier_graph_context_guard>
+如果 system 中出现 dossier_graph_context，它只能作为当前案卷的结构化案情背景，不是法律依据。
+你只能用“根据你当前案卷中已记录/已确认的信息……”这类表述引用它。
+不得写“根据图谱可知法律规定”“根据图谱可以证明你一定胜诉”。
+如果 graph_context 与用户本轮输入冲突，必须先指出冲突并澄清，不得直接把历史图谱当作已证实事实。
+未经用户确认的主体和 relation 不得直接当作同一主体或已证实关系。
+</dossier_graph_context_guard>
 
 <grounded_context>
 【已确认事实】
@@ -878,6 +1036,9 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
     dossier_graph_summary_block = _format_dossier_graph_summary_block(
         state.get("dossier_graph_summary")
     )
+    dossier_graph_context_block = _format_dossier_graph_context_block(
+        state.get("dossier_graph_context")
+    )
 
     advisor_system_prompt = build_advisor_system_prompt(
         question=state["question"],
@@ -891,6 +1052,7 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         payload_facts=payload_facts,
         dossier_context=dossier_context_block,
         dossier_graph_summary=dossier_graph_summary_block,
+        dossier_graph_context=dossier_graph_context_block,
     )
 
     fallback = {"answer": layered_payload.answer, "sources": []}

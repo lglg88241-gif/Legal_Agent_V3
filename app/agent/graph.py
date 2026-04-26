@@ -24,6 +24,7 @@ class AgentState(TypedDict, total=False):
     case_summary: str
     dossier_context: dict[str, Any] | None
     dossier_graph_summary: str
+    dossier_graph_context: dict[str, Any] | None
     graph_context: str
     graph_memory: str
     historical_reference: str

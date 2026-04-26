@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,11 @@ from app.services.dossier_graph import (
     build_dossier_graph_summary,
     get_dossier_graph_payload,
 )
+from app.services.conversation_mode import (
+    LEGAL_QA_KEYWORDS,
+    normalize_conversation_mode,
+    normalize_persistence_consent,
+)
 
 DEFAULT_DOSSIER_GRAPH_CONTEXT_LIMIT = 20
 MAX_DOSSIER_GRAPH_CONTEXT_LIMIT = 50
@@ -39,6 +45,50 @@ _SUMMARY_QUERY_HINTS = (
 )
 
 _GRAPH_CONTEXT_WARNING = "graph_context 仅代表案卷结构化背景，不构成法律依据。"
+_DOSSIER_GRAPH_MEMORY_HINTS = (
+    "之前",
+    "案卷",
+    "这个案子",
+    "这个案件",
+    "这个案卷",
+    "公司是谁",
+    "有哪些主体",
+    "哪些主体",
+    "有哪些证据",
+    "哪些证据",
+    "我和公司",
+    "已有案情",
+    "历史记录",
+    "历史案情",
+    "之前提到",
+    "当前案卷",
+    "已记录",
+    "已确认",
+    "主体",
+    "证据",
+    "关系",
+    "结合这个案卷",
+)
+_PURE_LEGAL_QUERY_HINTS = (
+    "法条",
+    "法律规定",
+    "法律依据",
+    "赔偿标准",
+    "量刑标准",
+    "构成要件",
+    "司法解释",
+    "劳动合同法",
+    "民法典",
+    "刑法",
+    "社会保险法",
+    "工伤保险条例",
+)
+_EXPLICIT_ARTICLE_QUERY_PATTERN = re.compile(
+    r"(?:劳动合同法|民法典|刑法|劳动法|社会保险法|工伤保险条例)[^。！？\n]{0,24}?第[一二三四五六七八九十百零〇两\d]+条"
+)
+_ARTICLE_RULE_QUERY_PATTERN = re.compile(
+    r"第[一二三四五六七八九十百零〇两\d]+条[^。！？\n]{0,12}(?:规定了什么|怎么规定|是什么|内容是什么)"
+)
 
 
 def _extract_user_id(current_user: Any) -> int:
@@ -71,6 +121,72 @@ def _normalize_limit(limit: int | None) -> int:
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+def _looks_like_explicit_law_article_query(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().split())
+    if not normalized:
+        return False
+    return bool(
+        _EXPLICIT_ARTICLE_QUERY_PATTERN.search(normalized)
+        or _ARTICLE_RULE_QUERY_PATTERN.search(normalized)
+    )
+
+
+def _looks_like_memory_query(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    return any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_HINTS)
+
+
+def _looks_like_pure_legal_query(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    if _looks_like_explicit_law_article_query(normalized):
+        return True
+    if any(keyword.lower() in normalized for keyword in LEGAL_QA_KEYWORDS):
+        return not _looks_like_memory_query(normalized)
+    return any(hint.lower() in normalized for hint in _PURE_LEGAL_QUERY_HINTS) and not _looks_like_memory_query(
+        normalized
+    )
+
+
+def should_query_dossier_graph_context(
+    *,
+    conversation_mode: str | None,
+    dossier_id: int | None,
+    route_intent: str | None = None,
+    user_message: str,
+    persistence_consent: str | None = None,
+) -> bool:
+    try:
+        normalized_dossier_id = int(dossier_id or 0)
+    except (TypeError, ValueError):
+        normalized_dossier_id = 0
+    if normalized_dossier_id <= 0:
+        return False
+
+    normalized_mode = normalize_conversation_mode(conversation_mode)
+    normalized_consent = normalize_persistence_consent(persistence_consent)
+    normalized_route = str(route_intent or "").strip().upper()
+    normalized_message = " ".join((user_message or "").strip().split())
+    if not normalized_message:
+        return False
+
+    if normalized_consent == "temporary":
+        return False
+    if normalized_mode == "LEGAL_QA" or normalized_route == "LEGAL_QA":
+        return False
+    if _looks_like_explicit_law_article_query(normalized_message):
+        return False
+    if _looks_like_pure_legal_query(normalized_message):
+        return False
+    if not _looks_like_memory_query(normalized_message):
+        return False
+
+    return normalized_mode in {"TRACKED_CASE", "CASE_ANALYSIS", "UNKNOWN"}
 
 
 def _is_summary_query(query: str) -> bool:
@@ -157,6 +273,40 @@ def _build_base_response(
         "notes": [_GRAPH_CONTEXT_WARNING],
         "truncated": False,
     }
+
+
+async def load_dossier_graph_context_for_conversation(
+    db: AsyncSession,
+    *,
+    current_user: Any,
+    conversation_id: int,
+    user_message: str,
+    route_intent: str | None = None,
+    limit: int = 12,
+) -> dict[str, Any] | None:
+    user_id = _extract_user_id(current_user)
+    conversation = await get_conversation_for_user(db, user_id, conversation_id)
+    if conversation is None:
+        return None
+
+    dossier_id = getattr(conversation, "dossier_id", None)
+    if not should_query_dossier_graph_context(
+        conversation_mode=getattr(conversation, "conversation_mode", None),
+        dossier_id=dossier_id,
+        route_intent=route_intent,
+        user_message=user_message,
+        persistence_consent=getattr(conversation, "persistence_consent", None),
+    ):
+        return None
+
+    return await query_dossier_graph_context(
+        db,
+        current_user=current_user,
+        conversation_id=conversation_id,
+        dossier_id=int(dossier_id),
+        query=user_message,
+        limit=limit,
+    )
 
 
 async def query_dossier_graph_context(
