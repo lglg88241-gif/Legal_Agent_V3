@@ -3,7 +3,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.mysql_db import Base
@@ -33,6 +44,10 @@ class User(Base):
 
 class Dossier(Base):
     __tablename__ = "dossiers"
+    __table_args__ = (
+        Index("ix_dossiers_user_id_status", "user_id", "status"),
+        Index("ix_dossiers_updated_at", "updated_at"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
@@ -105,6 +120,11 @@ class Dossier(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        Index("ix_conversations_user_id_dossier_id", "user_id", "dossier_id"),
+        Index("ix_conversations_user_id_updated_at", "user_id", "updated_at"),
+        Index("ix_conversations_conversation_mode", "conversation_mode"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
@@ -184,6 +204,9 @@ class Conversation(Base):
 
 class DossierParticipant(Base):
     __tablename__ = "dossier_participants"
+    __table_args__ = (
+        Index("ix_dossier_participants_dossier_id_label", "dossier_id", "label"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     dossier_id: Mapped[int] = mapped_column(
@@ -239,6 +262,18 @@ class DossierParticipant(Base):
 
 class DossierParticipantMention(Base):
     __tablename__ = "dossier_participant_mentions"
+    __table_args__ = (
+        Index(
+            "ix_dossier_participant_mentions_dossier_id_raw_label",
+            "dossier_id",
+            "raw_label",
+        ),
+        Index(
+            "ix_dossier_participant_mentions_dossier_id_conversation_id",
+            "dossier_id",
+            "conversation_id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     dossier_id: Mapped[int] = mapped_column(

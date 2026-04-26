@@ -32,6 +32,65 @@ DEFAULT_PARTICIPANT_ALIASES: dict[str, dict[str, Any]] = {}
 VALID_PARTY_SIDES = {"claimant", "opponent", "neutral", "unknown"}
 VALID_ENTITY_TYPES = {"person", "organization", "authority", "unknown"}
 VALID_PARTICIPANT_MENTION_SOURCES = {"graph", "conversation", "user"}
+RUNTIME_INDEX_SPECS = {
+    "dossiers": (
+        ("ix_dossiers_user_id", ("user_id",)),
+        ("ix_dossiers_user_id_status", ("user_id", "status")),
+        ("ix_dossiers_updated_at", ("updated_at",)),
+    ),
+    "conversations": (
+        ("ix_conversations_user_id", ("user_id",)),
+        ("ix_conversations_dossier_id", ("dossier_id",)),
+        ("ix_conversations_session_id", ("session_id",)),
+        ("ix_conversations_user_id_dossier_id", ("user_id", "dossier_id")),
+        ("ix_conversations_user_id_updated_at", ("user_id", "updated_at")),
+        ("ix_conversations_conversation_mode", ("conversation_mode",)),
+    ),
+    "dossier_participants": (
+        ("ix_dossier_participants_dossier_id", ("dossier_id",)),
+        ("ix_dossier_participants_user_id", ("user_id",)),
+        ("ix_dossier_participants_dossier_id_label", ("dossier_id", "label")),
+    ),
+    "dossier_participant_mentions": (
+        ("ix_dossier_participant_mentions_dossier_id", ("dossier_id",)),
+        ("ix_dossier_participant_mentions_conversation_id", ("conversation_id",)),
+        ("ix_dossier_participant_mentions_participant_id", ("participant_id",)),
+        (
+            "ix_dossier_participant_mentions_dossier_id_raw_label",
+            ("dossier_id", "raw_label"),
+        ),
+        (
+            "ix_dossier_participant_mentions_dossier_id_conversation_id",
+            ("dossier_id", "conversation_id"),
+        ),
+    ),
+    "messages": (
+        ("ix_messages_conversation_id", ("conversation_id",)),
+    ),
+}
+
+
+def _ensure_runtime_indexes(sync_conn) -> None:
+    inspector = inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    for table_name, index_specs in RUNTIME_INDEX_SPECS.items():
+        if table_name not in tables:
+            continue
+
+        columns = {column["name"] for column in inspector.get_columns(table_name)}
+        existing_index_names = {
+            index.get("name")
+            for index in inspector.get_indexes(table_name)
+            if isinstance(index.get("name"), str)
+        }
+        for index_name, index_columns in index_specs:
+            if index_name in existing_index_names:
+                continue
+            if any(column_name not in columns for column_name in index_columns):
+                continue
+            column_sql = ", ".join(index_columns)
+            sync_conn.execute(text(f"CREATE INDEX {index_name} ON {table_name} ({column_sql})"))
+            existing_index_names.add(index_name)
 
 
 def _ensure_conversation_updated_at(sync_conn) -> None:
@@ -197,6 +256,8 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
     dossier_columns = {column["name"] for column in inspector.get_columns("dossiers")}
     if "participant_aliases_json" not in dossier_columns:
         sync_conn.execute(text("ALTER TABLE dossiers ADD COLUMN participant_aliases_json TEXT"))
+
+    _ensure_runtime_indexes(sync_conn)
 
 
 async def ensure_storage_schema(bind_engine: AsyncEngine | None = None) -> None:
@@ -993,20 +1054,36 @@ async def store_message(
     return message
 
 
+async def _delete_conversation_messages(db: AsyncSession, conversation_id: int) -> None:
+    await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
+
+
+async def _delete_conversation_participant_mentions(
+    db: AsyncSession,
+    conversation_id: int,
+) -> None:
+    await db.execute(
+        delete(DossierParticipantMention).where(
+            DossierParticipantMention.conversation_id == conversation_id
+        )
+    )
+
+
 async def delete_conversation_record(
     db: AsyncSession,
     conversation_id: int,
 ) -> None:
-    conversation = await db.get(Conversation, conversation_id)
-    if conversation is not None:
-        await db.delete(conversation)
+    await _delete_conversation_participant_mentions(db, conversation_id)
+    await _delete_conversation_messages(db, conversation_id)
+    await db.execute(delete(Conversation).where(Conversation.id == conversation_id))
 
 
 async def clear_conversation_messages(
     db: AsyncSession,
     conversation_id: int,
 ) -> None:
-    await db.execute(delete(Message).where(Message.conversation_id == conversation_id))
+    await _delete_conversation_participant_mentions(db, conversation_id)
+    await _delete_conversation_messages(db, conversation_id)
     conversation = await db.get(Conversation, conversation_id)
     if conversation is not None:
         conversation.case_summary = ""
