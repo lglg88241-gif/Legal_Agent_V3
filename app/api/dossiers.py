@@ -8,18 +8,28 @@ from app.core.security import AuthenticatedUser, get_current_user
 from app.database.mysql_db import get_db
 from app.services.conversation_store import (
     DEFAULT_DOSSIER_STATUS,
+    archive_dossier_record,
+    build_dossier_participant_candidates,
+    build_dossier_participant_lookup,
+    create_dossier_participant_record,
     create_dossier_record,
     ensure_storage_schema,
     get_dossier_for_user,
+    get_dossier_participant_for_user,
     list_dossier_conversations,
+    list_dossier_participant_mentions,
+    list_dossier_participants,
     list_user_dossiers,
     normalize_dossier_status,
+    resolve_dossier_participant_mentions,
     serialize_dossier,
     serialize_dossier_detail,
-    update_dossier_fields,
-    archive_dossier_record,
+    serialize_dossier_participant,
+    serialize_dossier_participant_mention,
     update_dossier_auto_summary,
+    update_dossier_fields,
     update_dossier_participant_aliases,
+    update_dossier_participant_record,
 )
 from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.dossier_summary import generate_dossier_auto_summary
@@ -48,6 +58,87 @@ class DossierParticipantAliasRequest(BaseModel):
 
 class DossierParticipantsUpdateRequest(BaseModel):
     participant_aliases: dict[str, DossierParticipantAliasRequest]
+
+
+class DossierParticipantCreateRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=100)
+    role: str | None = Field(default=None, max_length=100)
+    party_side: str = Field(default="unknown", min_length=1, max_length=32)
+    entity_type: str = Field(default="unknown", min_length=1, max_length=32)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class DossierParticipantUpdateRequest(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=100)
+    role: str | None = Field(default=None, max_length=100)
+    party_side: str | None = Field(default=None, min_length=1, max_length=32)
+    entity_type: str | None = Field(default=None, min_length=1, max_length=32)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class DossierParticipantResolveMentionRequest(BaseModel):
+    conversation_id: int = Field(..., gt=0)
+    raw_label: str = Field(..., min_length=1, max_length=100)
+    source: str = Field(default="graph", min_length=1, max_length=32)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class DossierParticipantResolveRequest(BaseModel):
+    participant_id: int | None = Field(default=None, gt=0)
+    participant: DossierParticipantCreateRequest | None = None
+    mentions: list[DossierParticipantResolveMentionRequest] = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+    )
+
+
+def _serialize_dossier_with_participants(
+    dossier,
+    conversations,
+    participants,
+    mentions,
+) -> dict:
+    return serialize_dossier_detail(
+        dossier,
+        conversations,
+        confirmed_participants=participants,
+        participant_mentions=mentions,
+    )
+
+
+def _ensure_dossier_participant_write_allowed(dossier) -> None:
+    if normalize_dossier_status(getattr(dossier, "status", DEFAULT_DOSSIER_STATUS)) == "archived":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Archived dossier cannot accept new participant changes",
+        )
+
+
+async def _load_dossier_graph_scope(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    dossier,
+) -> tuple[list, list[int], dict, list, list, dict]:
+    conversations = await list_dossier_conversations(db, user_id, dossier.id)
+    conversation_ids = [
+        conversation.id
+        for conversation in conversations
+        if isinstance(getattr(conversation, "id", None), int)
+    ]
+    participant_aliases = serialize_dossier(dossier).get("participant_aliases", {})
+    participants = await list_dossier_participants(db, user_id, dossier.id)
+    mentions = await list_dossier_participant_mentions(db, user_id, dossier.id)
+    participant_lookup = build_dossier_participant_lookup(participants)
+    return (
+        conversations,
+        conversation_ids,
+        participant_aliases,
+        participants,
+        mentions,
+        participant_lookup,
+    )
 
 
 @router.get("")
@@ -93,9 +184,254 @@ async def get_dossier(
     if dossier is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
     conversations = await list_dossier_conversations(db, current_user.user_id, dossier.id)
+    participants = await list_dossier_participants(db, current_user.user_id, dossier.id)
+    mentions = await list_dossier_participant_mentions(db, current_user.user_id, dossier.id)
     return {
         "status": "success",
-        "dossier": serialize_dossier_detail(dossier, conversations),
+        "dossier": _serialize_dossier_with_participants(
+            dossier,
+            conversations,
+            participants,
+            mentions,
+        ),
+    }
+
+
+@router.get("/{dossier_id}/participants")
+async def get_dossier_participants(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    participants = await list_dossier_participants(db, current_user.user_id, dossier.id)
+    mentions = await list_dossier_participant_mentions(db, current_user.user_id, dossier.id)
+    participant_lookup = build_dossier_participant_lookup(participants)
+    return {
+        "status": "success",
+        "dossier_id": dossier.id,
+        "participants": [
+            serialize_dossier_participant(participant)
+            for participant in participants
+        ],
+        "mentions": [
+            serialize_dossier_participant_mention(mention, participant_lookup)
+            for mention in mentions
+        ],
+    }
+
+
+@router.post("/{dossier_id}/participants")
+async def create_dossier_participant(
+    dossier_id: int,
+    payload: DossierParticipantCreateRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+    _ensure_dossier_participant_write_allowed(dossier)
+
+    try:
+        participant = await create_dossier_participant_record(
+            db,
+            dossier=dossier,
+            user_id=current_user.user_id,
+            label=payload.label,
+            role=payload.role,
+            party_side=payload.party_side,
+            entity_type=payload.entity_type,
+            description=payload.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await db.commit()
+    await db.refresh(participant)
+    return {
+        "status": "success",
+        "participant": serialize_dossier_participant(participant),
+    }
+
+
+@router.patch("/{dossier_id}/participants/{participant_id}")
+async def update_dossier_participant(
+    dossier_id: int,
+    participant_id: int,
+    payload: DossierParticipantUpdateRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+    _ensure_dossier_participant_write_allowed(dossier)
+
+    participant = await get_dossier_participant_for_user(
+        db,
+        current_user.user_id,
+        dossier.id,
+        participant_id,
+    )
+    if participant is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
+
+    if (
+        payload.label is None
+        and payload.role is None
+        and payload.party_side is None
+        and payload.entity_type is None
+        and payload.description is None
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No participant fields provided")
+
+    try:
+        await update_dossier_participant_record(
+            db,
+            participant,
+            label=payload.label,
+            role=payload.role,
+            party_side=payload.party_side,
+            entity_type=payload.entity_type,
+            description=payload.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await db.commit()
+    await db.refresh(participant)
+    return {
+        "status": "success",
+        "participant": serialize_dossier_participant(participant),
+    }
+
+
+@router.post("/{dossier_id}/participants/resolve")
+async def resolve_dossier_participants(
+    dossier_id: int,
+    payload: DossierParticipantResolveRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+    _ensure_dossier_participant_write_allowed(dossier)
+
+    participant = None
+    if payload.participant_id is not None:
+        participant = await get_dossier_participant_for_user(
+            db,
+            current_user.user_id,
+            dossier.id,
+            payload.participant_id,
+        )
+        if participant is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
+    elif payload.participant is not None:
+        try:
+            participant = await create_dossier_participant_record(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                label=payload.participant.label,
+                role=payload.participant.role,
+                party_side=payload.participant.party_side,
+                entity_type=payload.participant.entity_type,
+                description=payload.participant.description,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="participant_id or participant payload is required",
+        )
+
+    mentions_payload = [
+        item.model_dump() if hasattr(item, "model_dump") else item.dict()
+        for item in payload.mentions
+    ]
+    try:
+        mentions = await resolve_dossier_participant_mentions(
+            db,
+            dossier=dossier,
+            user_id=current_user.user_id,
+            participant=participant,
+            mentions=mentions_payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await db.commit()
+    await db.refresh(participant)
+    participant_lookup = {participant.id: participant}
+    return {
+        "status": "success",
+        "participant": serialize_dossier_participant(participant),
+        "mentions": [
+            serialize_dossier_participant_mention(mention, participant_lookup)
+            for mention in mentions
+        ],
+    }
+
+
+@router.get("/{dossier_id}/participant-candidates")
+async def get_dossier_participant_candidates(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    (
+        conversations,
+        conversation_ids,
+        participant_aliases,
+        participants,
+        mentions,
+        participant_lookup,
+    ) = await _load_dossier_graph_scope(
+        db,
+        user_id=current_user.user_id,
+        dossier=dossier,
+    )
+    graph_payload = await get_dossier_graph_payload(
+        user_id=current_user.user_id,
+        dossier_id=dossier.id,
+        conversation_ids=conversation_ids,
+        participant_aliases=participant_aliases,
+        confirmed_participants=[
+            serialize_dossier_participant(participant)
+            for participant in participants
+        ],
+        participant_mappings=[
+            serialize_dossier_participant_mention(mention, participant_lookup)
+            for mention in mentions
+        ],
+    )
+    candidates = build_dossier_participant_candidates(
+        graph_payload=graph_payload,
+        participants=participants,
+        confirmed_mentions=mentions,
+        participant_aliases=participant_aliases,
+    )
+    return {
+        "status": "success",
+        "dossier_id": dossier.id,
+        "conversation_count": len(conversations),
+        "candidates": candidates,
     }
 
 
@@ -110,18 +446,31 @@ async def get_dossier_graph(
     if dossier is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
 
-    conversations = await list_dossier_conversations(db, current_user.user_id, dossier.id)
-    conversation_ids = [
-        conversation.id
-        for conversation in conversations
-        if isinstance(getattr(conversation, "id", None), int)
-    ]
-    participant_aliases = serialize_dossier(dossier).get("participant_aliases", {})
+    (
+        _conversations,
+        conversation_ids,
+        participant_aliases,
+        participants,
+        mentions,
+        participant_lookup,
+    ) = await _load_dossier_graph_scope(
+        db,
+        user_id=current_user.user_id,
+        dossier=dossier,
+    )
     return await get_dossier_graph_payload(
         user_id=current_user.user_id,
         dossier_id=dossier.id,
         conversation_ids=conversation_ids,
         participant_aliases=participant_aliases,
+        confirmed_participants=[
+            serialize_dossier_participant(participant)
+            for participant in participants
+        ],
+        participant_mappings=[
+            serialize_dossier_participant_mention(mention, participant_lookup)
+            for mention in mentions
+        ],
     )
 
 
@@ -239,9 +588,16 @@ async def generate_dossier_summary(
     await db.commit()
     await db.refresh(dossier)
     conversations = await list_dossier_conversations(db, current_user.user_id, dossier.id)
+    participants = await list_dossier_participants(db, current_user.user_id, dossier.id)
+    mentions = await list_dossier_participant_mentions(db, current_user.user_id, dossier.id)
     response = {
         "status": "success",
-        "dossier": serialize_dossier_detail(dossier, conversations),
+        "dossier": _serialize_dossier_with_participants(
+            dossier,
+            conversations,
+            participants,
+            mentions,
+        ),
     }
     if generated.get("warning"):
         response["warning"] = generated["warning"]

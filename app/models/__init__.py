@@ -1,3 +1,17 @@
-from app.models.entities import Conversation, Dossier, Message, User
+from app.models.entities import (
+    Conversation,
+    Dossier,
+    DossierParticipant,
+    DossierParticipantMention,
+    Message,
+    User,
+)
 
-__all__ = ["User", "Conversation", "Dossier", "Message"]
+__all__ = [
+    "User",
+    "Conversation",
+    "Dossier",
+    "DossierParticipant",
+    "DossierParticipantMention",
+    "Message",
+]

@@ -237,6 +237,12 @@ def test_build_dossier_graph_summary_for_conversation_handles_neo4j_warning_with
     async def fake_list_dossier_conversations(db, user_id: int, dossier_id: int):
         return [conversation]
 
+    async def fake_list_dossier_participants(db, user_id: int, dossier_id: int):
+        return []
+
+    async def fake_list_dossier_participant_mentions(db, user_id: int, dossier_id: int):
+        return []
+
     async def fake_get_dossier_graph_payload(**kwargs):
         return {
             "status": "success",
@@ -264,6 +270,12 @@ def test_build_dossier_graph_summary_for_conversation_handles_neo4j_warning_with
     monkeypatch.setattr(dossier_graph, "get_conversation_for_user", fake_get_conversation_for_user)
     monkeypatch.setattr(dossier_graph, "get_dossier_for_user", fake_get_dossier_for_user)
     monkeypatch.setattr(dossier_graph, "list_dossier_conversations", fake_list_dossier_conversations)
+    monkeypatch.setattr(dossier_graph, "list_dossier_participants", fake_list_dossier_participants)
+    monkeypatch.setattr(
+        dossier_graph,
+        "list_dossier_participant_mentions",
+        fake_list_dossier_participant_mentions,
+    )
     monkeypatch.setattr(dossier_graph, "get_dossier_graph_payload", fake_get_dossier_graph_payload)
 
     summary = asyncio.run(

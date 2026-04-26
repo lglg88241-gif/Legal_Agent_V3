@@ -90,9 +90,21 @@ def test_get_dossier_graph_without_conversations_returns_empty_graph(
         assert dossier_id == 21
         return []
 
+    async def fake_list_dossier_participants(db, user_id: int, dossier_id: int):
+        return []
+
+    async def fake_list_dossier_participant_mentions(db, user_id: int, dossier_id: int):
+        return []
+
     monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
     monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
     monkeypatch.setattr(dossiers_api, "list_dossier_conversations", fake_list_dossier_conversations)
+    monkeypatch.setattr(dossiers_api, "list_dossier_participants", fake_list_dossier_participants)
+    monkeypatch.setattr(
+        dossiers_api,
+        "list_dossier_participant_mentions",
+        fake_list_dossier_participant_mentions,
+    )
 
     result = asyncio.run(
         dossiers_api.get_dossier_graph(
@@ -160,21 +172,33 @@ def test_get_dossier_graph_passes_only_bound_conversation_ids_and_aliases(
         assert dossier_id == 31
         return conversations
 
+    async def fake_list_dossier_participants(db, user_id: int, dossier_id: int):
+        return []
+
+    async def fake_list_dossier_participant_mentions(db, user_id: int, dossier_id: int):
+        return []
+
     async def fake_get_dossier_graph_payload(
         *,
         user_id: int,
         dossier_id: int,
         conversation_ids: list[int],
         participant_aliases: dict[str, object] | None = None,
+        confirmed_participants: list[dict[str, object]] | None = None,
+        participant_mappings: list[dict[str, object]] | None = None,
     ):
         captured["user_id"] = user_id
         captured["dossier_id"] = dossier_id
         captured["conversation_ids"] = conversation_ids
         captured["participant_aliases"] = participant_aliases
+        captured["confirmed_participants"] = confirmed_participants
+        captured["participant_mappings"] = participant_mappings
         return {
             "status": "success",
             "dossier_id": dossier_id,
             "participant_aliases": participant_aliases or {},
+            "confirmed_participants": confirmed_participants or [],
+            "participant_mappings": participant_mappings or [],
             "graph": {
                 "nodes": [],
                 "edges": [],
@@ -189,6 +213,12 @@ def test_get_dossier_graph_passes_only_bound_conversation_ids_and_aliases(
     monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
     monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
     monkeypatch.setattr(dossiers_api, "list_dossier_conversations", fake_list_dossier_conversations)
+    monkeypatch.setattr(dossiers_api, "list_dossier_participants", fake_list_dossier_participants)
+    monkeypatch.setattr(
+        dossiers_api,
+        "list_dossier_participant_mentions",
+        fake_list_dossier_participant_mentions,
+    )
     monkeypatch.setattr(dossiers_api, "get_dossier_graph_payload", fake_get_dossier_graph_payload)
 
     result = asyncio.run(
@@ -211,6 +241,8 @@ def test_get_dossier_graph_passes_only_bound_conversation_ids_and_aliases(
                 "confirmed_by_user": True,
             }
         },
+        "confirmed_participants": [],
+        "participant_mappings": [],
     }
     assert result["graph"]["stats"]["conversation_count"] == 2
 

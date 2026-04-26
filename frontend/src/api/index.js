@@ -88,6 +88,15 @@ export const deleteConversation = (conversationId) =>
   api.delete(`/conversations/${conversationId}`)
 export const getDossiers = () => api.get('/dossiers')
 export const getDossierDetail = (dossierId) => api.get(`/dossiers/${dossierId}`)
+export const getDossierParticipants = (dossierId) => api.get(`/dossiers/${dossierId}/participants`)
+export const createDossierParticipant = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/participants`, payload)
+export const updateDossierParticipant = (dossierId, participantId, payload) =>
+  api.patch(`/dossiers/${dossierId}/participants/${participantId}`, payload)
+export const resolveDossierParticipants = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/participants/resolve`, payload)
+export const getDossierParticipantCandidates = (dossierId) =>
+  api.get(`/dossiers/${dossierId}/participant-candidates`)
 export const getDossierGraph = (dossierId) => api.get(`/dossiers/${dossierId}/graph`)
 export const createDossier = (payload) => api.post('/dossiers', payload)
 export const updateDossier = (dossierId, payload) =>

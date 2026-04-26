@@ -65,6 +65,9 @@ class DummyDB:
     async def refresh(self, obj) -> None:
         return None
 
+    async def scalars(self, *args, **kwargs):
+        return []
+
 
 def test_generate_dossier_auto_summary_uses_bound_conversation_materials(
     monkeypatch: pytest.MonkeyPatch,

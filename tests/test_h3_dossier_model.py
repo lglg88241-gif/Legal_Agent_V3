@@ -85,6 +85,9 @@ class DummyDB:
     async def refresh(self, obj) -> None:
         return None
 
+    async def scalars(self, *args, **kwargs):
+        return []
+
 
 def test_serialize_conversation_includes_nullable_dossier_id() -> None:
     conversation = Conversation(

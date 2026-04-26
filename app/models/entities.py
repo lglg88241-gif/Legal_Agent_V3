@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.mysql_db import Base
@@ -93,6 +93,14 @@ class Dossier(Base):
 
     user: Mapped[User] = relationship(back_populates="dossiers")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="dossier")
+    participants: Mapped[list["DossierParticipant"]] = relationship(
+        back_populates="dossier",
+        cascade="all, delete-orphan",
+    )
+    participant_mentions: Mapped[list["DossierParticipantMention"]] = relationship(
+        back_populates="dossier",
+        cascade="all, delete-orphan",
+    )
 
 
 class Conversation(Base):
@@ -168,6 +176,109 @@ class Conversation(Base):
         back_populates="conversation",
         cascade="all, delete-orphan",
     )
+    participant_mentions: Mapped[list["DossierParticipantMention"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+    )
+
+
+class DossierParticipant(Base):
+    __tablename__ = "dossier_participants"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dossier_id: Mapped[int] = mapped_column(
+        ForeignKey("dossiers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    label: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    role: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
+    party_side: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
+    )
+    entity_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="unknown",
+        server_default="unknown",
+    )
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    confirmed_by_user: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="1",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        server_default=func.now(),
+        onupdate=datetime.utcnow,
+    )
+
+    dossier: Mapped[Dossier] = relationship(back_populates="participants")
+    mentions: Mapped[list["DossierParticipantMention"]] = relationship(
+        back_populates="participant",
+        cascade="all, delete-orphan",
+    )
+
+
+class DossierParticipantMention(Base):
+    __tablename__ = "dossier_participant_mentions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dossier_id: Mapped[int] = mapped_column(
+        ForeignKey("dossiers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("dossier_participants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    raw_label: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    source: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="graph",
+        server_default="graph",
+    )
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    confirmed_by_user: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default="1",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    dossier: Mapped[Dossier] = relationship(back_populates="participant_mentions")
+    conversation: Mapped[Conversation] = relationship(back_populates="participant_mentions")
+    participant: Mapped[DossierParticipant] = relationship(back_populates="mentions")
 
 
 class Message(Base):

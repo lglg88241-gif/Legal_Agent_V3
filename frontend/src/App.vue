@@ -466,6 +466,218 @@
             </div>
           </div>
 
+          <div class="dossier-resolved-participants-section">
+            <div class="dossier-auto-summary-header">
+              <div class="dossier-detail-conversations-title">主体确认</div>
+              <el-button
+                size="small"
+                plain
+                :loading="dossierParticipantRegistryLoading || dossierParticipantCandidatesLoading"
+                @click="loadSelectedDossierDetail(selectedDossierId, { silent: true })"
+              >
+                刷新主体
+              </el-button>
+            </div>
+            <div class="dossier-participants-hint">
+              这里的主体是案卷内用户确认过的稳定称呼，用于在“我 / 公司 / 用人单位 / HR / 老板”等代称之间做同一性对齐。
+            </div>
+            <div class="dossier-participants-hint">
+              系统只会给出候选建议，不会自动确认；未确认的主体不得当作同一主体使用，也不会跨案卷自动合并。
+            </div>
+
+            <div v-if="dossierParticipantRegistryState.error" class="dossier-graph-error">
+              {{ dossierParticipantRegistryState.error }}
+            </div>
+            <div v-else-if="dossierParticipantRegistryLoading" class="dossier-list-status">
+              正在加载主体确认...
+            </div>
+            <div v-else class="dossier-resolved-participants-body">
+              <div class="dossier-resolved-participant-list">
+                <div
+                  v-for="participant in selectedDossierResolvedParticipants"
+                  :key="participant.id"
+                  class="dossier-resolved-participant-card"
+                >
+                  <div class="dossier-resolved-participant-grid">
+                    <el-input
+                      v-model="participant.label"
+                      maxlength="100"
+                      placeholder="主体称呼"
+                    />
+                    <el-input
+                      v-model="participant.role"
+                      maxlength="100"
+                      placeholder="角色"
+                    />
+                    <el-select v-model="participant.party_side" placeholder="立场">
+                      <el-option
+                        v-for="option in dossierParticipantPartySideOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                    <el-select v-model="participant.entity_type" placeholder="类型">
+                      <el-option
+                        v-for="option in dossierParticipantEntityTypeOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                  </div>
+                  <el-input
+                    v-model="participant.description"
+                    maxlength="1000"
+                    placeholder="备注（可选）"
+                  />
+                  <div class="dossier-resolved-participant-actions">
+                    <span>
+                      {{
+                        `已确认 mentions：${selectedDossierParticipantMentions.filter((item) => item.participant_id === participant.id).length}`
+                      }}
+                    </span>
+                    <el-button
+                      size="small"
+                      type="primary"
+                      plain
+                      :loading="dossierParticipantActionLoading"
+                      @click="handleUpdateResolvedParticipant(participant)"
+                    >
+                      保存主体
+                    </el-button>
+                  </div>
+                </div>
+                <div v-if="!selectedDossierResolvedParticipants.length" class="dossier-graph-empty">
+                  暂无已确认主体，可先从下方候选中确认，或手动新建一个主体。
+                </div>
+              </div>
+
+              <div class="dossier-participant-create-card">
+                <div class="dossier-detail-conversations-title">手动新建主体</div>
+                <div class="dossier-resolved-participant-grid">
+                  <el-input
+                    v-model="dossierParticipantCreateForm.label"
+                    maxlength="100"
+                    placeholder="主体称呼，例如：A公司 / 张三"
+                  />
+                  <el-input
+                    v-model="dossierParticipantCreateForm.role"
+                    maxlength="100"
+                    placeholder="角色，例如：用人单位 / HR / 劳动者"
+                  />
+                  <el-select v-model="dossierParticipantCreateForm.party_side" placeholder="立场">
+                    <el-option
+                      v-for="option in dossierParticipantPartySideOptions"
+                      :key="option.value"
+                      :label="option.label"
+                      :value="option.value"
+                    />
+                  </el-select>
+                  <el-select v-model="dossierParticipantCreateForm.entity_type" placeholder="类型">
+                    <el-option
+                      v-for="option in dossierParticipantEntityTypeOptions"
+                      :key="option.value"
+                      :label="option.label"
+                      :value="option.value"
+                    />
+                  </el-select>
+                </div>
+                <el-input
+                  v-model="dossierParticipantCreateForm.description"
+                  maxlength="1000"
+                  placeholder="备注（可选）"
+                />
+                <div class="dossier-resolved-participant-actions">
+                  <span>不要求真实姓名，可使用化名或角色名。</span>
+                  <el-button
+                    size="small"
+                    type="primary"
+                    :loading="dossierParticipantActionLoading"
+                    @click="handleCreateResolvedParticipant"
+                  >
+                    新建主体
+                  </el-button>
+                </div>
+              </div>
+
+              <div class="dossier-participant-candidates-card">
+                <div class="dossier-auto-summary-header">
+                  <div class="dossier-detail-conversations-title">候选对齐项</div>
+                  <span class="dossier-participant-candidate-meta">
+                    {{ `候选 ${selectedDossierParticipantCandidates.length} 项` }}
+                  </span>
+                </div>
+                <div v-if="dossierParticipantCandidatesLoading" class="dossier-list-status">
+                  正在生成候选主体...
+                </div>
+                <div
+                  v-else-if="selectedDossierParticipantCandidates.length"
+                  class="dossier-participant-candidate-list"
+                >
+                  <div
+                    v-for="candidate in selectedDossierParticipantCandidates"
+                    :key="candidate.candidate_key"
+                    class="dossier-participant-candidate-card"
+                  >
+                    <div class="dossier-participant-candidate-title">
+                      {{ candidate.raw_labels?.join(' / ') || candidate.suggested_label }}
+                    </div>
+                    <div class="dossier-participant-candidate-meta">
+                      {{
+                        `建议称呼：${candidate.suggested_label || '未命名主体'} · 角色：${candidate.suggested_role || '未分类'} · mentions：${candidate.mentions?.length || 0}`
+                      }}
+                    </div>
+                    <div v-if="candidate.existing_participant_label" class="dossier-participant-candidate-meta">
+                      {{ `系统建议可映射到：${candidate.existing_participant_label}` }}
+                    </div>
+                    <el-select
+                      v-model="dossierParticipantCandidateSelections[candidate.candidate_key]"
+                      clearable
+                      placeholder="选择已有主体"
+                    >
+                      <el-option
+                        v-for="participant in selectedDossierResolvedParticipants"
+                        :key="participant.id"
+                        :label="participant.label || `主体 #${participant.id}`"
+                        :value="participant.id"
+                      />
+                    </el-select>
+                    <div class="dossier-participant-candidate-actions">
+                      <el-button
+                        size="small"
+                        type="primary"
+                        plain
+                        :disabled="!dossierParticipantCandidateSelections[candidate.candidate_key]"
+                        :loading="dossierParticipantActionLoading"
+                        @click="handleResolveParticipantCandidate(candidate, { participantId: dossierParticipantCandidateSelections[candidate.candidate_key] })"
+                      >
+                        确认为已有主体
+                      </el-button>
+                      <el-button
+                        size="small"
+                        type="primary"
+                        :loading="dossierParticipantActionLoading"
+                        @click="handleResolveParticipantCandidate(candidate)"
+                      >
+                        新建主体
+                      </el-button>
+                      <el-button
+                        size="small"
+                        @click="handleIgnoreParticipantCandidate(candidate)"
+                      >
+                        忽略
+                      </el-button>
+                    </div>
+                  </div>
+                </div>
+                <div v-else class="dossier-graph-empty">
+                  暂无待确认主体候选。若后续绑定更多会话或图谱新增主体称呼，可刷新后再看。
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="dossier-graph-section">
             <div class="dossier-auto-summary-header">
               <div class="dossier-detail-conversations-title">图谱状态</div>
@@ -568,7 +780,10 @@
                         class="dossier-graph-node-chip"
                         :title="formatGraphPropertiesTitle(node.properties)"
                       >
-                        <strong>{{ node.label || `Node ${node.id}` }}</strong>
+                        <strong>{{ node.display_label || node.label || `Node ${node.id}` }}</strong>
+                        <span v-if="node.raw_label && node.raw_label !== (node.display_label || node.label)">
+                          {{ `原始称呼：${node.raw_label}` }}
+                        </span>
                         <span>{{ node.type || '未分类' }}</span>
                         <span>
                           {{
@@ -751,6 +966,7 @@ import {
   clearConversationMessages,
   createConversation,
   createDossier,
+  createDossierParticipant,
   deleteConversation,
   generateDossierSummary,
   getConversationGraph,
@@ -759,8 +975,11 @@ import {
   getConversations,
   getDossierDetail,
   getDossierGraph,
+  getDossierParticipantCandidates,
+  getDossierParticipants,
   getDossiers,
   getLocalModelStatus,
+  resolveDossierParticipants,
   searchConversations,
   getSystemStatus,
   sendMessage,
@@ -768,6 +987,7 @@ import {
   setLocalModelStatus,
   submitFeedback,
   updateDossier,
+  updateDossierParticipant,
   updateDossierParticipants,
   updateConversationTitle,
 } from './api/index.js'
@@ -805,6 +1025,9 @@ const selectedDossierDetail = ref(null)
 const dossierDetailLoading = ref(false)
 const dossierDetailSaving = ref(false)
 const dossierParticipantsSaving = ref(false)
+const dossierParticipantRegistryLoading = ref(false)
+const dossierParticipantCandidatesLoading = ref(false)
+const dossierParticipantActionLoading = ref(false)
 const dossierSummaryGenerating = ref(false)
 const dossierGraphLoading = ref(false)
 const dossierGraphLoaded = ref(false)
@@ -821,6 +1044,12 @@ const dossierGraphState = reactive({
   warning: '',
   error: '',
   participantAliases: {},
+})
+const dossierParticipantRegistryState = reactive({
+  participants: [],
+  mentions: [],
+  candidates: [],
+  error: '',
 })
 const dossierForm = reactive({
   title: '',
@@ -839,6 +1068,13 @@ const dossierParticipantForm = reactive({
   opposing_label: '',
   opposing_role: '',
 })
+const dossierParticipantCreateForm = reactive({
+  label: '',
+  role: '',
+  party_side: 'unknown',
+  entity_type: 'unknown',
+  description: '',
+})
 const trackedOnboardingForm = reactive({
   title: '',
   primary_label: '',
@@ -853,6 +1089,20 @@ const trackedOnboardingState = reactive({
   draftText: '',
   dossierId: null,
 })
+const dossierParticipantCandidateSelections = reactive({})
+const dossierParticipantCandidateDismissed = reactive({})
+const dossierParticipantPartySideOptions = [
+  { label: '主张方', value: 'claimant' },
+  { label: '对方', value: 'opponent' },
+  { label: '中立', value: 'neutral' },
+  { label: '未分类', value: 'unknown' },
+]
+const dossierParticipantEntityTypeOptions = [
+  { label: '自然人', value: 'person' },
+  { label: '组织', value: 'organization' },
+  { label: '机构', value: 'authority' },
+  { label: '未分类', value: 'unknown' },
+]
 let trackedOnboardingResolver = null
 const localModel = reactive({
   enabled: false,
@@ -919,6 +1169,23 @@ const currentConversationDossierLabel = computed(() => {
 const selectedDossierConversationCount = computed(
   () => selectedDossierDetail.value?.conversation_count || 0
 )
+const selectedDossierResolvedParticipants = computed(() =>
+  Array.isArray(dossierParticipantRegistryState.participants)
+    ? dossierParticipantRegistryState.participants
+    : []
+)
+const selectedDossierParticipantMentions = computed(() =>
+  Array.isArray(dossierParticipantRegistryState.mentions)
+    ? dossierParticipantRegistryState.mentions
+    : []
+)
+const selectedDossierParticipantCandidates = computed(() =>
+  Array.isArray(dossierParticipantRegistryState.candidates)
+    ? dossierParticipantRegistryState.candidates.filter(
+        (candidate) => !dossierParticipantCandidateDismissed[candidate.candidate_key]
+      )
+    : []
+)
 const selectedDossierGraphParticipantAliases = computed(() => {
   const aliases = dossierGraphState.participantAliases
   if (aliases && Object.keys(aliases).length) {
@@ -967,8 +1234,8 @@ const selectedDossierGraphPreviewEdges = computed(() => {
 
     return {
       ...edge,
-      sourceLabel: sourceNode?.label || sourceId || 'Unknown',
-      targetLabel: targetNode?.label || targetId || 'Unknown',
+      sourceLabel: sourceNode?.display_label || sourceNode?.label || sourceId || 'Unknown',
+      targetLabel: targetNode?.display_label || targetNode?.label || targetId || 'Unknown',
       relationLabel: String(edge?.label || edge?.type || 'CASE_RELATION').trim() || 'CASE_RELATION',
       conversationId:
         properties.conversation_id ??
@@ -1178,12 +1445,21 @@ function resetDossierParticipantForm(caseType = '') {
   applyParticipantAliasesToForm(dossierParticipantForm, {}, caseType)
 }
 
+function resetDossierParticipantCreateForm() {
+  dossierParticipantCreateForm.label = ''
+  dossierParticipantCreateForm.role = ''
+  dossierParticipantCreateForm.party_side = 'unknown'
+  dossierParticipantCreateForm.entity_type = 'unknown'
+  dossierParticipantCreateForm.description = ''
+}
+
 function resetDossierDetailForm() {
   dossierDetailForm.title = ''
   dossierDetailForm.case_type = ''
   dossierDetailForm.summary = ''
   dossierDetailForm.status = 'active'
   resetDossierParticipantForm()
+  resetDossierParticipantCreateForm()
 }
 
 function resetTrackedOnboardingForm(caseType = '') {
@@ -1208,6 +1484,7 @@ function applySelectedDossierDetail(dossier) {
   selectedDossierDetail.value = dossier || null
   if (!dossier) {
     resetDossierDetailForm()
+    resetDossierParticipantRegistryState()
     return
   }
 
@@ -1220,6 +1497,50 @@ function applySelectedDossierDetail(dossier) {
     dossier.participant_aliases || {},
     dossier.case_type || ''
   )
+  applyDossierParticipantRegistryPayload({
+    participants: dossier.confirmed_participants || [],
+    mentions: dossier.participant_mentions || [],
+  })
+}
+
+function resetDossierParticipantRegistryState() {
+  dossierParticipantRegistryState.participants = []
+  dossierParticipantRegistryState.mentions = []
+  dossierParticipantRegistryState.candidates = []
+  dossierParticipantRegistryState.error = ''
+  resetDossierParticipantCreateForm()
+  Object.keys(dossierParticipantCandidateSelections).forEach((key) => {
+    delete dossierParticipantCandidateSelections[key]
+  })
+  Object.keys(dossierParticipantCandidateDismissed).forEach((key) => {
+    delete dossierParticipantCandidateDismissed[key]
+  })
+}
+
+function applyDossierParticipantRegistryPayload(payload) {
+  dossierParticipantRegistryState.participants = Array.isArray(payload?.participants)
+    ? payload.participants
+    : []
+  dossierParticipantRegistryState.mentions = Array.isArray(payload?.mentions)
+    ? payload.mentions
+    : []
+  dossierParticipantRegistryState.error = ''
+}
+
+function applyDossierParticipantCandidatesPayload(payload) {
+  dossierParticipantRegistryState.candidates = Array.isArray(payload?.candidates)
+    ? payload.candidates
+    : []
+  dossierParticipantRegistryState.error = ''
+  Object.keys(dossierParticipantCandidateSelections).forEach((key) => {
+    delete dossierParticipantCandidateSelections[key]
+  })
+  for (const candidate of dossierParticipantRegistryState.candidates) {
+    const candidateKey = candidate?.candidate_key
+    if (!candidateKey) continue
+    dossierParticipantCandidateSelections[candidateKey] =
+      candidate?.existing_participant_id || null
+  }
 }
 
 function resetDossierGraphState() {
@@ -1430,8 +1751,62 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     dossierDetailLoading.value = false
   }
 
+  if (detailLoaded && options.loadParticipants !== false) {
+    await loadSelectedDossierParticipants(dossierId, { silent: true })
+    await loadSelectedDossierParticipantCandidates(dossierId, { silent: true })
+  }
   if (detailLoaded && options.loadGraph !== false) {
     await loadSelectedDossierGraph(dossierId, { silent: true })
+  }
+}
+
+async function loadSelectedDossierParticipants(dossierId, options = {}) {
+  if (!dossierId) {
+    resetDossierParticipantRegistryState()
+    return
+  }
+
+  dossierParticipantRegistryLoading.value = true
+  dossierParticipantRegistryState.error = ''
+  try {
+    const { data } = await getDossierParticipants(dossierId)
+    applyDossierParticipantRegistryPayload(data)
+  } catch (error) {
+    console.error('Failed to fetch dossier participants:', error)
+    dossierParticipantRegistryState.error =
+      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
+        ? error.response.data.detail
+        : '主体列表加载失败，请稍后重试'
+    if (!options.silent) {
+      ElMessage.error(dossierParticipantRegistryState.error)
+    }
+  } finally {
+    dossierParticipantRegistryLoading.value = false
+  }
+}
+
+async function loadSelectedDossierParticipantCandidates(dossierId, options = {}) {
+  if (!dossierId) {
+    dossierParticipantRegistryState.candidates = []
+    return
+  }
+
+  dossierParticipantCandidatesLoading.value = true
+  dossierParticipantRegistryState.error = ''
+  try {
+    const { data } = await getDossierParticipantCandidates(dossierId)
+    applyDossierParticipantCandidatesPayload(data)
+  } catch (error) {
+    console.error('Failed to fetch dossier participant candidates:', error)
+    dossierParticipantRegistryState.error =
+      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
+        ? error.response.data.detail
+        : '主体候选加载失败，请稍后重试'
+    if (!options.silent) {
+      ElMessage.error(dossierParticipantRegistryState.error)
+    }
+  } finally {
+    dossierParticipantCandidatesLoading.value = false
   }
 }
 
@@ -1625,6 +2000,128 @@ async function handleUpdateDossierParticipants() {
   } finally {
     dossierParticipantsSaving.value = false
   }
+}
+
+async function refreshSelectedDossierParticipantViews(options = {}) {
+  if (!selectedDossierId.value) return
+  await refreshDossiers({ silent: true, preferredDossierId: selectedDossierId.value })
+  await loadSelectedDossierDetail(selectedDossierId.value, {
+    silent: true,
+    loadParticipants: false,
+    loadGraph: false,
+  })
+  await loadSelectedDossierParticipants(selectedDossierId.value, { silent: true })
+  await loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true })
+  await loadSelectedDossierGraph(selectedDossierId.value, { silent: true })
+  if (!options.silent) {
+    ElMessage.success('主体确认已更新')
+  }
+}
+
+async function handleCreateResolvedParticipant() {
+  if (!selectedDossierId.value) return
+
+  const label = String(dossierParticipantCreateForm.label || '').trim()
+  if (!label) {
+    ElMessage.warning('请先填写主体称呼')
+    return
+  }
+
+  dossierParticipantActionLoading.value = true
+  try {
+    await createDossierParticipant(selectedDossierId.value, {
+      label,
+      role: String(dossierParticipantCreateForm.role || '').trim() || null,
+      party_side: dossierParticipantCreateForm.party_side || 'unknown',
+      entity_type: dossierParticipantCreateForm.entity_type || 'unknown',
+      description: String(dossierParticipantCreateForm.description || '').trim() || null,
+    })
+    resetDossierParticipantCreateForm()
+    await refreshSelectedDossierParticipantViews({ silent: true })
+    ElMessage.success('已新增案卷主体')
+  } catch (error) {
+    console.error('Failed to create dossier participant:', error)
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '新增主体失败')
+  } finally {
+    dossierParticipantActionLoading.value = false
+  }
+}
+
+async function handleUpdateResolvedParticipant(participant) {
+  if (!selectedDossierId.value || !participant?.id) return
+
+  dossierParticipantActionLoading.value = true
+  try {
+    await updateDossierParticipant(selectedDossierId.value, participant.id, {
+      label: String(participant.label || '').trim(),
+      role: String(participant.role || '').trim() || null,
+      party_side: participant.party_side || 'unknown',
+      entity_type: participant.entity_type || 'unknown',
+      description: String(participant.description || '').trim() || null,
+    })
+    await refreshSelectedDossierParticipantViews({ silent: true })
+    ElMessage.success('主体信息已更新')
+  } catch (error) {
+    console.error('Failed to update dossier participant:', error)
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '更新主体失败')
+  } finally {
+    dossierParticipantActionLoading.value = false
+  }
+}
+
+async function handleResolveParticipantCandidate(candidate, options = {}) {
+  if (!selectedDossierId.value || !candidate?.candidate_key) return
+
+  const participantId = options.participantId || dossierParticipantCandidateSelections[candidate.candidate_key]
+  const mentions = Array.isArray(candidate.mentions) ? candidate.mentions : []
+  if (!mentions.length) {
+    ElMessage.warning('当前候选没有可确认的主体称呼')
+    return
+  }
+
+  const payload = {
+    mentions: mentions.map((mention) => ({
+      conversation_id: mention.conversation_id,
+      raw_label: mention.raw_label,
+      source: mention.source || 'graph',
+      confidence: typeof mention.confidence === 'number' ? mention.confidence : null,
+    })),
+  }
+
+  if (participantId) {
+    payload.participant_id = participantId
+  } else {
+    payload.participant = {
+      label: candidate.suggested_label || candidate.raw_labels?.[0] || '未命名主体',
+      role: candidate.suggested_role || null,
+      party_side: candidate.party_side || 'unknown',
+      entity_type: candidate.entity_type || 'unknown',
+      description: null,
+    }
+  }
+
+  dossierParticipantActionLoading.value = true
+  try {
+    await resolveDossierParticipants(selectedDossierId.value, payload)
+    delete dossierParticipantCandidateDismissed[candidate.candidate_key]
+    await refreshSelectedDossierParticipantViews({ silent: true })
+    ElMessage.success(participantId ? '候选称呼已映射到已确认主体' : '候选称呼已新建并确认主体')
+  } catch (error) {
+    console.error('Failed to resolve dossier participant candidate:', error)
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '确认主体失败')
+  } finally {
+    dossierParticipantActionLoading.value = false
+  }
+}
+
+function handleIgnoreParticipantCandidate(candidate) {
+  const candidateKey = candidate?.candidate_key
+  if (!candidateKey) return
+  dossierParticipantCandidateDismissed[candidateKey] = true
+  ElMessage.info('已忽略该候选，可刷新后重新查看')
 }
 
 async function handleGenerateDossierSummary() {
@@ -3147,6 +3644,13 @@ body,
   background: #f8fafc;
 }
 
+.dossier-resolved-participants-section {
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
 .dossier-graph-section {
   padding: 12px;
   border: 1px solid #dbeafe;
@@ -3163,6 +3667,60 @@ body,
 
 .dossier-participants-hint {
   margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
+.dossier-resolved-participants-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dossier-resolved-participant-list,
+.dossier-participant-candidate-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-resolved-participant-card,
+.dossier-participant-create-card,
+.dossier-participant-candidate-card {
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.dossier-resolved-participant-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dossier-resolved-participant-actions,
+.dossier-participant-candidate-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-participant-candidate-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.dossier-participant-candidate-meta {
+  margin-top: 6px;
   font-size: 12px;
   line-height: 1.6;
   color: #6b7280;
@@ -3605,6 +4163,7 @@ body,
   .dossier-graph-stats,
   .dossier-graph-aliases,
   .dossier-participants-grid,
+  .dossier-resolved-participant-grid,
   .tracked-onboarding-grid {
     grid-template-columns: 1fr;
   }

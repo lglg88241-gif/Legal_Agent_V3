@@ -345,6 +345,109 @@ def _format_dossier_graph_summary_block(dossier_graph_summary: str | None) -> st
     return dossier_graph_summary.strip()
 
 
+def _format_dossier_context_block_v2(dossier_context: dict[str, Any] | None) -> str:
+    if not isinstance(dossier_context, dict):
+        return ""
+
+    title = str(dossier_context.get("title") or "").strip() or "未命名案卷"
+    case_type = str(dossier_context.get("case_type") or "").strip() or "未分类"
+    summary = str(dossier_context.get("summary") or "").strip() or "暂无案卷摘要"
+    status = str(dossier_context.get("status") or "").strip() or "active"
+    conversation_count = int(dossier_context.get("conversation_count") or 0)
+    active_conversation_id = dossier_context.get("active_conversation_id")
+    conversations = dossier_context.get("conversations")
+    participant_aliases = dossier_context.get("participant_aliases")
+    confirmed_participants = dossier_context.get("confirmed_participants")
+
+    conversation_lines: list[str] = []
+    if isinstance(conversations, list):
+        for index, item in enumerate(conversations[:5], start=1):
+            if not isinstance(item, dict):
+                continue
+            conversation_id = item.get("id")
+            title_text = str(item.get("title") or "").strip() or f"会话 #{conversation_id or index}"
+            mode = str(item.get("conversation_mode") or "UNKNOWN").strip()
+            consent = str(item.get("persistence_consent") or "unknown").strip()
+            summary_text = str(item.get("case_summary") or "").strip()
+            case_type_text = str(item.get("case_type") or "").strip()
+            markers: list[str] = [f"mode={mode}", f"consent={consent}"]
+            if case_type_text:
+                markers.append(f"case_type={case_type_text}")
+            if conversation_id == active_conversation_id:
+                markers.append("current_conversation=true")
+            line = f"{index}. {title_text} ({', '.join(markers)})"
+            if summary_text:
+                line += f" | 摘要：{summary_text[:120]}"
+            conversation_lines.append(line)
+
+    if not conversation_lines:
+        conversation_lines.append("无已绑定会话摘要")
+
+    participant_lines: list[str] = []
+    if isinstance(confirmed_participants, list):
+        for item in confirmed_participants:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            role = str(item.get("role") or "").strip()
+            party_side = str(item.get("party_side") or "").strip() or "unknown"
+            entity_type = str(item.get("entity_type") or "").strip() or "unknown"
+            if not label and not role:
+                continue
+            participant_lines.append(
+                f"- label={label or '未填写'}; role={role or '未填写'}; "
+                f"party_side={party_side}; entity_type={entity_type}; confirmed_by_user=true"
+            )
+
+    alias_lines: list[str] = []
+    if isinstance(participant_aliases, dict):
+        for key in ("primary_party", "opposing_party"):
+            item = participant_aliases.get(key)
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            role = str(item.get("role") or "").strip()
+            party_side = str(item.get("party_side") or "").strip()
+            confirmed = bool(item.get("confirmed_by_user"))
+            if not label and not role:
+                continue
+            alias_lines.append(
+                f"- {key}: label={label or '未填写'}; role={role or '未填写'}; "
+                f"party_side={party_side or key}; confirmed_by_user={str(confirmed).lower()}"
+            )
+
+    if not participant_lines:
+        participant_lines.append("- confirmed_participants: none")
+    if not alias_lines:
+        alias_lines.append("- participant_aliases: none")
+
+    return (
+        "<dossier_context>\n"
+        "[案卷上下文]\n"
+        f"标题：{title}\n"
+        f"类型：{case_type}\n"
+        f"摘要：{summary}\n"
+        f"状态：{status}\n"
+        f"绑定会话数量：{conversation_count}\n"
+        "confirmed_participants:\n"
+        f"{chr(10).join(participant_lines)}\n"
+        "participant_aliases:\n"
+        f"{chr(10).join(alias_lines)}\n"
+        "已绑定会话：\n"
+        f"{chr(10).join(conversation_lines)}\n"
+        "使用规则：案卷上下文只能作为背景记忆和事实线索，不能替代检索到的法律原文、案例或其他 RAG 依据。\n"
+        "confirmed participant labels 和 participant_aliases 都只是当前案卷内用户确认的称呼，不等同真实姓名；不得编造其真实身份、背景信息或补充用户未提供的新事实。\n"
+        "confirmed participant labels 和 participant_aliases 仅在当前案卷内生效。\n"
+        "未经用户确认的主体只能视为未确认 mention，不得直接视为同一主体。\n"
+        "不得跨案卷自动合并同名主体；不同案卷中的“我”“公司”“对方”默认不是同一实体。\n"
+        "如果案卷上下文与本轮用户输入冲突，优先指出冲突并向用户澄清，不要直接沿用旧案情。\n"
+        "</dossier_context>"
+    )
+
+
+_format_dossier_context_block = _format_dossier_context_block_v2
+
+
 def _build_guard_rag_context(
     laws_block: str,
     cases_block: str,
