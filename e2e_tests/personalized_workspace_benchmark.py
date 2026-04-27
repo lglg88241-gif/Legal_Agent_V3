@@ -9,9 +9,11 @@ This benchmark is intentionally separate from quality_benchmark.py:
 from __future__ import annotations
 
 import argparse
+import builtins
 import io
 import json
 import random
+import re
 import string
 import sys
 import time
@@ -30,9 +32,15 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         sys.stderr.buffer, encoding="utf-8", errors="replace"
     )
 
+
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    return builtins.print(*args, **kwargs)
+
 BASE_URL = "http://127.0.0.1:8000"
 POLL_INTERVAL = 1.5
 POLL_TIMEOUT = 120
+POLL_PROGRESS_INTERVAL = 10.0
 WORKSPACE_GRAPH_POLL_INTERVAL = 2.0
 WORKSPACE_GRAPH_TIMEOUT_SMOKE = 60.0
 WORKSPACE_GRAPH_TIMEOUT_FULL = 90.0
@@ -66,6 +74,31 @@ class BenchmarkCase:
         return all(check.passed for check in self.checks)
 
 
+@dataclass(frozen=True)
+class WorkspaceCasePlan:
+    code: str
+    key: str
+    name: str
+    turns: int
+    checks: int
+
+
+@dataclass(frozen=True)
+class WorkspaceTurnProgress:
+    case_index: int
+    case_total: int
+    case_key: str
+    turn_index: int
+    turn_total: int
+
+
+@dataclass
+class WorkspaceRunProgress:
+    case_total: int
+    check_total: int
+    check_index: int = 0
+
+
 def print_case(case: BenchmarkCase) -> None:
     passed, total = case.score
     icon = "[PASS]" if case.passed else "[FAIL]"
@@ -79,6 +112,202 @@ def print_case(case: BenchmarkCase) -> None:
     print(f"  Score: {passed}/{total}")
     if case.notes:
         print(f"  Notes: {json.dumps(case.notes, ensure_ascii=False)}")
+
+
+WORKSPACE_CASE_PLANS = [
+    WorkspaceCasePlan("A", "A_legal_qa", "A LEGAL_QA does not write structured case or graph", 1, 7),
+    WorkspaceCasePlan("B", "B_temporary", "B temporary mode keeps plain messages but skips structured persistence", 2, 9),
+    WorkspaceCasePlan("C", "C_tracked", "C tracked mode writes structured case and graph", 2, 7),
+    WorkspaceCasePlan("D", "D_dossier_binding", "D dossier creation and tracked conversation attachment", 0, 5),
+    WorkspaceCasePlan("E", "E_dossier_created_conversation", "E dossier-bound conversation defaults to tracked", 0, 4),
+    WorkspaceCasePlan("F", "F_memory_query", "F dossier memory query answers from dossier context", 1, 3),
+    WorkspaceCasePlan("G", "G_explicit_law_query", "G explicit law query in dossier conversation still behaves like legal QA", 1, 5),
+    WorkspaceCasePlan("H", "H_participant_resolution", "H participant candidates and confirmation API flow", 1, 7),
+    WorkspaceCasePlan("I", "I_archive_semantics", "I archive dossier keeps historical data accessible", 0, 4),
+]
+
+
+def _workspace_case_plans(smoke: bool) -> list[WorkspaceCasePlan]:
+    if smoke:
+        return WORKSPACE_CASE_PLANS[:7]
+    return WORKSPACE_CASE_PLANS[:]
+
+
+def _format_seconds(value: float | int) -> str:
+    return f"{float(value):.1f}s"
+
+
+def _preview_text(text: str, limit: int = 80) -> str:
+    compact = " ".join(str(text or "").strip().split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _workspace_status_label(status: str | None) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized in {"completed", "success"}:
+        return "success"
+    return normalized or "unknown"
+
+
+def _workspace_check_key(label: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", str(label or "").strip().lower()).strip("_")
+    return slug or "check"
+
+
+def _workspace_case_prefix(progress: WorkspaceTurnProgress) -> str:
+    return (
+        f"[workspace] case {progress.case_index}/{progress.case_total} "
+        f"{progress.case_key}"
+    )
+
+
+def _build_workspace_turn_progress(
+    *,
+    case_index: int,
+    case_total: int,
+    case_key: str,
+    turn_index: int,
+    turn_total: int,
+) -> WorkspaceTurnProgress:
+    return WorkspaceTurnProgress(
+        case_index=case_index,
+        case_total=case_total,
+        case_key=case_key,
+        turn_index=turn_index,
+        turn_total=turn_total,
+    )
+
+
+def _workspace_case_start(
+    *,
+    case_index: int,
+    case_total: int,
+    case_key: str,
+) -> float:
+    print(f"[workspace] case {case_index}/{case_total} {case_key} START")
+    return time.perf_counter()
+
+
+def _workspace_log_turn_send(progress: WorkspaceTurnProgress, text: str) -> None:
+    print(
+        f"{_workspace_case_prefix(progress)} turn {progress.turn_index}/{progress.turn_total} "
+        f'SEND query="{_preview_text(text)}"'
+    )
+
+
+def _workspace_log_turn_polling(progress: WorkspaceTurnProgress, task_id: str) -> None:
+    print(
+        f"{_workspace_case_prefix(progress)} turn {progress.turn_index}/{progress.turn_total} "
+        f"task_id={task_id} POLLING"
+    )
+
+
+def _workspace_log_turn_running(progress: WorkspaceTurnProgress, elapsed_s: float) -> None:
+    print(
+        f"{_workspace_case_prefix(progress)} turn {progress.turn_index}/{progress.turn_total} "
+        f"still running elapsed={int(elapsed_s)}s"
+    )
+
+
+def _workspace_log_turn_done(
+    progress: WorkspaceTurnProgress,
+    result: dict[str, Any],
+) -> None:
+    status = _workspace_status_label(result.get("status"))
+    latency_s = float(result.get("latency_ms", 0) or 0) / 1000.0
+    extra = ""
+    error = str(result.get("error") or "").strip()
+    if error:
+        extra += f" error={error}"
+    message = str(result.get("message") or "").strip()
+    if message:
+        extra += f' message="{_preview_text(message, 120)}"'
+    print(
+        f"{_workspace_case_prefix(progress)} turn {progress.turn_index}/{progress.turn_total} "
+        f"DONE status={status}{extra} latency={_format_seconds(latency_s)}"
+    )
+
+
+def _workspace_log_check(
+    progress: WorkspaceRunProgress,
+    check: CheckResult,
+) -> None:
+    progress.check_index += 1
+    status = "PASS" if check.passed else "FAIL"
+    detail = f" reason={check.detail}" if check.detail else ""
+    print(
+        f"[workspace] check {progress.check_index}/{progress.check_total} "
+        f"{_workspace_check_key(check.label)} {status}{detail}"
+    )
+
+
+def _workspace_log_case_end(
+    case: BenchmarkCase,
+    *,
+    case_index: int,
+    case_total: int,
+    case_key: str,
+    started: float,
+) -> None:
+    passed, total = case.score
+    elapsed_s = time.perf_counter() - started
+    latency_ms = 0
+    try:
+        latency_ms = int(case.notes.get("latency_ms", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        latency_ms = 0
+    latency_s = (latency_ms / 1000.0) if latency_ms > 0 else elapsed_s
+    if case.passed:
+        print(
+            f"[workspace] case {case_index}/{case_total} PASS {case_key} "
+            f"score={passed}/{total} latency={_format_seconds(latency_s)} "
+            f"elapsed={_format_seconds(elapsed_s)}"
+        )
+        return
+
+    failed_check = next((check for check in case.checks if not check.passed), None)
+    reason = failed_check.label if failed_check else "case_failed"
+    if failed_check and failed_check.detail:
+        reason = f"{reason} | {failed_check.detail}"
+    print(
+        f"[workspace] case {case_index}/{case_total} FAIL {case_key} "
+        f"score={passed}/{total} latency={_format_seconds(latency_s)} "
+        f"elapsed={_format_seconds(elapsed_s)} reason={reason}"
+    )
+
+
+def _record_workspace_case(
+    *,
+    case: BenchmarkCase,
+    case_index: int,
+    case_total: int,
+    case_key: str,
+    started: float,
+    progress: WorkspaceRunProgress,
+) -> None:
+    for check in case.checks:
+        _workspace_log_check(progress, check)
+    _workspace_log_case_end(
+        case,
+        case_index=case_index,
+        case_total=case_total,
+        case_key=case_key,
+        started=started,
+    )
+
+
+def _latency_sum_ms(*results: dict[str, Any] | None) -> int:
+    total = 0
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        try:
+            total += int(result.get("latency_ms", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 def random_username(prefix: str = "workspace_bench_") -> str:
@@ -341,6 +570,44 @@ def start_dialog(
     )
 
 
+def run_dialog_once(
+    headers: dict[str, str],
+    *,
+    conversation_id: int,
+    text: str,
+    force_current_case: bool = False,
+    mode_consent_enabled: bool = False,
+    proactive_graph_mode: bool = True,
+    progress: WorkspaceTurnProgress | None = None,
+) -> tuple[int, dict[str, Any] | str, dict[str, Any]]:
+    started = time.perf_counter()
+    if progress is not None:
+        _workspace_log_turn_send(progress, text)
+    status_code, payload = start_dialog(
+        headers,
+        conversation_id=conversation_id,
+        text=text,
+        force_current_case=force_current_case,
+        mode_consent_enabled=mode_consent_enabled,
+        proactive_graph_mode=proactive_graph_mode,
+    )
+    if isinstance(payload, dict):
+        normalized = _normalize_dialog_result(
+            payload,
+            fallback_latency_ms=int((time.perf_counter() - started) * 1000),
+            default_status=str(payload.get("status") or "completed"),
+        )
+    else:
+        normalized = _normalize_dialog_result(
+            {"status": "failed", "error": f"HTTP {status_code}", "message": str(payload)},
+            fallback_latency_ms=int((time.perf_counter() - started) * 1000),
+            default_status="failed",
+        )
+    if progress is not None:
+        _workspace_log_turn_done(progress, normalized)
+    return status_code, payload, normalized
+
+
 def _normalize_dialog_result(
     payload: dict[str, Any] | None,
     *,
@@ -385,8 +652,11 @@ def run_dialog(
     mode_consent_enabled: bool = False,
     proactive_graph_mode: bool = True,
     auto_confirm_boundary: bool = True,
+    progress: WorkspaceTurnProgress | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     started = time.perf_counter()
+    if progress is not None:
+        _workspace_log_turn_send(progress, text)
     status_code, first = start_dialog(
         headers,
         conversation_id=conversation_id,
@@ -401,6 +671,8 @@ def run_dialog(
             fallback_latency_ms=int((time.perf_counter() - started) * 1000),
             default_status="failed",
         )
+        if progress is not None:
+            _workspace_log_turn_done(progress, result)
         return (first if isinstance(first, dict) else {"status": "failed"}), result
 
     first_payload = first if isinstance(first, dict) else {"status": "failed", "message": str(first)}
@@ -410,6 +682,13 @@ def run_dialog(
         and first_payload.get("action") == "suggest_new_case"
         and not force_current_case
     ):
+        if progress is not None:
+            interim = _normalize_dialog_result(
+                first_payload,
+                fallback_latency_ms=int((time.perf_counter() - started) * 1000),
+                default_status="needs_confirmation",
+            )
+            _workspace_log_turn_done(progress, interim)
         return run_dialog(
             headers,
             conversation_id=conversation_id,
@@ -418,6 +697,7 @@ def run_dialog(
             mode_consent_enabled=mode_consent_enabled,
             proactive_graph_mode=proactive_graph_mode,
             auto_confirm_boundary=False,
+            progress=progress,
         )
 
     if first_payload.get("status") == "needs_confirmation":
@@ -426,6 +706,8 @@ def run_dialog(
             fallback_latency_ms=int((time.perf_counter() - started) * 1000),
             default_status="needs_confirmation",
         )
+        if progress is not None:
+            _workspace_log_turn_done(progress, result)
         return first_payload, result
 
     task_id = first_payload.get("task_id")
@@ -435,10 +717,19 @@ def run_dialog(
             fallback_latency_ms=int((time.perf_counter() - started) * 1000),
             default_status=str(first_payload.get("status") or "completed"),
         )
+        if progress is not None:
+            _workspace_log_turn_done(progress, result)
         return first_payload, result
 
+    if progress is not None:
+        _workspace_log_turn_polling(progress, str(task_id))
+    next_progress_log_s = POLL_PROGRESS_INTERVAL
     for _ in range(int(POLL_TIMEOUT / POLL_INTERVAL)):
         time.sleep(POLL_INTERVAL)
+        elapsed_s = time.perf_counter() - started
+        if progress is not None and elapsed_s >= next_progress_log_s:
+            _workspace_log_turn_running(progress, elapsed_s)
+            next_progress_log_s += POLL_PROGRESS_INTERVAL
         status_code, payload = request_json(
             "GET",
             f"/dialog/status/{task_id}",
@@ -452,6 +743,8 @@ def run_dialog(
                 payload.get("data", {}) if isinstance(payload.get("data"), dict) else {},
                 fallback_latency_ms=int((time.perf_counter() - started) * 1000),
             )
+            if progress is not None:
+                _workspace_log_turn_done(progress, result)
             return first_payload, result
         if payload.get("status") == "failed":
             result = _normalize_dialog_result(
@@ -463,6 +756,8 @@ def run_dialog(
                 fallback_latency_ms=int((time.perf_counter() - started) * 1000),
                 default_status="failed",
             )
+            if progress is not None:
+                _workspace_log_turn_done(progress, result)
             return first_payload, result
 
     result = _normalize_dialog_result(
@@ -470,6 +765,8 @@ def run_dialog(
         fallback_latency_ms=int((time.perf_counter() - started) * 1000),
         default_status="failed",
     )
+    if progress is not None:
+        _workspace_log_turn_done(progress, result)
     return first_payload, result
 
 
@@ -593,26 +890,31 @@ def parse_args() -> argparse.Namespace:
 
 
 def planned_case_names(smoke: bool) -> list[str]:
-    cases = [
-        "A LEGAL_QA does not write structured case or graph",
-        "B temporary mode keeps plain messages but skips structured persistence",
-        "C tracked mode writes structured case and graph",
-        "D dossier creation and tracked conversation attachment",
-        "E dossier-bound conversation defaults to tracked",
-        "F dossier memory query answers from dossier context",
-        "G explicit law query in dossier conversation still behaves like legal QA",
-    ]
-    if not smoke:
-        cases.extend(
-            [
-                "H participant candidates and confirmation API flow",
-                "I archive dossier keeps historical data accessible",
-            ]
-        )
-    return cases
+    return [plan.name for plan in _workspace_case_plans(smoke)]
 
 
 def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any]:
+    benchmark_started = time.perf_counter()
+    case_plans = _workspace_case_plans(smoke)
+    plan_by_code = {plan.code: plan for plan in case_plans}
+    run_progress = WorkspaceRunProgress(
+        case_total=len(case_plans),
+        check_total=sum(plan.checks for plan in case_plans),
+    )
+    planned_turns = sum(plan.turns for plan in case_plans)
+    print("=" * 72)
+    print("Personalized workspace benchmark")
+    print(f"time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(
+        f"planned: cases={run_progress.case_total} turns={planned_turns} "
+        f"checks={run_progress.check_total}"
+    )
+    print(
+        f"mode: smoke={smoke} username={username or '<random>'} "
+        f"password={'***' if password else '<empty>'}"
+    )
+    print("=" * 72)
+
     status_code, _ = request_json("GET", "/health", timeout=5)
     if status_code != 200:
         raise AssertionError("Backend health check failed before benchmark run")
@@ -633,6 +935,12 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
     memory_question = "这个案卷里之前提到的公司是谁？"
 
     # A
+    plan = plan_by_code["A"]
+    case_started = _workspace_case_start(
+        case_index=1,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+    )
     conversation_a = create_conversation(headers, title="workspace-A-legal-qa")
     first_a, result_a = run_dialog(
         headers,
@@ -640,45 +948,73 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         text=legal_question,
         mode_consent_enabled=False,
         proactive_graph_mode=True,
+        progress=_build_workspace_turn_progress(
+            case_index=1,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
     )
     snapshot_a = get_conversation_snapshot(headers, conversation_a["id"])
     graph_a = get_conversation_graph(headers, conversation_a["id"])
     record_a = get_conversation_record(snapshot_a)
-    cases.append(
-        BenchmarkCase(
-            code="A",
-            name="LEGAL_QA pure legal question does not enter structured workspace state",
-            notes={
-                "route_intent": result_a.get("route_intent"),
-                "sources_count": len(result_a.get("sources", [])),
-            },
-            checks=[
-                CheckResult("dialog completed", result_a.get("status") == "completed", str(result_a.get("status"))),
-                CheckResult(
-                    "no mode-consent prompt",
-                    first_a.get("status") != "needs_confirmation",
-                    str(first_a.get("status")),
-                ),
-                CheckResult(
-                    "route is not CASE_UPDATE",
-                    str(result_a.get("route_intent") or "").upper() != "CASE_UPDATE",
-                    str(result_a.get("route_intent") or ""),
-                ),
-                CheckResult("case_summary stays empty", not (record_a.get("case_summary") or "").strip()),
-                CheckResult("case_type stays empty", not (record_a.get("case_type") or "").strip()),
-                CheckResult("case_state stays empty", record_a.get("case_state") in (None, {}, "")),
-                CheckResult("conversation graph stays empty", is_empty_graph(graph_a)),
-            ],
-        )
+    case_a = BenchmarkCase(
+        code="A",
+        name="LEGAL_QA pure legal question does not enter structured workspace state",
+        notes={
+            "route_intent": result_a.get("route_intent"),
+            "sources_count": len(result_a.get("sources", [])),
+            "latency_ms": _latency_sum_ms(result_a),
+        },
+        checks=[
+            CheckResult("dialog completed", result_a.get("status") == "completed", str(result_a.get("status"))),
+            CheckResult(
+                "no mode-consent prompt",
+                first_a.get("status") != "needs_confirmation",
+                str(first_a.get("status")),
+            ),
+            CheckResult(
+                "route is not CASE_UPDATE",
+                str(result_a.get("route_intent") or "").upper() != "CASE_UPDATE",
+                str(result_a.get("route_intent") or ""),
+            ),
+            CheckResult("case_summary stays empty", not (record_a.get("case_summary") or "").strip()),
+            CheckResult("case_type stays empty", not (record_a.get("case_type") or "").strip()),
+            CheckResult("case_state stays empty", record_a.get("case_state") in (None, {}, "")),
+            CheckResult("conversation graph stays empty", is_empty_graph(graph_a)),
+        ],
+    )
+    cases.append(case_a)
+    _record_workspace_case(
+        case=case_a,
+        case_index=1,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+        started=case_started,
+        progress=run_progress,
     )
 
     # B
+    plan = plan_by_code["B"]
+    case_started = _workspace_case_start(
+        case_index=2,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+    )
     conversation_b = create_conversation(headers, title="workspace-B-temporary")
-    first_b_status, first_b_payload = start_dialog(
+    first_b_status, first_b_payload, first_b_result = run_dialog_once(
         headers,
         conversation_id=conversation_b["id"],
         text=case_message,
         mode_consent_enabled=True,
+        progress=_build_workspace_turn_progress(
+            case_index=2,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
     )
     first_b = first_b_payload if isinstance(first_b_payload, dict) else {"status": f"HTTP {first_b_status}"}
     consent_b = set_conversation_mode_consent(
@@ -693,36 +1029,66 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         conversation_id=conversation_b["id"],
         text=case_message,
         mode_consent_enabled=False,
+        progress=_build_workspace_turn_progress(
+            case_index=2,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            turn_index=2,
+            turn_total=plan.turns,
+        ),
     )
     snapshot_b = get_conversation_snapshot(headers, conversation_b["id"])
     graph_b = get_conversation_graph(headers, conversation_b["id"])
     record_b = get_conversation_record(snapshot_b)
-    cases.append(
-        BenchmarkCase(
-            code="B",
-            name="temporary consent keeps plain messages but skips structured persistence",
-            notes={"route_intent": result_b.get("route_intent")},
-            checks=[
-                CheckResult("mode consent prompt appears", first_b.get("status") == "needs_confirmation", str(first_b)),
-                CheckResult("mode consent action is mode_consent", first_b.get("action") == "mode_consent", str(first_b.get("action"))),
-                CheckResult("temporary consent stored", consent_b.get("persistence_consent") == "temporary", json.dumps(consent_b, ensure_ascii=False)),
-                CheckResult("conversation mode stored as CASE_ANALYSIS", consent_b.get("conversation_mode") == "CASE_ANALYSIS", json.dumps(consent_b, ensure_ascii=False)),
-                CheckResult("dialog completed", result_b.get("status") == "completed", str(result_b.get("status"))),
-                CheckResult("case_summary stays empty", not (record_b.get("case_summary") or "").strip()),
-                CheckResult("case_type stays empty", not (record_b.get("case_type") or "").strip()),
-                CheckResult("case_state stays empty", record_b.get("case_state") in (None, {}, "")),
-                CheckResult("conversation graph stays empty", is_empty_graph(graph_b)),
-            ],
-        )
+    case_b = BenchmarkCase(
+        code="B",
+        name="temporary consent keeps plain messages but skips structured persistence",
+        notes={
+            "route_intent": result_b.get("route_intent"),
+            "latency_ms": _latency_sum_ms(first_b_result, result_b),
+        },
+        checks=[
+            CheckResult("mode consent prompt appears", first_b.get("status") == "needs_confirmation", str(first_b)),
+            CheckResult("mode consent action is mode_consent", first_b.get("action") == "mode_consent", str(first_b.get("action"))),
+            CheckResult("temporary consent stored", consent_b.get("persistence_consent") == "temporary", json.dumps(consent_b, ensure_ascii=False)),
+            CheckResult("conversation mode stored as CASE_ANALYSIS", consent_b.get("conversation_mode") == "CASE_ANALYSIS", json.dumps(consent_b, ensure_ascii=False)),
+            CheckResult("dialog completed", result_b.get("status") == "completed", str(result_b.get("status"))),
+            CheckResult("case_summary stays empty", not (record_b.get("case_summary") or "").strip()),
+            CheckResult("case_type stays empty", not (record_b.get("case_type") or "").strip()),
+            CheckResult("case_state stays empty", record_b.get("case_state") in (None, {}, "")),
+            CheckResult("conversation graph stays empty", is_empty_graph(graph_b)),
+        ],
+    )
+    cases.append(case_b)
+    _record_workspace_case(
+        case=case_b,
+        case_index=2,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+        started=case_started,
+        progress=run_progress,
     )
 
     # C
+    plan = plan_by_code["C"]
+    case_started = _workspace_case_start(
+        case_index=3,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+    )
     conversation_c = create_conversation(headers, title="workspace-C-tracked")
-    first_c_status, first_c_payload = start_dialog(
+    first_c_status, first_c_payload, first_c_result = run_dialog_once(
         headers,
         conversation_id=conversation_c["id"],
         text=case_message,
         mode_consent_enabled=True,
+        progress=_build_workspace_turn_progress(
+            case_index=3,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
     )
     first_c = first_c_payload if isinstance(first_c_payload, dict) else {"status": f"HTTP {first_c_status}"}
     consent_c = set_conversation_mode_consent(
@@ -737,6 +1103,13 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         conversation_id=conversation_c["id"],
         text=case_message,
         mode_consent_enabled=False,
+        progress=_build_workspace_turn_progress(
+            case_index=3,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            turn_index=2,
+            turn_total=plan.turns,
+        ),
     )
     snapshot_c, graph_c, graph_c_timeout_detail = wait_for_tracked_graph_update(
         headers,
@@ -744,43 +1117,57 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         smoke=smoke,
     )
     record_c = get_conversation_record(snapshot_c)
-    cases.append(
-        BenchmarkCase(
-            code="C",
-            name="tracked consent writes structured case and graph",
-            notes={
-                "route_intent": result_c.get("route_intent"),
-                "graph_stats": graph_c.get("stats") or graph_c.get("graph", {}).get("stats", {}),
-                "graph_wait_timeout": graph_c_timeout_detail,
-            },
-            checks=[
-                CheckResult("mode consent prompt appears", first_c.get("status") == "needs_confirmation", str(first_c)),
-                CheckResult("tracked consent stored", consent_c.get("persistence_consent") == "tracked", json.dumps(consent_c, ensure_ascii=False)),
-                CheckResult("conversation mode stored as TRACKED_CASE", consent_c.get("conversation_mode") == "TRACKED_CASE", json.dumps(consent_c, ensure_ascii=False)),
-                CheckResult("dialog completed", result_c.get("status") == "completed", str(result_c.get("status"))),
-                CheckResult("case_summary is populated", bool((record_c.get("case_summary") or "").strip()), record_c.get("case_summary", "")),
-                CheckResult(
-                    "case_type or case_state is populated",
-                    bool((record_c.get("case_type") or "").strip()) or record_c.get("case_state") not in (None, {}, ""),
-                    json.dumps(
-                        {
-                            "case_type": record_c.get("case_type"),
-                            "case_state_present": record_c.get("case_state") not in (None, {}, ""),
-                        },
-                        ensure_ascii=False,
-                    ),
+    case_c = BenchmarkCase(
+        code="C",
+        name="tracked consent writes structured case and graph",
+        notes={
+            "route_intent": result_c.get("route_intent"),
+            "graph_stats": graph_c.get("stats") or graph_c.get("graph", {}).get("stats", {}),
+            "graph_wait_timeout": graph_c_timeout_detail,
+            "latency_ms": _latency_sum_ms(first_c_result, result_c),
+        },
+        checks=[
+            CheckResult("mode consent prompt appears", first_c.get("status") == "needs_confirmation", str(first_c)),
+            CheckResult("tracked consent stored", consent_c.get("persistence_consent") == "tracked", json.dumps(consent_c, ensure_ascii=False)),
+            CheckResult("conversation mode stored as TRACKED_CASE", consent_c.get("conversation_mode") == "TRACKED_CASE", json.dumps(consent_c, ensure_ascii=False)),
+            CheckResult("dialog completed", result_c.get("status") == "completed", str(result_c.get("status"))),
+            CheckResult("case_summary is populated", bool((record_c.get("case_summary") or "").strip()), record_c.get("case_summary", "")),
+            CheckResult(
+                "case_type or case_state is populated",
+                bool((record_c.get("case_type") or "").strip()) or record_c.get("case_state") not in (None, {}, ""),
+                json.dumps(
+                    {
+                        "case_type": record_c.get("case_type"),
+                        "case_state_present": record_c.get("case_state") not in (None, {}, ""),
+                    },
+                    ensure_ascii=False,
                 ),
-                CheckResult(
-                    "conversation graph is not empty",
-                    not is_empty_graph(graph_c),
-                    graph_c_timeout_detail,
-                ),
-            ],
-        )
+            ),
+            CheckResult(
+                "conversation graph is not empty",
+                not is_empty_graph(graph_c),
+                graph_c_timeout_detail,
+            ),
+        ],
+    )
+    cases.append(case_c)
+    _record_workspace_case(
+        case=case_c,
+        case_index=3,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+        started=case_started,
+        progress=run_progress,
     )
     context["tracked_conversation_id"] = conversation_c["id"]
 
     # D
+    plan = plan_by_code["D"]
+    case_started = _workspace_case_start(
+        case_index=4,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+    )
     dossier = create_dossier(
         headers,
         title="劳动争议测试案卷",
@@ -800,119 +1187,187 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
     dossier_detail = get_dossier(headers, dossier["id"])
     snapshot_c_after_attach = get_conversation_snapshot(headers, conversation_c["id"])
     record_c_after_attach = get_conversation_record(snapshot_c_after_attach)
-    cases.append(
-        BenchmarkCase(
-            code="D",
-            name="dossier creation and tracked conversation binding",
-            notes={"dossier_id": dossier["id"]},
-            checks=[
-                CheckResult(
-                    "dossier appears in dossier list",
-                    any(int(item.get("id") or 0) == dossier["id"] for item in dossier_list),
-                    f"list_count={len(dossier_list)}",
-                ),
-                CheckResult(
-                    "attach-dossier returns conversation binding",
-                    int(attached_c.get("dossier_id") or 0) == dossier["id"],
-                    json.dumps(attached_c, ensure_ascii=False),
-                ),
-                CheckResult(
-                    "conversation snapshot shows dossier_id",
-                    int(record_c_after_attach.get("dossier_id") or 0) == dossier["id"],
-                    json.dumps(record_c_after_attach, ensure_ascii=False),
-                ),
-                CheckResult(
-                    "dossier detail shows bound conversation",
-                    any(int(item.get("id") or 0) == conversation_c["id"] for item in dossier_detail.get("conversations", [])),
-                    f"conversation_count={dossier_detail.get('conversation_count')}",
-                ),
-                CheckResult(
-                    "participant aliases saved on dossier",
-                    str(dossier_detail.get("participant_aliases", {}).get("opposing_party", {}).get("label") or "") == "A公司",
-                    json.dumps(dossier_detail.get("participant_aliases", {}), ensure_ascii=False),
-                ),
-            ],
-        )
+    case_d = BenchmarkCase(
+        code="D",
+        name="dossier creation and tracked conversation binding",
+        notes={"dossier_id": dossier["id"], "latency_ms": 0},
+        checks=[
+            CheckResult(
+                "dossier appears in dossier list",
+                any(int(item.get("id") or 0) == dossier["id"] for item in dossier_list),
+                f"list_count={len(dossier_list)}",
+            ),
+            CheckResult(
+                "attach-dossier returns conversation binding",
+                int(attached_c.get("dossier_id") or 0) == dossier["id"],
+                json.dumps(attached_c, ensure_ascii=False),
+            ),
+            CheckResult(
+                "conversation snapshot shows dossier_id",
+                int(record_c_after_attach.get("dossier_id") or 0) == dossier["id"],
+                json.dumps(record_c_after_attach, ensure_ascii=False),
+            ),
+            CheckResult(
+                "dossier detail shows bound conversation",
+                any(int(item.get("id") or 0) == conversation_c["id"] for item in dossier_detail.get("conversations", [])),
+                f"conversation_count={dossier_detail.get('conversation_count')}",
+            ),
+            CheckResult(
+                "participant aliases saved on dossier",
+                str(dossier_detail.get("participant_aliases", {}).get("opposing_party", {}).get("label") or "") == "A公司",
+                json.dumps(dossier_detail.get("participant_aliases", {}), ensure_ascii=False),
+            ),
+        ],
+    )
+    cases.append(case_d)
+    _record_workspace_case(
+        case=case_d,
+        case_index=4,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+        started=case_started,
+        progress=run_progress,
     )
     context["dossier_id"] = dossier["id"]
 
     # E
+    plan = plan_by_code["E"]
+    case_started = _workspace_case_start(
+        case_index=5,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+    )
     dossier_conversation = create_conversation(
         headers,
         title="workspace-E-dossier-bound",
         dossier_id=dossier["id"],
     )
-    cases.append(
-        BenchmarkCase(
-            code="E",
-            name="creating a conversation from dossier binds tracked defaults immediately",
-            notes={"conversation_id": dossier_conversation["id"]},
-            checks=[
-                CheckResult("conversation is bound to dossier", int(dossier_conversation.get("dossier_id") or 0) == dossier["id"], json.dumps(dossier_conversation, ensure_ascii=False)),
-                CheckResult("conversation mode defaults to TRACKED_CASE", dossier_conversation.get("conversation_mode") == "TRACKED_CASE", json.dumps(dossier_conversation, ensure_ascii=False)),
-                CheckResult("persistence consent defaults to tracked", dossier_conversation.get("persistence_consent") == "tracked", json.dumps(dossier_conversation, ensure_ascii=False)),
-                CheckResult("mode reason is created_from_dossier", dossier_conversation.get("mode_reason") == "created_from_dossier", json.dumps(dossier_conversation, ensure_ascii=False)),
-            ],
-        )
+    case_e = BenchmarkCase(
+        code="E",
+        name="creating a conversation from dossier binds tracked defaults immediately",
+        notes={"conversation_id": dossier_conversation["id"], "latency_ms": 0},
+        checks=[
+            CheckResult("conversation is bound to dossier", int(dossier_conversation.get("dossier_id") or 0) == dossier["id"], json.dumps(dossier_conversation, ensure_ascii=False)),
+            CheckResult("conversation mode defaults to TRACKED_CASE", dossier_conversation.get("conversation_mode") == "TRACKED_CASE", json.dumps(dossier_conversation, ensure_ascii=False)),
+            CheckResult("persistence consent defaults to tracked", dossier_conversation.get("persistence_consent") == "tracked", json.dumps(dossier_conversation, ensure_ascii=False)),
+            CheckResult("mode reason is created_from_dossier", dossier_conversation.get("mode_reason") == "created_from_dossier", json.dumps(dossier_conversation, ensure_ascii=False)),
+        ],
+    )
+    cases.append(case_e)
+    _record_workspace_case(
+        case=case_e,
+        case_index=5,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+        started=case_started,
+        progress=run_progress,
     )
     context["dossier_conversation_id"] = dossier_conversation["id"]
 
     # F
+    plan = plan_by_code["F"]
+    case_started = _workspace_case_start(
+        case_index=6,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+    )
     _, result_f = run_dialog(
         headers,
         conversation_id=dossier_conversation["id"],
         text=memory_question,
         mode_consent_enabled=False,
+        progress=_build_workspace_turn_progress(
+            case_index=6,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
     )
     text_f = str(result_f.get("response") or "")
-    cases.append(
-        BenchmarkCase(
-            code="F",
-            name="dossier memory query answers from dossier context / graph context",
-            notes={
-                "route_intent": result_f.get("route_intent"),
-                "sources_count": len(result_f.get("sources", [])),
-            },
-            checks=[
-                CheckResult("dialog completed", result_f.get("status") == "completed", str(result_f.get("status"))),
-                CheckResult("response identifies the company", contains_any(text_f, "A公司"), text_f[:240]),
-                CheckResult(
-                    "response avoids unrelated criminal / pollution RAG",
-                    not contains_any(text_f, "污染环境", "刑法", "危险驾驶"),
-                    text_f[:240],
-                ),
-            ],
-        )
+    case_f = BenchmarkCase(
+        code="F",
+        name="dossier memory query answers from dossier context / graph context",
+        notes={
+            "route_intent": result_f.get("route_intent"),
+            "sources_count": len(result_f.get("sources", [])),
+            "latency_ms": _latency_sum_ms(result_f),
+        },
+        checks=[
+            CheckResult("dialog completed", result_f.get("status") == "completed", str(result_f.get("status"))),
+            CheckResult("response identifies the company", contains_any(text_f, "A公司"), text_f[:240]),
+            CheckResult(
+                "response avoids unrelated criminal / pollution RAG",
+                not contains_any(text_f, "污染环境", "刑法", "危险驾驶"),
+                text_f[:240],
+            ),
+        ],
+    )
+    cases.append(case_f)
+    _record_workspace_case(
+        case=case_f,
+        case_index=6,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+        started=case_started,
+        progress=run_progress,
     )
 
     # G
+    plan = plan_by_code["G"]
+    case_started = _workspace_case_start(
+        case_index=7,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+    )
     _, result_g = run_dialog(
         headers,
         conversation_id=dossier_conversation["id"],
         text=legal_question,
         mode_consent_enabled=False,
+        progress=_build_workspace_turn_progress(
+            case_index=7,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
     )
     text_g = str(result_g.get("response") or "")
-    cases.append(
-        BenchmarkCase(
-            code="G",
-            name="explicit law query in dossier conversation still behaves like legal QA",
-            notes={
-                "route_intent": result_g.get("route_intent"),
-                "sources_count": len(result_g.get("sources", [])),
-            },
-            checks=[
-                CheckResult("dialog completed", result_g.get("status") == "completed", str(result_g.get("status"))),
-                CheckResult("response cites article 87", contains_any(text_g, "第八十七条", "87条"), text_g[:240]),
-                CheckResult("response discusses unlawful termination compensation", contains_any(text_g, "赔偿金", "违法解除"), text_g[:240]),
-                CheckResult("sources are present", len(result_g.get("sources", [])) >= 1, f"sources={len(result_g.get('sources', []))}"),
-                CheckResult("response is not polluted by dossier company label", "A公司" not in text_g, text_g[:240]),
-            ],
-        )
+    case_g = BenchmarkCase(
+        code="G",
+        name="explicit law query in dossier conversation still behaves like legal QA",
+        notes={
+            "route_intent": result_g.get("route_intent"),
+            "sources_count": len(result_g.get("sources", [])),
+            "latency_ms": _latency_sum_ms(result_g),
+        },
+        checks=[
+            CheckResult("dialog completed", result_g.get("status") == "completed", str(result_g.get("status"))),
+            CheckResult("response cites article 87", contains_any(text_g, "第八十七条", "87条"), text_g[:240]),
+            CheckResult("response discusses unlawful termination compensation", contains_any(text_g, "赔偿金", "违法解除"), text_g[:240]),
+            CheckResult("sources are present", len(result_g.get("sources", [])) >= 1, f"sources={len(result_g.get('sources', []))}"),
+            CheckResult("response is not polluted by dossier company label", "A公司" not in text_g, text_g[:240]),
+        ],
+    )
+    cases.append(case_g)
+    _record_workspace_case(
+        case=case_g,
+        case_index=7,
+        case_total=run_progress.case_total,
+        case_key=plan.key,
+        started=case_started,
+        progress=run_progress,
     )
 
     if not smoke:
         # H
+        plan = plan_by_code["H"]
+        case_started = _workspace_case_start(
+            case_index=8,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+        )
         conversation_h = create_conversation(
             headers,
             title="workspace-H-participant-resolution",
@@ -923,6 +1378,13 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
             conversation_id=conversation_h["id"],
             text=followup_fact_message,
             mode_consent_enabled=False,
+            progress=_build_workspace_turn_progress(
+                case_index=8,
+                case_total=run_progress.case_total,
+                case_key=plan.key,
+                turn_index=1,
+                turn_total=plan.turns,
+            ),
         )
         candidates_payload = retry_value(
             lambda: get_dossier_participant_candidates(headers, dossier["id"]),
@@ -982,35 +1444,49 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
             if isinstance(candidate, dict)
             else "A公司"
         )
-        cases.append(
-            BenchmarkCase(
-                code="H",
-                name="participant candidates and confirmation API flow",
-                notes={
-                    "fact_route_intent": result_h_fact.get("route_intent"),
-                    "candidate_count": len(candidates),
-                },
-                checks=[
-                    CheckResult("fact update dialog completed", result_h_fact.get("status") == "completed", str(result_h_fact.get("status"))),
-                    CheckResult("participant candidates endpoint returns candidates", len(candidates) >= 1, f"candidate_count={len(candidates)}"),
-                    CheckResult("resolve endpoint succeeded", isinstance(resolve_result, dict) and resolve_result.get("status") == "success", json.dumps(resolve_result or {}, ensure_ascii=False)),
-                    CheckResult("confirmed participant is persisted", len(participants_list) >= 1, f"participants={len(participants_list)}"),
-                    CheckResult("participant mentions are persisted", len(mentions_list) >= 1, f"mentions={len(mentions_list)}"),
-                    CheckResult(
-                        "dossier graph exposes participant mappings",
-                        len(dossier_graph_after_resolve.get("participant_mappings", []) or []) >= 1,
-                        f"participant_mappings={len(dossier_graph_after_resolve.get('participant_mappings', []) or [])}",
-                    ),
-                    CheckResult(
-                        "dossier graph nodes can show resolved display_label",
-                        any(str(node.get("display_label") or "") == resolved_label for node in graph_nodes if isinstance(node, dict)),
-                        f"resolved_label={resolved_label}",
-                    ),
-                ],
-            )
+        case_h = BenchmarkCase(
+            code="H",
+            name="participant candidates and confirmation API flow",
+            notes={
+                "fact_route_intent": result_h_fact.get("route_intent"),
+                "candidate_count": len(candidates),
+                "latency_ms": _latency_sum_ms(result_h_fact),
+            },
+            checks=[
+                CheckResult("fact update dialog completed", result_h_fact.get("status") == "completed", str(result_h_fact.get("status"))),
+                CheckResult("participant candidates endpoint returns candidates", len(candidates) >= 1, f"candidate_count={len(candidates)}"),
+                CheckResult("resolve endpoint succeeded", isinstance(resolve_result, dict) and resolve_result.get("status") == "success", json.dumps(resolve_result or {}, ensure_ascii=False)),
+                CheckResult("confirmed participant is persisted", len(participants_list) >= 1, f"participants={len(participants_list)}"),
+                CheckResult("participant mentions are persisted", len(mentions_list) >= 1, f"mentions={len(mentions_list)}"),
+                CheckResult(
+                    "dossier graph exposes participant mappings",
+                    len(dossier_graph_after_resolve.get("participant_mappings", []) or []) >= 1,
+                    f"participant_mappings={len(dossier_graph_after_resolve.get('participant_mappings', []) or [])}",
+                ),
+                CheckResult(
+                    "dossier graph nodes can show resolved display_label",
+                    any(str(node.get("display_label") or "") == resolved_label for node in graph_nodes if isinstance(node, dict)),
+                    f"resolved_label={resolved_label}",
+                ),
+            ],
+        )
+        cases.append(case_h)
+        _record_workspace_case(
+            case=case_h,
+            case_index=8,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            started=case_started,
+            progress=run_progress,
         )
 
         # I
+        plan = plan_by_code["I"]
+        case_started = _workspace_case_start(
+            case_index=9,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+        )
         participants_before_archive = len(participants_list)
         archived = archive_dossier(headers, dossier["id"])
         dossier_after_archive = get_dossier(headers, dossier["id"])
@@ -1032,18 +1508,25 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
                 "description": "should fail",
             },
         )
-        cases.append(
-            BenchmarkCase(
-                code="I",
-                name="archive dossier keeps historical data and blocks new writes",
-                notes={"dossier_id": dossier["id"]},
-                checks=[
-                    CheckResult("archive endpoint returns archived dossier", str(archived.get("status") or "") == "archived", json.dumps(archived, ensure_ascii=False)),
-                    CheckResult("archived dossier remains readable", str(dossier_after_archive.get("status") or "") == "archived", json.dumps(dossier_after_archive, ensure_ascii=False)),
-                    CheckResult("participants remain after archive", archived_participant_count == participants_before_archive, f"before={participants_before_archive} after={archived_participant_count}"),
-                    CheckResult("archived dossier rejects participant writes", archived_write_status == 409, f"status={archived_write_status} payload={archived_write_payload}"),
-                ],
-            )
+        case_i = BenchmarkCase(
+            code="I",
+            name="archive dossier keeps historical data and blocks new writes",
+            notes={"dossier_id": dossier["id"], "latency_ms": 0},
+            checks=[
+                CheckResult("archive endpoint returns archived dossier", str(archived.get("status") or "") == "archived", json.dumps(archived, ensure_ascii=False)),
+                CheckResult("archived dossier remains readable", str(dossier_after_archive.get("status") or "") == "archived", json.dumps(dossier_after_archive, ensure_ascii=False)),
+                CheckResult("participants remain after archive", archived_participant_count == participants_before_archive, f"before={participants_before_archive} after={archived_participant_count}"),
+                CheckResult("archived dossier rejects participant writes", archived_write_status == 409, f"status={archived_write_status} payload={archived_write_payload}"),
+            ],
+        )
+        cases.append(case_i)
+        _record_workspace_case(
+            case=case_i,
+            case_index=9,
+            case_total=run_progress.case_total,
+            case_key=plan.key,
+            started=case_started,
+            progress=run_progress,
         )
 
     total_passed = 0
@@ -1098,14 +1581,49 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         encoding="utf-8",
     )
     print(f"\nSaved report: {output_path}")
+    failed_cases = [f"{case.code}:{case.name}" for case in cases if not case.passed]
+    failed_checks = [
+        f"{case.code}:{check.label}"
+        for case in cases
+        for check in case.checks
+        if not check.passed
+    ]
+    print(
+        f"summary: cases_passed={case_passed}/{len(cases)} "
+        f"checks_passed={total_passed}/{total_checks} "
+        f"elapsed={_format_seconds(time.perf_counter() - benchmark_started)}"
+    )
+    if failed_cases:
+        print("failed cases:")
+        for item in failed_cases:
+            print(f"  - {item}")
+    if failed_checks:
+        print("failed checks:")
+        for item in failed_checks:
+            print(f"  - {item}")
     return report
 
 
 def main() -> None:
     args = parse_args()
+    case_plans = _workspace_case_plans(bool(args.smoke))
+    planned_turns = sum(plan.turns for plan in case_plans)
+    planned_checks = sum(plan.checks for plan in case_plans)
     if args.dry_run:
+        print("=" * 72)
+        print("Personalized workspace benchmark dry-run")
+        print(f"time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(
+            f"planned: cases={len(case_plans)} turns={planned_turns} "
+            f"checks={planned_checks}"
+        )
+        print(
+            f"mode: smoke={bool(args.smoke)} dry_run=True "
+            f"username={str(args.username or '').strip() or '<random>'}"
+        )
+        print("=" * 72)
         print("Planned personalized workspace benchmark cases:")
-        for item in planned_case_names(args.smoke):
+        for item in planned_case_names(bool(args.smoke)):
             print(f"  - {item}")
         return
 
