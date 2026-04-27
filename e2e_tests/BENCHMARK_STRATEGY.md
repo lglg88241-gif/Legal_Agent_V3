@@ -37,7 +37,7 @@ workspace validation separate from legacy ordinary legal QA regression.
   - `graph`
   - `participant`
   - `archive`
-  - `delete` (reserved; currently not implemented)
+  - `delete`
   - `all`
 - Strength: each workspace capability can be isolated and rerun without paying the cost of a full, mixed benchmark.
 
@@ -52,6 +52,59 @@ workspace validation separate from legacy ordinary legal QA regression.
 - Important:
   - modern `full` is defined as sequential orchestration of independent suites
   - modern `full` does not automatically run the old monolithic quality benchmark
+  - `legacy` stays manual and low-frequency
+
+### `run_benchmarks.py` modern profiles
+
+- `quick`
+  - `smoke`
+  - `workspace_baseline`
+  - `workspace_temporary`
+- `workspace`
+  - `workspace_baseline`
+  - `workspace_temporary`
+  - `workspace_tracked`
+  - `workspace_dossier`
+  - `workspace_memory`
+  - `workspace_participant`
+  - `workspace_archive`
+  - `workspace_delete`
+- `full`
+  - `smoke`
+  - `workspace_baseline`
+  - `workspace_temporary`
+  - `workspace_tracked`
+  - `workspace_dossier`
+  - `workspace_memory`
+  - `workspace_participant`
+  - `workspace_archive`
+  - `workspace_delete`
+- `legacy`
+  - `legacy_quality`
+
+### `run_benchmarks.py` useful flags
+
+- `--list`
+  - print all available suite names and their commands, then exit
+- `--only workspace_delete`
+  - run exactly one modern suite
+- `--suite-timeout 300`
+  - enforce a per-suite timeout in seconds
+- `--report-json e2e_tests/results/latest_runner_report.json`
+  - optionally persist an orchestration report
+- `--dry-run`
+  - print suite order and commands without executing them
+
+Example commands:
+
+```powershell
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --list
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --dry-run
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile full --dry-run
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --only workspace_delete --dry-run
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --suite-timeout 300
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --dry-run --report-json e2e_tests/results/latest_runner_report.json
+```
 
 ### `quality_benchmark.py`
 
@@ -81,6 +134,13 @@ workspace validation separate from legacy ordinary legal QA regression.
 1. Run `pytest`.
 2. Run `run_benchmarks.py --profile full`.
 3. Optionally run `quality_benchmark.py` as a legacy comparison baseline.
+
+## Practical Interpretation
+
+- `smoke_benchmark.py` is the fastest ordinary legal-QA end-to-end check.
+- `personalized_workspace_benchmark.py --only <group>` is the targeted workspace regression tool.
+- `run_benchmarks.py --profile full` is the modern combined regression entry point.
+- `quality_benchmark.py` remains a legacy full-quality comparison benchmark, not the default modern full.
 
 ## Rationale
 

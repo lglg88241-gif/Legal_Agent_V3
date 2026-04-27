@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import argparse
 import builtins
+import json
 import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 def print(*args, **kwargs):
@@ -23,13 +26,67 @@ def print(*args, **kwargs):
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROGRESS_INTERVAL = 5.0
-DELETE_SUITE_IMPLEMENTED = False
+DEFAULT_SUITE_TIMEOUT = 0.0
+TERMINATE_TIMEOUT_SECONDS = 5.0
+
+PROFILE_SUITE_NAMES: dict[str, tuple[str, ...]] = {
+    "quick": (
+        "smoke",
+        "workspace_baseline",
+        "workspace_temporary",
+    ),
+    "full": (
+        "smoke",
+        "workspace_baseline",
+        "workspace_temporary",
+        "workspace_tracked",
+        "workspace_dossier",
+        "workspace_memory",
+        "workspace_participant",
+        "workspace_archive",
+        "workspace_delete",
+    ),
+    "workspace": (
+        "workspace_baseline",
+        "workspace_temporary",
+        "workspace_tracked",
+        "workspace_dossier",
+        "workspace_memory",
+        "workspace_participant",
+        "workspace_archive",
+        "workspace_delete",
+    ),
+    "legacy": ("legacy_quality",),
+}
+
+SUITE_ORDER: tuple[str, ...] = (
+    "pytest",
+    "smoke",
+    "workspace_baseline",
+    "workspace_temporary",
+    "workspace_tracked",
+    "workspace_dossier",
+    "workspace_memory",
+    "workspace_participant",
+    "workspace_archive",
+    "workspace_delete",
+    "legacy_quality",
+)
 
 
 @dataclass(frozen=True)
 class SuitePlan:
     key: str
     command: list[str]
+
+
+@dataclass
+class SuiteResult:
+    name: str
+    command: str
+    status: str
+    exit_code: int | None
+    elapsed_seconds: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,9 +100,23 @@ def parse_args() -> argparse.Namespace:
         help="suite profile to run; default quick",
     )
     parser.add_argument(
+        "--only",
+        default="",
+        help=(
+            "run exactly one suite: smoke, workspace_baseline, workspace_temporary, "
+            "workspace_tracked, workspace_dossier, workspace_memory, "
+            "workspace_participant, workspace_archive, workspace_delete, legacy_quality"
+        ),
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="print all available suites and commands, then exit",
+    )
+    parser.add_argument(
         "--fail-fast",
         action="store_true",
-        help="stop after the first failing suite",
+        help="stop after the first failing or timed-out suite",
     )
     parser.add_argument(
         "--dry-run",
@@ -55,18 +126,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--include-pytest",
         action="store_true",
-        help="prepend pytest to the planned suites",
+        help="prepend pytest to the planned suites when not using --only",
     )
     parser.add_argument(
         "--include-legacy-quality",
         action="store_true",
-        help="append the legacy quality benchmark to the planned suites",
+        help="append the legacy quality benchmark when not using --only",
     )
     parser.add_argument(
         "--progress-interval",
         type=float,
         default=DEFAULT_PROGRESS_INTERVAL,
         help="progress interval passed to child benchmark suites when supported; default 5",
+    )
+    parser.add_argument(
+        "--suite-timeout",
+        type=float,
+        default=DEFAULT_SUITE_TIMEOUT,
+        help="maximum seconds allowed for each suite; 0 means no timeout",
+    )
+    parser.add_argument(
+        "--report-json",
+        default="",
+        help="optional path for a JSON runner report",
     )
     parser.add_argument(
         "--username",
@@ -93,8 +175,20 @@ def _python_command(*parts: str) -> list[str]:
     return [sys.executable, *parts]
 
 
-def _workspace_command(*, only: str, username: str, password: str, progress_interval: float) -> list[str]:
-    command = _python_command("e2e_tests/personalized_workspace_benchmark.py", "--only", only, "--progress-interval", str(progress_interval))
+def _workspace_command(
+    *,
+    only: str,
+    username: str,
+    password: str,
+    progress_interval: float,
+) -> list[str]:
+    command = _python_command(
+        "e2e_tests/personalized_workspace_benchmark.py",
+        "--only",
+        only,
+        "--progress-interval",
+        str(progress_interval),
+    )
     if username:
         command.extend(["--username", username])
     if password:
@@ -102,7 +196,12 @@ def _workspace_command(*, only: str, username: str, password: str, progress_inte
     return command
 
 
-def _smoke_command(*, username: str, password: str, progress_interval: float) -> list[str]:
+def _smoke_command(
+    *,
+    username: str,
+    password: str,
+    progress_interval: float,
+) -> list[str]:
     command = _python_command(
         "e2e_tests/smoke_benchmark.py",
         "--progress-interval",
@@ -123,96 +222,317 @@ def _pytest_command() -> list[str]:
     return _python_command("-m", "pytest", "tests", "-q")
 
 
-def build_suite_plans(
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def build_suite_catalog(
     *,
-    profile: str,
-    include_pytest: bool,
-    include_legacy_quality: bool,
     progress_interval: float,
     username: str,
     password: str,
-) -> list[SuitePlan]:
-    suites: list[SuitePlan] = []
+) -> dict[str, SuitePlan]:
+    return {
+        "pytest": SuitePlan("pytest", _pytest_command()),
+        "smoke": SuitePlan(
+            "smoke",
+            _smoke_command(
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_baseline": SuitePlan(
+            "workspace_baseline",
+            _workspace_command(
+                only="baseline",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_temporary": SuitePlan(
+            "workspace_temporary",
+            _workspace_command(
+                only="temporary",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_tracked": SuitePlan(
+            "workspace_tracked",
+            _workspace_command(
+                only="tracked",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_dossier": SuitePlan(
+            "workspace_dossier",
+            _workspace_command(
+                only="dossier",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_memory": SuitePlan(
+            "workspace_memory",
+            _workspace_command(
+                only="memory",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_participant": SuitePlan(
+            "workspace_participant",
+            _workspace_command(
+                only="participant",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_archive": SuitePlan(
+            "workspace_archive",
+            _workspace_command(
+                only="archive",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "workspace_delete": SuitePlan(
+            "workspace_delete",
+            _workspace_command(
+                only="delete",
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "legacy_quality": SuitePlan("legacy_quality", _legacy_quality_command()),
+    }
+
+
+def select_suite_names(
+    *,
+    profile: str,
+    only: str,
+    include_pytest: bool,
+    include_legacy_quality: bool,
+    available_names: set[str],
+) -> list[str]:
+    normalized_only = str(only or "").strip()
+    if normalized_only:
+        if normalized_only not in available_names:
+            valid = ", ".join(SUITE_ORDER)
+            raise SystemExit(f"Unsupported --only value: {normalized_only}. Valid values: {valid}")
+        return [normalized_only]
+
+    selected = list(PROFILE_SUITE_NAMES[profile])
     if include_pytest:
-        suites.append(SuitePlan("pytest", _pytest_command()))
-
-    if profile == "quick":
-        suites.extend(
-            [
-                SuitePlan("smoke", _smoke_command(username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_baseline", _workspace_command(only="baseline", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_temporary", _workspace_command(only="temporary", username=username, password=password, progress_interval=progress_interval)),
-            ]
-        )
-    elif profile == "full":
-        suites.extend(
-            [
-                SuitePlan("smoke", _smoke_command(username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_baseline", _workspace_command(only="baseline", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_temporary", _workspace_command(only="temporary", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_tracked", _workspace_command(only="tracked", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_dossier", _workspace_command(only="dossier", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_memory", _workspace_command(only="memory", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_participant", _workspace_command(only="participant", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_archive", _workspace_command(only="archive", username=username, password=password, progress_interval=progress_interval)),
-            ]
-        )
-        if DELETE_SUITE_IMPLEMENTED:
-            suites.append(
-                SuitePlan("workspace_delete", _workspace_command(only="delete", username=username, password=password, progress_interval=progress_interval))
-            )
-    elif profile == "workspace":
-        suites.extend(
-            [
-                SuitePlan("workspace_baseline", _workspace_command(only="baseline", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_temporary", _workspace_command(only="temporary", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_tracked", _workspace_command(only="tracked", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_dossier", _workspace_command(only="dossier", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_memory", _workspace_command(only="memory", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_participant", _workspace_command(only="participant", username=username, password=password, progress_interval=progress_interval)),
-                SuitePlan("workspace_archive", _workspace_command(only="archive", username=username, password=password, progress_interval=progress_interval)),
-            ]
-        )
-        if DELETE_SUITE_IMPLEMENTED:
-            suites.append(
-                SuitePlan("workspace_delete", _workspace_command(only="delete", username=username, password=password, progress_interval=progress_interval))
-            )
-    elif profile == "legacy":
-        print("[runner] warning: legacy quality benchmark is slow and may take a long time")
-        suites.append(SuitePlan("legacy_quality", _legacy_quality_command()))
-    else:
-        raise AssertionError(f"Unhandled profile: {profile}")
-
+        selected.insert(0, "pytest")
     if include_legacy_quality and profile != "legacy":
-        print("[runner] warning: legacy quality benchmark is slow and may take a long time")
-        suites.append(SuitePlan("legacy_quality", _legacy_quality_command()))
+        selected.append("legacy_quality")
+    return _dedupe_preserve_order(selected)
 
-    return suites
+
+def _write_report(path_str: str, report: dict[str, Any]) -> None:
+    target = Path(path_str)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[runner] report_json={target}")
+
+
+def _build_report(
+    *,
+    profile: str,
+    dry_run: bool,
+    fail_fast: bool,
+    started_at: str,
+    finished_at: str,
+    elapsed_seconds: float,
+    suite_results: list[SuiteResult],
+) -> dict[str, Any]:
+    passed_suite_names = [item.name for item in suite_results if item.status == "passed"]
+    failed_suite_names = [item.name for item in suite_results if item.status == "failed"]
+    timeout_suite_names = [item.name for item in suite_results if item.status == "timeout"]
+    skipped_suite_names = [item.name for item in suite_results if item.status == "skipped"]
+    return {
+        "profile": profile,
+        "dry_run": dry_run,
+        "fail_fast": fail_fast,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_seconds": round(float(elapsed_seconds), 3),
+        "total_suites": len(suite_results),
+        "passed_suites": len(passed_suite_names),
+        "failed_suites": len(failed_suite_names),
+        "timeout_suites": len(timeout_suite_names),
+        "skipped_suites": len(skipped_suite_names),
+        "passed_suite_names": passed_suite_names,
+        "failed_suite_names": failed_suite_names,
+        "timeout_suite_names": timeout_suite_names,
+        "skipped_suite_names": skipped_suite_names,
+        "suites": [asdict(item) for item in suite_results],
+    }
+
+
+def _print_overall_progress(
+    *,
+    completed: int,
+    total: int,
+    overall_started: float,
+) -> None:
+    elapsed = time.perf_counter() - overall_started
+    avg = elapsed / completed if completed else 0.0
+    eta = avg * max(total - completed, 0)
+    pct = (100.0 * completed / total) if total else 100.0
+    print(
+        f"[runner] overall {completed}/{total} {pct:.1f}% "
+        f"elapsed={_format_seconds(elapsed)} avg={_format_seconds(avg)} "
+        f"eta={_format_seconds(eta)}"
+    )
+
+
+def _run_suite(plan: SuitePlan, *, suite_timeout: float) -> SuiteResult:
+    started = time.perf_counter()
+    print(f'[runner] suite START name={plan.key} cmd="{_format_command(plan.command)}"')
+    process = subprocess.Popen(plan.command, cwd=str(REPO_ROOT))
+    timeout_seconds = float(suite_timeout)
+    status = "passed"
+    exit_code: int | None = None
+
+    try:
+        if timeout_seconds > 0:
+            exit_code = process.wait(timeout=timeout_seconds)
+        else:
+            exit_code = process.wait()
+    except subprocess.TimeoutExpired:
+        print(
+            f"[runner] suite TIMEOUT name={plan.key} "
+            f"timeout={_format_seconds(timeout_seconds)}"
+        )
+        status = "timeout"
+        try:
+            process.terminate()
+            process.wait(timeout=TERMINATE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        exit_code = -9
+    else:
+        status = "passed" if exit_code == 0 else "failed"
+
+    elapsed = time.perf_counter() - started
+    print(
+        f"[runner] suite DONE name={plan.key} status={status} "
+        f"exit_code={exit_code} elapsed={_format_seconds(elapsed)}"
+    )
+    return SuiteResult(
+        name=plan.key,
+        command=_format_command(plan.command),
+        status=status,
+        exit_code=exit_code,
+        elapsed_seconds=round(float(elapsed), 3),
+    )
+
+
+def _print_list(
+    *,
+    progress_interval: float,
+    username: str,
+    password: str,
+) -> None:
+    catalog = build_suite_catalog(
+        progress_interval=progress_interval,
+        username=username,
+        password=password,
+    )
+    print("=" * 72)
+    print("Benchmark runner suite list")
+    print(f"[runner] available suites={len(catalog)}")
+    print("=" * 72)
+    for index, suite_name in enumerate(SUITE_ORDER, start=1):
+        plan = catalog[suite_name]
+        print(
+            f"[runner] suite {index}/{len(SUITE_ORDER)} {suite_name} "
+            f'cmd="{_format_command(plan.command)}"'
+        )
 
 
 def main() -> None:
     args = parse_args()
-    suites = build_suite_plans(
-        profile=str(args.profile),
-        include_pytest=bool(args.include_pytest),
-        include_legacy_quality=bool(args.include_legacy_quality),
-        progress_interval=max(1.0, float(args.progress_interval)),
-        username=str(args.username or "").strip(),
-        password=str(args.password or "workspace123"),
+    progress_interval = max(1.0, float(args.progress_interval))
+    suite_timeout = max(0.0, float(args.suite_timeout))
+    username = str(args.username or "").strip()
+    password = str(args.password or "workspace123")
+    normalized_profile = str(args.profile)
+    normalized_only = str(args.only or "").strip()
+
+    if args.list:
+        _print_list(
+            progress_interval=progress_interval,
+            username=username,
+            password=password,
+        )
+        return
+
+    if normalized_only:
+        print("[runner] warning: --only overrides --profile")
+        if args.include_pytest:
+            print("[runner] warning: --include-pytest is ignored when --only is set")
+        if args.include_legacy_quality:
+            print("[runner] warning: --include-legacy-quality is ignored when --only is set")
+    elif normalized_profile == "legacy":
+        print("[runner] warning: legacy quality benchmark is slow and may take a long time")
+    elif args.include_legacy_quality:
+        print("[runner] warning: legacy quality benchmark is slow and may take a long time")
+
+    suite_catalog = build_suite_catalog(
+        progress_interval=progress_interval,
+        username=username,
+        password=password,
     )
+    suite_names = select_suite_names(
+        profile=normalized_profile,
+        only=normalized_only,
+        include_pytest=bool(args.include_pytest) and not normalized_only,
+        include_legacy_quality=bool(args.include_legacy_quality) and not normalized_only,
+        available_names=set(suite_catalog),
+    )
+    suites = [suite_catalog[name] for name in suite_names]
+
     print("=" * 72)
     print("Benchmark runner")
     print(f"[runner] repo_root={REPO_ROOT}")
     print(
-        f"[runner] planned suites={len(suites)} profile={args.profile} "
-        f"fail_fast={bool(args.fail_fast)} dry_run={bool(args.dry_run)}"
+        f"[runner] planned suites={len(suites)} profile={normalized_profile} "
+        f"only={normalized_only or '<none>'} fail_fast={bool(args.fail_fast)} "
+        f"dry_run={bool(args.dry_run)}"
     )
     print(
         f"[runner] include_pytest={bool(args.include_pytest)} "
         f"include_legacy_quality={bool(args.include_legacy_quality)} "
-        f"progress_interval={max(1.0, float(args.progress_interval)):.1f}s"
+        f"progress_interval={progress_interval:.1f}s "
+        f"suite_timeout={_format_seconds(suite_timeout)}"
     )
     print("=" * 72)
+
+    started_at = datetime.now().isoformat()
+    runner_started = time.perf_counter()
+    results: list[SuiteResult] = []
 
     if args.dry_run:
         for index, suite in enumerate(suites, start=1):
@@ -220,45 +540,92 @@ def main() -> None:
                 f"[runner] suite {index}/{len(suites)} {suite.key} DRY-RUN "
                 f'cmd="{_format_command(suite.command)}"'
             )
+            results.append(
+                SuiteResult(
+                    name=suite.key,
+                    command=_format_command(suite.command),
+                    status="planned",
+                    exit_code=None,
+                    elapsed_seconds=0.0,
+                )
+            )
+        finished_at = datetime.now().isoformat()
+        report = _build_report(
+            profile=normalized_profile,
+            dry_run=True,
+            fail_fast=bool(args.fail_fast),
+            started_at=started_at,
+            finished_at=finished_at,
+            elapsed_seconds=time.perf_counter() - runner_started,
+            suite_results=results,
+        )
+        if args.report_json:
+            _write_report(str(args.report_json), report)
         return
 
-    overall_started = time.perf_counter()
-    failures: list[str] = []
-    completed_suites = 0
+    completed = 0
+    stop_after_current = False
     for index, suite in enumerate(suites, start=1):
-        started = time.perf_counter()
-        print(
-            f"[runner] suite {index}/{len(suites)} {suite.key} START "
-            f'cmd="{_format_command(suite.command)}"'
+        result = _run_suite(suite, suite_timeout=suite_timeout)
+        results.append(result)
+        completed = index
+        _print_overall_progress(
+            completed=completed,
+            total=len(suites),
+            overall_started=runner_started,
         )
-        process = subprocess.Popen(suite.command, cwd=str(REPO_ROOT))
-        exit_code = process.wait()
-        elapsed_s = time.perf_counter() - started
-        print(
-            f"[runner] suite {index}/{len(suites)} {suite.key} DONE "
-            f"exit_code={exit_code} elapsed={_format_seconds(elapsed_s)}"
-        )
-        print(
-            f"[runner] overall progress {index}/{len(suites)} "
-            f"{(100.0 * index / len(suites)):.1f}%"
-        )
-        completed_suites = index
-        if exit_code != 0:
-            failures.append(suite.key)
-            if args.fail_fast:
-                print("[runner] fail-fast enabled; stopping after the first failing suite")
-                break
+        if result.status in {"failed", "timeout"} and args.fail_fast:
+            print("[runner] fail-fast enabled; stopping after the current suite")
+            stop_after_current = True
+            break
 
-    total_elapsed = time.perf_counter() - overall_started
+    if stop_after_current and completed < len(suites):
+        for suite in suites[completed:]:
+            results.append(
+                SuiteResult(
+                    name=suite.key,
+                    command=_format_command(suite.command),
+                    status="skipped",
+                    exit_code=None,
+                    elapsed_seconds=0.0,
+                )
+            )
+
+    finished_at = datetime.now().isoformat()
+    total_elapsed = time.perf_counter() - runner_started
+    report = _build_report(
+        profile=normalized_profile,
+        dry_run=False,
+        fail_fast=bool(args.fail_fast),
+        started_at=started_at,
+        finished_at=finished_at,
+        elapsed_seconds=total_elapsed,
+        suite_results=results,
+    )
+    if args.report_json:
+        _write_report(str(args.report_json), report)
+
     print("=" * 72)
     print(
-        f"[runner] summary completed_suites={completed_suites}/{len(suites)} "
-        f"failures={len(failures)} elapsed={_format_seconds(total_elapsed)}"
+        f"[runner] summary completed_suites={completed}/{len(suites)} "
+        f"passed={report['passed_suites']} failed={report['failed_suites']} "
+        f"timeouts={report['timeout_suites']} skipped={report['skipped_suites']} "
+        f"elapsed={_format_seconds(total_elapsed)}"
     )
-    if failures:
+    if report["failed_suite_names"]:
         print("[runner] failed suites:")
-        for suite_key in failures:
-            print(f"  - {suite_key}")
+        for suite_name in report["failed_suite_names"]:
+            print(f"  - {suite_name}")
+    if report["timeout_suite_names"]:
+        print("[runner] timeout suites:")
+        for suite_name in report["timeout_suite_names"]:
+            print(f"  - {suite_name}")
+    if report["skipped_suite_names"]:
+        print("[runner] skipped suites:")
+        for suite_name in report["skipped_suite_names"]:
+            print(f"  - {suite_name}")
+
+    if report["failed_suites"] or report["timeout_suites"]:
         raise SystemExit(1)
     raise SystemExit(0)
 
