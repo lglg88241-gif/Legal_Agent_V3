@@ -37,6 +37,7 @@ PROFILE_SUITE_NAMES: dict[str, tuple[str, ...]] = {
     ),
     "full": (
         "smoke",
+        "legal_qa",
         "workspace_baseline",
         "workspace_temporary",
         "workspace_tracked",
@@ -62,6 +63,7 @@ PROFILE_SUITE_NAMES: dict[str, tuple[str, ...]] = {
 SUITE_ORDER: tuple[str, ...] = (
     "pytest",
     "smoke",
+    "legal_qa",
     "workspace_baseline",
     "workspace_temporary",
     "workspace_tracked",
@@ -103,9 +105,10 @@ def parse_args() -> argparse.Namespace:
         "--only",
         default="",
         help=(
-            "run exactly one suite: smoke, workspace_baseline, workspace_temporary, "
-            "workspace_tracked, workspace_dossier, workspace_memory, "
-            "workspace_participant, workspace_archive, workspace_delete, legacy_quality"
+            "run exactly one suite: smoke, legal_qa, workspace_baseline, "
+            "workspace_temporary, workspace_tracked, workspace_dossier, "
+            "workspace_memory, workspace_participant, workspace_archive, "
+            "workspace_delete, legacy_quality"
         ),
     )
     parser.add_argument(
@@ -214,6 +217,24 @@ def _smoke_command(
     return command
 
 
+def _legal_qa_command(
+    *,
+    username: str,
+    password: str,
+    progress_interval: float,
+) -> list[str]:
+    command = _python_command(
+        "e2e_tests/legal_qa_benchmark.py",
+        "--progress-interval",
+        str(progress_interval),
+    )
+    if username:
+        command.extend(["--username", username])
+    if password:
+        command.extend(["--password", password])
+    return command
+
+
 def _legacy_quality_command() -> list[str]:
     return _python_command("e2e_tests/quality_benchmark.py")
 
@@ -244,6 +265,14 @@ def build_suite_catalog(
         "smoke": SuitePlan(
             "smoke",
             _smoke_command(
+                username=username,
+                password=password,
+                progress_interval=progress_interval,
+            ),
+        ),
+        "legal_qa": SuitePlan(
+            "legal_qa",
+            _legal_qa_command(
                 username=username,
                 password=password,
                 progress_interval=progress_interval,

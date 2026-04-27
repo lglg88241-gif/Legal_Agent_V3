@@ -24,6 +24,17 @@ workspace validation separate from legacy ordinary legal QA regression.
   - no workspace / graph / participant flows
 - Strength: catches accidental workspace pollution in the ordinary `/dialog` path.
 
+### `legal_qa_benchmark.py`
+
+- Purpose: fuller but still targeted benchmark for the default legal QA path.
+- Scope:
+  - explicit `mode_consent_enabled=false` on every `/dialog` request
+  - no dossier binding
+  - no `dossier_id`
+  - no workspace / graph / participant flows
+  - checks for workspace-term leakage in responses
+- Strength: provides a more representative ordinary legal QA regression than `smoke_benchmark.py` without falling back to the legacy monolithic benchmark.
+
 ### `personalized_workspace_benchmark.py --only <group>`
 
 - Purpose: targeted validation for independent workspace capabilities.
@@ -71,6 +82,7 @@ workspace validation separate from legacy ordinary legal QA regression.
   - `workspace_delete`
 - `full`
   - `smoke`
+  - `legal_qa`
   - `workspace_baseline`
   - `workspace_temporary`
   - `workspace_tracked`
@@ -88,6 +100,8 @@ workspace validation separate from legacy ordinary legal QA regression.
   - print all available suite names and their commands, then exit
 - `--only workspace_delete`
   - run exactly one modern suite
+- `--only legal_qa`
+  - run the targeted default legal-QA suite
 - `--suite-timeout 300`
   - enforce a per-suite timeout in seconds
 - `--report-json e2e_tests/results/latest_runner_report.json`
@@ -100,6 +114,7 @@ Example commands:
 ```powershell
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --list
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --dry-run
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --only legal_qa --dry-run
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile full --dry-run
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --only workspace_delete --dry-run
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --suite-timeout 300
@@ -121,7 +136,8 @@ Example commands:
 
 1. Run `pytest`.
 2. Run `smoke_benchmark.py` when touching ordinary legal QA behavior.
-3. Run `personalized_workspace_benchmark.py --only <group>` for the specific workspace feature you changed.
+3. Run `legal_qa_benchmark.py` when you need broader ordinary legal QA coverage.
+4. Run `personalized_workspace_benchmark.py --only <group>` for the specific workspace feature you changed.
 
 ### Before merging larger changes
 
@@ -138,8 +154,9 @@ Example commands:
 ## Practical Interpretation
 
 - `smoke_benchmark.py` is the fastest ordinary legal-QA end-to-end check.
+- `legal_qa_benchmark.py` is the default targeted legal-QA regression suite.
 - `personalized_workspace_benchmark.py --only <group>` is the targeted workspace regression tool.
-- `run_benchmarks.py --profile full` is the modern combined regression entry point.
+- `run_benchmarks.py --profile full` is the modern combined regression entry point: `smoke + legal_qa + workspace suites`.
 - `quality_benchmark.py` remains a legacy full-quality comparison benchmark, not the default modern full.
 
 ## Rationale
