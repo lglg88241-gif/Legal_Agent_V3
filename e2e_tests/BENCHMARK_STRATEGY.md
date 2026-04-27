@@ -148,6 +148,9 @@ Example commands:
   - release checks
   - defense/demo prep
   - historical comparison against the old 80-point quality baseline
+- Important:
+  - it stays outside the default modern `full` profile
+  - it is not a daily development requirement
 
 ## Recommended Usage
 
@@ -177,6 +180,66 @@ Example commands:
 - `personalized_workspace_benchmark.py --only <group>` is the targeted workspace regression tool.
 - `run_benchmarks.py --profile full` is the modern combined regression entry point: `smoke + legal_qa + workspace suites`.
 - `quality_benchmark.py` remains a legacy full-quality comparison benchmark, not the default modern full.
+
+## Modern Full Validation
+
+Current modern full suite order:
+
+1. `smoke`
+2. `legal_qa`
+3. `workspace_baseline`
+4. `workspace_temporary`
+5. `workspace_tracked`
+6. `workspace_dossier`
+7. `workspace_memory`
+8. `workspace_participant`
+9. `workspace_archive`
+10. `workspace_delete`
+
+Modern full benchmark validated:
+
+- date: `2026-04-27`
+- profile: `full`
+- recommended command:
+  - `.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile full --check-readiness --fail-fast --suite-timeout 360`
+- result:
+  - `10/10 suites passed`
+- total elapsed:
+  - `1058.5s`
+- skipped:
+  - `0`
+- timeouts:
+  - `0`
+
+Suite results:
+
+- `smoke`: `5/5 cases`, `26/26 checks`
+- `legal_qa`: `6/6 cases`, `38/38 checks`, `1 latency warning`
+- `workspace_baseline`: `1/1 cases`, `7/7 checks`
+- `workspace_temporary`: `1/1 cases`, `9/9 checks`
+- `workspace_tracked`: `1/1 cases`, `7/7 checks`
+- `workspace_dossier`: `2/2 cases`, `9/9 checks`
+- `workspace_memory`: `2/2 cases`, `8/8 checks`
+- `workspace_participant`: `1/1 cases`, `7/7 checks`
+- `workspace_archive`: `1/1 cases`, `4/4 checks`
+- `workspace_delete`: `1/1 cases`, `6/6 checks`
+
+## Runtime Notes
+
+- Before any live benchmark run, confirm both the FastAPI backend and Celery worker are running the latest code.
+- If backend API routes or response schemas changed, restart the backend and the worker before trusting e2e results.
+- Prefer a clean single-process backend for benchmark runs. Auto-reload or stale worker processes can produce false failures against old code.
+- `workspace_participant` is the most sensitive suite for live backend state because it depends on candidate generation and follow-up participant resolution.
+- `legal_qa` keeps latency warnings for observation. A latency warning does not mean the suite failed if the legal QA assertions passed.
+- Do not run `quality_benchmark.py` by default during daily development. Keep it as a legacy full regression for release or defense preparation.
+
+## Recent Fixes
+
+- commit: `847d01f fix(workspace): refresh participant mentions before serialization`
+- issue: `POST /dossiers/{dossier_id}/participants/resolve` returned HTTP 500 during `workspace_participant`
+- root cause: async SQLAlchemy attempted to lazy-load `mention.created_at` after commit during response serialization, which triggered `MissingGreenlet`
+- fix: refresh the participant and resolved mentions before serialization so timestamp fields are already loaded
+- regression: `tests/test_h4g_dossier_participants.py`
 
 ## Rationale
 
