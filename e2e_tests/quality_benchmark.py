@@ -18,6 +18,7 @@ from __future__ import annotations
 # path. It intentionally does not cover personalized workspace flows such as
 # mode-consent onboarding, dossier binding, dossier graph context, or participant
 # resolution. Those flows should be evaluated by a separate workspace benchmark.
+# Prefer e2e_tests/run_benchmarks.py for the modern orchestrated benchmark entry point.
 
 import argparse
 import builtins

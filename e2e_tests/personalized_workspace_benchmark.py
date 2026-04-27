@@ -126,6 +126,40 @@ WORKSPACE_CASE_PLANS = [
     WorkspaceCasePlan("I", "I_archive_semantics", "I archive dossier keeps historical data accessible", 0, 4),
 ]
 
+WORKSPACE_ONLY_GROUPS: dict[str, tuple[str, ...]] = {
+    "baseline": ("A",),
+    "consent": ("B", "C"),
+    "temporary": ("B",),
+    "tracked": ("C",),
+    "dossier": ("D", "E"),
+    "memory": ("F", "G"),
+    "graph": ("C", "F", "H"),
+    "participant": ("H",),
+    "archive": ("I",),
+    "delete": (),
+}
+DELETE_GROUP_IMPLEMENTED = False
+
+
+@dataclass
+class WorkspaceScenarioContext:
+    headers: dict[str, str]
+    smoke: bool
+    legal_question: str = "劳动合同法第八十七条规定了什么？"
+    case_message: str = (
+        "我补充一下案情：我在A公司工作两年，月薪12000，公司一直没签劳动合同，"
+        "2024年4月4日公司口头辞退我。"
+    )
+    followup_fact_message: str = (
+        "我再补充一下案情：后来用人单位的人事今天又通知我尽快办离职，"
+        "老板还说A公司不会给我任何补偿。"
+    )
+    memory_question: str = "这个案卷里之前提到的公司是谁？"
+    tracked_case: dict[str, Any] | None = None
+    dossier_setup: dict[str, Any] | None = None
+    dossier_conversation: dict[str, Any] | None = None
+    participant_resolution: dict[str, Any] | None = None
+
 
 def _workspace_case_plans(smoke: bool) -> list[WorkspaceCasePlan]:
     if smoke:
@@ -862,6 +896,675 @@ def contains_any(text: str, *keywords: str) -> bool:
     return any(keyword.lower() in lowered for keyword in keywords)
 
 
+def _workspace_setup(message: str) -> None:
+    print(f"[workspace] setup {message}")
+
+
+def _select_workspace_case_plans(
+    *,
+    smoke: bool,
+    only: str,
+) -> list[WorkspaceCasePlan]:
+    normalized_only = str(only or "all").strip().lower() or "all"
+    if normalized_only == "all":
+        return _workspace_case_plans(smoke)
+    if normalized_only not in WORKSPACE_ONLY_GROUPS:
+        valid = ", ".join(["all", *sorted(WORKSPACE_ONLY_GROUPS)])
+        raise SystemExit(f"Unsupported --only value: {normalized_only}. Valid values: {valid}")
+    selected_codes = set(WORKSPACE_ONLY_GROUPS[normalized_only])
+    return [plan for plan in WORKSPACE_CASE_PLANS if plan.code in selected_codes]
+
+
+def _workspace_output_name(*, smoke: bool, only: str) -> str:
+    normalized_only = str(only or "all").strip().lower() or "all"
+    if normalized_only != "all":
+        return f"personalized_workspace_benchmark_{normalized_only}.json"
+    if smoke:
+        return "personalized_workspace_benchmark_smoke.json"
+    return "personalized_workspace_benchmark_report.json"
+
+
+def ensure_tracked_case(
+    context: WorkspaceScenarioContext,
+    *,
+    prompt_progress: WorkspaceTurnProgress | None = None,
+    fact_progress: WorkspaceTurnProgress | None = None,
+) -> dict[str, Any]:
+    if context.tracked_case is not None:
+        return context.tracked_case
+
+    if prompt_progress is None and fact_progress is None:
+        _workspace_setup("creating tracked conversation prerequisite")
+
+    conversation = create_conversation(context.headers, title="workspace-C-tracked")
+    first_status, first_payload, first_result = run_dialog_once(
+        context.headers,
+        conversation_id=conversation["id"],
+        text=context.case_message,
+        mode_consent_enabled=True,
+        progress=prompt_progress,
+    )
+    first_response = (
+        first_payload if isinstance(first_payload, dict) else {"status": f"HTTP {first_status}"}
+    )
+    consent = set_conversation_mode_consent(
+        context.headers,
+        conversation["id"],
+        mode="TRACKED_CASE",
+        consent="tracked",
+        reason="workspace_benchmark_tracked",
+    )
+    _, result = run_dialog(
+        context.headers,
+        conversation_id=conversation["id"],
+        text=context.case_message,
+        mode_consent_enabled=False,
+        progress=fact_progress,
+    )
+    snapshot, graph, graph_timeout_detail = wait_for_tracked_graph_update(
+        context.headers,
+        conversation["id"],
+        smoke=context.smoke,
+    )
+    record = get_conversation_record(snapshot)
+    context.tracked_case = {
+        "conversation": conversation,
+        "first_response": first_response,
+        "first_result": first_result,
+        "consent": consent,
+        "result": result,
+        "snapshot": snapshot,
+        "graph": graph,
+        "graph_timeout_detail": graph_timeout_detail,
+        "record": record,
+    }
+    return context.tracked_case
+
+
+def ensure_dossier_setup(context: WorkspaceScenarioContext) -> dict[str, Any]:
+    if context.dossier_setup is not None:
+        return context.dossier_setup
+
+    tracked = ensure_tracked_case(context)
+    _workspace_setup("creating dossier binding prerequisite")
+    dossier = create_dossier(
+        context.headers,
+        title="劳动争议测试案卷",
+        case_type="劳动争议",
+        summary="workspace benchmark dossier",
+    )
+    dossier = update_dossier_participant_aliases(
+        context.headers,
+        dossier["id"],
+        primary_label="我",
+        primary_role="劳动者",
+        opposing_label="A公司",
+        opposing_role="用人单位",
+    )
+    attached_conversation = attach_conversation_to_dossier(
+        context.headers,
+        tracked["conversation"]["id"],
+        dossier["id"],
+    )
+    dossier_list = list_dossiers(context.headers)
+    dossier_detail = get_dossier(context.headers, dossier["id"])
+    snapshot = get_conversation_snapshot(context.headers, tracked["conversation"]["id"])
+    context.dossier_setup = {
+        "dossier": dossier,
+        "attached_conversation": attached_conversation,
+        "dossier_list": dossier_list,
+        "dossier_detail": dossier_detail,
+        "snapshot": snapshot,
+        "record": get_conversation_record(snapshot),
+    }
+    return context.dossier_setup
+
+
+def ensure_dossier_conversation(context: WorkspaceScenarioContext) -> dict[str, Any]:
+    if context.dossier_conversation is not None:
+        return context.dossier_conversation
+
+    dossier_setup = ensure_dossier_setup(context)
+    _workspace_setup("creating dossier-bound conversation prerequisite")
+    conversation = create_conversation(
+        context.headers,
+        title="workspace-E-dossier-bound",
+        dossier_id=dossier_setup["dossier"]["id"],
+    )
+    context.dossier_conversation = conversation
+    return conversation
+
+
+def ensure_participant_resolution(
+    context: WorkspaceScenarioContext,
+    *,
+    fact_progress: WorkspaceTurnProgress | None = None,
+) -> dict[str, Any]:
+    if context.participant_resolution is not None:
+        return context.participant_resolution
+
+    dossier_setup = ensure_dossier_setup(context)
+    if fact_progress is None:
+        _workspace_setup("creating participant resolution prerequisite")
+    conversation = create_conversation(
+        context.headers,
+        title="workspace-H-participant-resolution",
+        dossier_id=dossier_setup["dossier"]["id"],
+    )
+    _, fact_result = run_dialog(
+        context.headers,
+        conversation_id=conversation["id"],
+        text=context.followup_fact_message,
+        mode_consent_enabled=False,
+        progress=fact_progress,
+    )
+    candidates_payload = retry_value(
+        lambda: get_dossier_participant_candidates(context.headers, dossier_setup["dossier"]["id"]),
+        lambda payload: bool((payload.get("candidates") if isinstance(payload, dict) else []) or []),
+        attempts=4,
+        sleep_s=2.0,
+    )
+    candidates = (
+        candidates_payload.get("candidates")
+        if isinstance(candidates_payload, dict) and isinstance(candidates_payload.get("candidates"), list)
+        else []
+    )
+    candidate = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, dict) and item.get("entity_type") == "organization"
+        ),
+        candidates[0] if candidates else None,
+    )
+    resolve_result: dict[str, Any] | None = None
+    if isinstance(candidate, dict):
+        resolve_result = resolve_dossier_participant(
+            context.headers,
+            dossier_setup["dossier"]["id"],
+            {
+                "participant": {
+                    "label": str(candidate.get("suggested_label") or "A公司"),
+                    "role": str(candidate.get("suggested_role") or "用人单位") or None,
+                    "party_side": str(candidate.get("party_side") or "opponent"),
+                    "entity_type": str(candidate.get("entity_type") or "organization"),
+                    "description": "workspace benchmark confirmed participant",
+                },
+                "mentions": candidate.get("mentions") or [],
+            },
+        )
+    participants_payload = get_dossier_participants(
+        context.headers,
+        dossier_setup["dossier"]["id"],
+    )
+    dossier_graph = get_dossier_graph(context.headers, dossier_setup["dossier"]["id"])
+    participants = (
+        participants_payload.get("participants")
+        if isinstance(participants_payload.get("participants"), list)
+        else []
+    )
+    mentions = (
+        participants_payload.get("mentions")
+        if isinstance(participants_payload.get("mentions"), list)
+        else []
+    )
+    graph_nodes = (
+        dossier_graph.get("graph", {}).get("nodes", [])
+        if isinstance(dossier_graph.get("graph"), dict)
+        else []
+    )
+    resolved_label = (
+        str(candidate.get("suggested_label") or "A公司")
+        if isinstance(candidate, dict)
+        else "A公司"
+    )
+    context.participant_resolution = {
+        "conversation": conversation,
+        "fact_result": fact_result,
+        "candidates": candidates,
+        "candidate": candidate,
+        "resolve_result": resolve_result,
+        "participants_payload": participants_payload,
+        "dossier_graph": dossier_graph,
+        "participants": participants,
+        "mentions": mentions,
+        "graph_nodes": graph_nodes,
+        "resolved_label": resolved_label,
+    }
+    return context.participant_resolution
+
+
+def run_case_a(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    conversation = create_conversation(context.headers, title="workspace-A-legal-qa")
+    first_response, result = run_dialog(
+        context.headers,
+        conversation_id=conversation["id"],
+        text=context.legal_question,
+        mode_consent_enabled=False,
+        proactive_graph_mode=True,
+        progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
+    )
+    snapshot = get_conversation_snapshot(context.headers, conversation["id"])
+    graph = get_conversation_graph(context.headers, conversation["id"])
+    record = get_conversation_record(snapshot)
+    return BenchmarkCase(
+        code="A",
+        name="LEGAL_QA pure legal question does not enter structured workspace state",
+        notes={
+            "route_intent": result.get("route_intent"),
+            "sources_count": len(result.get("sources", [])),
+            "latency_ms": _latency_sum_ms(result),
+        },
+        checks=[
+            CheckResult("dialog completed", result.get("status") == "completed", str(result.get("status"))),
+            CheckResult(
+                "no mode-consent prompt",
+                first_response.get("status") != "needs_confirmation",
+                str(first_response.get("status")),
+            ),
+            CheckResult(
+                "route is not CASE_UPDATE",
+                str(result.get("route_intent") or "").upper() != "CASE_UPDATE",
+                str(result.get("route_intent") or ""),
+            ),
+            CheckResult("case_summary stays empty", not (record.get("case_summary") or "").strip()),
+            CheckResult("case_type stays empty", not (record.get("case_type") or "").strip()),
+            CheckResult("case_state stays empty", record.get("case_state") in (None, {}, "")),
+            CheckResult("conversation graph stays empty", is_empty_graph(graph)),
+        ],
+    )
+
+
+def run_case_b(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    conversation = create_conversation(context.headers, title="workspace-B-temporary")
+    first_status, first_payload, first_result = run_dialog_once(
+        context.headers,
+        conversation_id=conversation["id"],
+        text=context.case_message,
+        mode_consent_enabled=True,
+        progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
+    )
+    first_response = (
+        first_payload if isinstance(first_payload, dict) else {"status": f"HTTP {first_status}"}
+    )
+    consent = set_conversation_mode_consent(
+        context.headers,
+        conversation["id"],
+        mode="CASE_ANALYSIS",
+        consent="temporary",
+        reason="workspace_benchmark_temporary",
+    )
+    _, result = run_dialog(
+        context.headers,
+        conversation_id=conversation["id"],
+        text=context.case_message,
+        mode_consent_enabled=False,
+        progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=2,
+            turn_total=plan.turns,
+        ),
+    )
+    snapshot = get_conversation_snapshot(context.headers, conversation["id"])
+    graph = get_conversation_graph(context.headers, conversation["id"])
+    record = get_conversation_record(snapshot)
+    return BenchmarkCase(
+        code="B",
+        name="temporary consent keeps plain messages but skips structured persistence",
+        notes={
+            "route_intent": result.get("route_intent"),
+            "latency_ms": _latency_sum_ms(first_result, result),
+        },
+        checks=[
+            CheckResult("mode consent prompt appears", first_response.get("status") == "needs_confirmation", str(first_response)),
+            CheckResult("mode consent action is mode_consent", first_response.get("action") == "mode_consent", str(first_response.get("action"))),
+            CheckResult("temporary consent stored", consent.get("persistence_consent") == "temporary", json.dumps(consent, ensure_ascii=False)),
+            CheckResult("conversation mode stored as CASE_ANALYSIS", consent.get("conversation_mode") == "CASE_ANALYSIS", json.dumps(consent, ensure_ascii=False)),
+            CheckResult("dialog completed", result.get("status") == "completed", str(result.get("status"))),
+            CheckResult("case_summary stays empty", not (record.get("case_summary") or "").strip()),
+            CheckResult("case_type stays empty", not (record.get("case_type") or "").strip()),
+            CheckResult("case_state stays empty", record.get("case_state") in (None, {}, "")),
+            CheckResult("conversation graph stays empty", is_empty_graph(graph)),
+        ],
+    )
+
+
+def run_case_c(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    tracked = ensure_tracked_case(
+        context,
+        prompt_progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
+        fact_progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=2,
+            turn_total=plan.turns,
+        ),
+    )
+    return BenchmarkCase(
+        code="C",
+        name="tracked consent writes structured case and graph",
+        notes={
+            "route_intent": tracked["result"].get("route_intent"),
+            "graph_stats": tracked["graph"].get("stats") or tracked["graph"].get("graph", {}).get("stats", {}),
+            "graph_wait_timeout": tracked["graph_timeout_detail"],
+            "latency_ms": _latency_sum_ms(tracked["first_result"], tracked["result"]),
+        },
+        checks=[
+            CheckResult("mode consent prompt appears", tracked["first_response"].get("status") == "needs_confirmation", str(tracked["first_response"])),
+            CheckResult("tracked consent stored", tracked["consent"].get("persistence_consent") == "tracked", json.dumps(tracked["consent"], ensure_ascii=False)),
+            CheckResult("conversation mode stored as TRACKED_CASE", tracked["consent"].get("conversation_mode") == "TRACKED_CASE", json.dumps(tracked["consent"], ensure_ascii=False)),
+            CheckResult("dialog completed", tracked["result"].get("status") == "completed", str(tracked["result"].get("status"))),
+            CheckResult("case_summary is populated", bool((tracked["record"].get("case_summary") or "").strip()), tracked["record"].get("case_summary", "")),
+            CheckResult(
+                "case_type or case_state is populated",
+                bool((tracked["record"].get("case_type") or "").strip()) or tracked["record"].get("case_state") not in (None, {}, ""),
+                json.dumps(
+                    {
+                        "case_type": tracked["record"].get("case_type"),
+                        "case_state_present": tracked["record"].get("case_state") not in (None, {}, ""),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+            CheckResult(
+                "conversation graph is not empty",
+                not is_empty_graph(tracked["graph"]),
+                tracked["graph_timeout_detail"],
+            ),
+        ],
+    )
+
+
+def run_case_d(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    dossier_setup = ensure_dossier_setup(context)
+    tracked = ensure_tracked_case(context)
+    return BenchmarkCase(
+        code="D",
+        name="dossier creation and tracked conversation binding",
+        notes={"dossier_id": dossier_setup["dossier"]["id"], "latency_ms": 0},
+        checks=[
+            CheckResult(
+                "dossier appears in dossier list",
+                any(int(item.get("id") or 0) == dossier_setup["dossier"]["id"] for item in dossier_setup["dossier_list"]),
+                f"list_count={len(dossier_setup['dossier_list'])}",
+            ),
+            CheckResult(
+                "attach-dossier returns conversation binding",
+                int(dossier_setup["attached_conversation"].get("dossier_id") or 0) == dossier_setup["dossier"]["id"],
+                json.dumps(dossier_setup["attached_conversation"], ensure_ascii=False),
+            ),
+            CheckResult(
+                "conversation snapshot shows dossier_id",
+                int(dossier_setup["record"].get("dossier_id") or 0) == dossier_setup["dossier"]["id"],
+                json.dumps(dossier_setup["record"], ensure_ascii=False),
+            ),
+            CheckResult(
+                "dossier detail shows bound conversation",
+                any(int(item.get("id") or 0) == tracked["conversation"]["id"] for item in dossier_setup["dossier_detail"].get("conversations", [])),
+                f"conversation_count={dossier_setup['dossier_detail'].get('conversation_count')}",
+            ),
+            CheckResult(
+                "participant aliases saved on dossier",
+                str(dossier_setup["dossier_detail"].get("participant_aliases", {}).get("opposing_party", {}).get("label") or "") == "A公司",
+                json.dumps(dossier_setup["dossier_detail"].get("participant_aliases", {}), ensure_ascii=False),
+            ),
+        ],
+    )
+
+
+def run_case_e(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    dossier_conversation = ensure_dossier_conversation(context)
+    dossier_setup = ensure_dossier_setup(context)
+    return BenchmarkCase(
+        code="E",
+        name="creating a conversation from dossier binds tracked defaults immediately",
+        notes={"conversation_id": dossier_conversation["id"], "latency_ms": 0},
+        checks=[
+            CheckResult("conversation is bound to dossier", int(dossier_conversation.get("dossier_id") or 0) == dossier_setup["dossier"]["id"], json.dumps(dossier_conversation, ensure_ascii=False)),
+            CheckResult("conversation mode defaults to TRACKED_CASE", dossier_conversation.get("conversation_mode") == "TRACKED_CASE", json.dumps(dossier_conversation, ensure_ascii=False)),
+            CheckResult("persistence consent defaults to tracked", dossier_conversation.get("persistence_consent") == "tracked", json.dumps(dossier_conversation, ensure_ascii=False)),
+            CheckResult("mode reason is created_from_dossier", dossier_conversation.get("mode_reason") == "created_from_dossier", json.dumps(dossier_conversation, ensure_ascii=False)),
+        ],
+    )
+
+
+def run_case_f(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    dossier_conversation = ensure_dossier_conversation(context)
+    _, result = run_dialog(
+        context.headers,
+        conversation_id=dossier_conversation["id"],
+        text=context.memory_question,
+        mode_consent_enabled=False,
+        progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
+    )
+    response_text = str(result.get("response") or "")
+    return BenchmarkCase(
+        code="F",
+        name="dossier memory query answers from dossier context / graph context",
+        notes={
+            "route_intent": result.get("route_intent"),
+            "sources_count": len(result.get("sources", [])),
+            "latency_ms": _latency_sum_ms(result),
+        },
+        checks=[
+            CheckResult("dialog completed", result.get("status") == "completed", str(result.get("status"))),
+            CheckResult("response identifies the company", contains_any(response_text, "A公司"), response_text[:240]),
+            CheckResult(
+                "response avoids unrelated criminal / pollution RAG",
+                not contains_any(response_text, "污染环境", "刑法", "危险驾驶"),
+                response_text[:240],
+            ),
+        ],
+    )
+
+
+def run_case_g(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    dossier_conversation = ensure_dossier_conversation(context)
+    _, result = run_dialog(
+        context.headers,
+        conversation_id=dossier_conversation["id"],
+        text=context.legal_question,
+        mode_consent_enabled=False,
+        progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
+    )
+    response_text = str(result.get("response") or "")
+    return BenchmarkCase(
+        code="G",
+        name="explicit law query in dossier conversation still behaves like legal QA",
+        notes={
+            "route_intent": result.get("route_intent"),
+            "sources_count": len(result.get("sources", [])),
+            "latency_ms": _latency_sum_ms(result),
+        },
+        checks=[
+            CheckResult("dialog completed", result.get("status") == "completed", str(result.get("status"))),
+            CheckResult("response cites article 87", contains_any(response_text, "第八十七条", "87条"), response_text[:240]),
+            CheckResult("response discusses unlawful termination compensation", contains_any(response_text, "赔偿金", "违法解除"), response_text[:240]),
+            CheckResult("sources are present", len(result.get("sources", [])) >= 1, f"sources={len(result.get('sources', []))}"),
+            CheckResult("response is not polluted by dossier company label", "A公司" not in response_text, response_text[:240]),
+        ],
+    )
+
+
+def run_case_h(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    participant_resolution = ensure_participant_resolution(
+        context,
+        fact_progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=1,
+            turn_total=plan.turns,
+        ),
+    )
+    return BenchmarkCase(
+        code="H",
+        name="participant candidates and confirmation API flow",
+        notes={
+            "fact_route_intent": participant_resolution["fact_result"].get("route_intent"),
+            "candidate_count": len(participant_resolution["candidates"]),
+            "latency_ms": _latency_sum_ms(participant_resolution["fact_result"]),
+        },
+        checks=[
+            CheckResult("fact update dialog completed", participant_resolution["fact_result"].get("status") == "completed", str(participant_resolution["fact_result"].get("status"))),
+            CheckResult("participant candidates endpoint returns candidates", len(participant_resolution["candidates"]) >= 1, f"candidate_count={len(participant_resolution['candidates'])}"),
+            CheckResult("resolve endpoint succeeded", isinstance(participant_resolution["resolve_result"], dict) and participant_resolution["resolve_result"].get("status") == "success", json.dumps(participant_resolution["resolve_result"] or {}, ensure_ascii=False)),
+            CheckResult("confirmed participant is persisted", len(participant_resolution["participants"]) >= 1, f"participants={len(participant_resolution['participants'])}"),
+            CheckResult("participant mentions are persisted", len(participant_resolution["mentions"]) >= 1, f"mentions={len(participant_resolution['mentions'])}"),
+            CheckResult(
+                "dossier graph exposes participant mappings",
+                len(participant_resolution["dossier_graph"].get("participant_mappings", []) or []) >= 1,
+                f"participant_mappings={len(participant_resolution['dossier_graph'].get('participant_mappings', []) or [])}",
+            ),
+            CheckResult(
+                "dossier graph nodes can show resolved display_label",
+                any(str(node.get("display_label") or "") == participant_resolution["resolved_label"] for node in participant_resolution["graph_nodes"] if isinstance(node, dict)),
+                f"resolved_label={participant_resolution['resolved_label']}",
+            ),
+        ],
+    )
+
+
+def run_case_i(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    participant_resolution = ensure_participant_resolution(context)
+    dossier_setup = ensure_dossier_setup(context)
+    participants_before_archive = len(participant_resolution["participants"])
+    archived = archive_dossier(context.headers, dossier_setup["dossier"]["id"])
+    dossier_after_archive = get_dossier(context.headers, dossier_setup["dossier"]["id"])
+    participants_after_archive = get_dossier_participants(
+        context.headers,
+        dossier_setup["dossier"]["id"],
+    )
+    archived_participant_count = len(
+        participants_after_archive.get("participants")
+        if isinstance(participants_after_archive.get("participants"), list)
+        else []
+    )
+    archived_write_status, archived_write_payload = request_json(
+        "POST",
+        f"/dossiers/{dossier_setup['dossier']['id']}/participants",
+        headers=context.headers,
+        json_body={
+            "label": "归档后新增主体",
+            "role": "测试",
+            "party_side": "unknown",
+            "entity_type": "unknown",
+            "description": "should fail",
+        },
+    )
+    return BenchmarkCase(
+        code="I",
+        name="archive dossier keeps historical data and blocks new writes",
+        notes={"dossier_id": dossier_setup["dossier"]["id"], "latency_ms": 0},
+        checks=[
+            CheckResult("archive endpoint returns archived dossier", str(archived.get("status") or "") == "archived", json.dumps(archived, ensure_ascii=False)),
+            CheckResult("archived dossier remains readable", str(dossier_after_archive.get("status") or "") == "archived", json.dumps(dossier_after_archive, ensure_ascii=False)),
+            CheckResult("participants remain after archive", archived_participant_count == participants_before_archive, f"before={participants_before_archive} after={archived_participant_count}"),
+            CheckResult("archived dossier rejects participant writes", archived_write_status == 409, f"status={archived_write_status} payload={archived_write_payload}"),
+        ],
+    )
+
+
+WORKSPACE_CASE_RUNNERS = {
+    "A": run_case_a,
+    "B": run_case_b,
+    "C": run_case_c,
+    "D": run_case_d,
+    "E": run_case_e,
+    "F": run_case_f,
+    "G": run_case_g,
+    "H": run_case_h,
+    "I": run_case_i,
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Personalized workspace benchmark for H2-H5 regression"
@@ -869,12 +1572,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smoke",
         action="store_true",
-        help="run a reduced regression set without participant resolution / archive checks",
+        help="run the default reduced regression set (A-G) when --only=all",
+    )
+    parser.add_argument(
+        "--only",
+        default="all",
+        help=(
+            "workspace group to run: all, baseline, consent, temporary, tracked, "
+            "dossier, memory, graph, participant, archive, delete"
+        ),
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print the planned benchmark cases and exit without network calls",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=POLL_PROGRESS_INTERVAL,
+        help="seconds between polling progress logs; default 10",
     )
     parser.add_argument(
         "--username",
@@ -889,14 +1606,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def planned_case_names(smoke: bool) -> list[str]:
-    return [plan.name for plan in _workspace_case_plans(smoke)]
+def planned_case_names(case_plans: list[WorkspaceCasePlan]) -> list[str]:
+    return [plan.name for plan in case_plans]
 
 
-def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any]:
+def run_benchmark(
+    *,
+    smoke: bool,
+    only: str,
+    progress_interval: float,
+    username: str,
+    password: str,
+) -> dict[str, Any]:
+    global POLL_PROGRESS_INTERVAL
+    POLL_PROGRESS_INTERVAL = max(1.0, float(progress_interval))
     benchmark_started = time.perf_counter()
-    case_plans = _workspace_case_plans(smoke)
-    plan_by_code = {plan.code: plan for plan in case_plans}
+    case_plans = _select_workspace_case_plans(smoke=smoke, only=only)
+    normalized_only = str(only or "all").strip().lower() or "all"
     run_progress = WorkspaceRunProgress(
         case_total=len(case_plans),
         check_total=sum(plan.checks for plan in case_plans),
@@ -910,10 +1636,36 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         f"checks={run_progress.check_total}"
     )
     print(
-        f"mode: smoke={smoke} username={username or '<random>'} "
-        f"password={'***' if password else '<empty>'}"
+        f"mode: smoke={smoke} only={normalized_only} "
+        f"progress_interval={POLL_PROGRESS_INTERVAL:.1f}s "
+        f"username={username or '<random>'} password={'***' if password else '<empty>'}"
     )
     print("=" * 72)
+
+    if normalized_only == "delete" and not DELETE_GROUP_IMPLEMENTED:
+        print("[workspace] warning: only=delete is reserved; delete suite is not implemented yet")
+
+    if not case_plans:
+        report = {
+            "generated_at": datetime.now().isoformat(),
+            "base_url": BASE_URL,
+            "username": username or "",
+            "smoke": smoke,
+            "only": normalized_only,
+            "summary": {
+                "check_score": "0/0",
+                "check_pass_rate": 0.0,
+                "case_score": "0/0",
+                "case_pass_rate": 0.0,
+            },
+            "cases": [],
+            "warnings": ["delete suite is not implemented yet"] if normalized_only == "delete" else [],
+        }
+        output_path = RESULTS_DIR / _workspace_output_name(smoke=smoke, only=normalized_only)
+        output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\nSaved report: {output_path}")
+        print("summary: cases_passed=0/0 checks_passed=0/0 elapsed=0.0s")
+        return report
 
     status_code, _ = request_json("GET", "/health", timeout=5)
     if status_code != 200:
@@ -922,607 +1674,25 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
     benchmark_username = username or random_username()
     token, user = login_or_register(benchmark_username, password)
     headers = {"Authorization": f"Bearer {token}"}
+    scenario = WorkspaceScenarioContext(headers=headers, smoke=smoke)
 
     cases: list[BenchmarkCase] = []
-    context: dict[str, Any] = {
-        "username": benchmark_username,
-        "user": user,
-    }
-
-    legal_question = "劳动合同法第八十七条规定了什么？"
-    case_message = "我补充一下案情：我在A公司工作两年，月薪12000，公司一直没签劳动合同，2024年4月4日公司口头辞退我。"
-    followup_fact_message = "我再补充一下案情：后来用人单位的人事今天又通知我尽快办离职，老板还说A公司不会给我任何补偿。"
-    memory_question = "这个案卷里之前提到的公司是谁？"
-
-    # A
-    plan = plan_by_code["A"]
-    case_started = _workspace_case_start(
-        case_index=1,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-    )
-    conversation_a = create_conversation(headers, title="workspace-A-legal-qa")
-    first_a, result_a = run_dialog(
-        headers,
-        conversation_id=conversation_a["id"],
-        text=legal_question,
-        mode_consent_enabled=False,
-        proactive_graph_mode=True,
-        progress=_build_workspace_turn_progress(
-            case_index=1,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            turn_index=1,
-            turn_total=plan.turns,
-        ),
-    )
-    snapshot_a = get_conversation_snapshot(headers, conversation_a["id"])
-    graph_a = get_conversation_graph(headers, conversation_a["id"])
-    record_a = get_conversation_record(snapshot_a)
-    case_a = BenchmarkCase(
-        code="A",
-        name="LEGAL_QA pure legal question does not enter structured workspace state",
-        notes={
-            "route_intent": result_a.get("route_intent"),
-            "sources_count": len(result_a.get("sources", [])),
-            "latency_ms": _latency_sum_ms(result_a),
-        },
-        checks=[
-            CheckResult("dialog completed", result_a.get("status") == "completed", str(result_a.get("status"))),
-            CheckResult(
-                "no mode-consent prompt",
-                first_a.get("status") != "needs_confirmation",
-                str(first_a.get("status")),
-            ),
-            CheckResult(
-                "route is not CASE_UPDATE",
-                str(result_a.get("route_intent") or "").upper() != "CASE_UPDATE",
-                str(result_a.get("route_intent") or ""),
-            ),
-            CheckResult("case_summary stays empty", not (record_a.get("case_summary") or "").strip()),
-            CheckResult("case_type stays empty", not (record_a.get("case_type") or "").strip()),
-            CheckResult("case_state stays empty", record_a.get("case_state") in (None, {}, "")),
-            CheckResult("conversation graph stays empty", is_empty_graph(graph_a)),
-        ],
-    )
-    cases.append(case_a)
-    _record_workspace_case(
-        case=case_a,
-        case_index=1,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-        started=case_started,
-        progress=run_progress,
-    )
-
-    # B
-    plan = plan_by_code["B"]
-    case_started = _workspace_case_start(
-        case_index=2,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-    )
-    conversation_b = create_conversation(headers, title="workspace-B-temporary")
-    first_b_status, first_b_payload, first_b_result = run_dialog_once(
-        headers,
-        conversation_id=conversation_b["id"],
-        text=case_message,
-        mode_consent_enabled=True,
-        progress=_build_workspace_turn_progress(
-            case_index=2,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            turn_index=1,
-            turn_total=plan.turns,
-        ),
-    )
-    first_b = first_b_payload if isinstance(first_b_payload, dict) else {"status": f"HTTP {first_b_status}"}
-    consent_b = set_conversation_mode_consent(
-        headers,
-        conversation_b["id"],
-        mode="CASE_ANALYSIS",
-        consent="temporary",
-        reason="workspace_benchmark_temporary",
-    )
-    _, result_b = run_dialog(
-        headers,
-        conversation_id=conversation_b["id"],
-        text=case_message,
-        mode_consent_enabled=False,
-        progress=_build_workspace_turn_progress(
-            case_index=2,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            turn_index=2,
-            turn_total=plan.turns,
-        ),
-    )
-    snapshot_b = get_conversation_snapshot(headers, conversation_b["id"])
-    graph_b = get_conversation_graph(headers, conversation_b["id"])
-    record_b = get_conversation_record(snapshot_b)
-    case_b = BenchmarkCase(
-        code="B",
-        name="temporary consent keeps plain messages but skips structured persistence",
-        notes={
-            "route_intent": result_b.get("route_intent"),
-            "latency_ms": _latency_sum_ms(first_b_result, result_b),
-        },
-        checks=[
-            CheckResult("mode consent prompt appears", first_b.get("status") == "needs_confirmation", str(first_b)),
-            CheckResult("mode consent action is mode_consent", first_b.get("action") == "mode_consent", str(first_b.get("action"))),
-            CheckResult("temporary consent stored", consent_b.get("persistence_consent") == "temporary", json.dumps(consent_b, ensure_ascii=False)),
-            CheckResult("conversation mode stored as CASE_ANALYSIS", consent_b.get("conversation_mode") == "CASE_ANALYSIS", json.dumps(consent_b, ensure_ascii=False)),
-            CheckResult("dialog completed", result_b.get("status") == "completed", str(result_b.get("status"))),
-            CheckResult("case_summary stays empty", not (record_b.get("case_summary") or "").strip()),
-            CheckResult("case_type stays empty", not (record_b.get("case_type") or "").strip()),
-            CheckResult("case_state stays empty", record_b.get("case_state") in (None, {}, "")),
-            CheckResult("conversation graph stays empty", is_empty_graph(graph_b)),
-        ],
-    )
-    cases.append(case_b)
-    _record_workspace_case(
-        case=case_b,
-        case_index=2,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-        started=case_started,
-        progress=run_progress,
-    )
-
-    # C
-    plan = plan_by_code["C"]
-    case_started = _workspace_case_start(
-        case_index=3,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-    )
-    conversation_c = create_conversation(headers, title="workspace-C-tracked")
-    first_c_status, first_c_payload, first_c_result = run_dialog_once(
-        headers,
-        conversation_id=conversation_c["id"],
-        text=case_message,
-        mode_consent_enabled=True,
-        progress=_build_workspace_turn_progress(
-            case_index=3,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            turn_index=1,
-            turn_total=plan.turns,
-        ),
-    )
-    first_c = first_c_payload if isinstance(first_c_payload, dict) else {"status": f"HTTP {first_c_status}"}
-    consent_c = set_conversation_mode_consent(
-        headers,
-        conversation_c["id"],
-        mode="TRACKED_CASE",
-        consent="tracked",
-        reason="workspace_benchmark_tracked",
-    )
-    _, result_c = run_dialog(
-        headers,
-        conversation_id=conversation_c["id"],
-        text=case_message,
-        mode_consent_enabled=False,
-        progress=_build_workspace_turn_progress(
-            case_index=3,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            turn_index=2,
-            turn_total=plan.turns,
-        ),
-    )
-    snapshot_c, graph_c, graph_c_timeout_detail = wait_for_tracked_graph_update(
-        headers,
-        conversation_c["id"],
-        smoke=smoke,
-    )
-    record_c = get_conversation_record(snapshot_c)
-    case_c = BenchmarkCase(
-        code="C",
-        name="tracked consent writes structured case and graph",
-        notes={
-            "route_intent": result_c.get("route_intent"),
-            "graph_stats": graph_c.get("stats") or graph_c.get("graph", {}).get("stats", {}),
-            "graph_wait_timeout": graph_c_timeout_detail,
-            "latency_ms": _latency_sum_ms(first_c_result, result_c),
-        },
-        checks=[
-            CheckResult("mode consent prompt appears", first_c.get("status") == "needs_confirmation", str(first_c)),
-            CheckResult("tracked consent stored", consent_c.get("persistence_consent") == "tracked", json.dumps(consent_c, ensure_ascii=False)),
-            CheckResult("conversation mode stored as TRACKED_CASE", consent_c.get("conversation_mode") == "TRACKED_CASE", json.dumps(consent_c, ensure_ascii=False)),
-            CheckResult("dialog completed", result_c.get("status") == "completed", str(result_c.get("status"))),
-            CheckResult("case_summary is populated", bool((record_c.get("case_summary") or "").strip()), record_c.get("case_summary", "")),
-            CheckResult(
-                "case_type or case_state is populated",
-                bool((record_c.get("case_type") or "").strip()) or record_c.get("case_state") not in (None, {}, ""),
-                json.dumps(
-                    {
-                        "case_type": record_c.get("case_type"),
-                        "case_state_present": record_c.get("case_state") not in (None, {}, ""),
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
-            CheckResult(
-                "conversation graph is not empty",
-                not is_empty_graph(graph_c),
-                graph_c_timeout_detail,
-            ),
-        ],
-    )
-    cases.append(case_c)
-    _record_workspace_case(
-        case=case_c,
-        case_index=3,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-        started=case_started,
-        progress=run_progress,
-    )
-    context["tracked_conversation_id"] = conversation_c["id"]
-
-    # D
-    plan = plan_by_code["D"]
-    case_started = _workspace_case_start(
-        case_index=4,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-    )
-    dossier = create_dossier(
-        headers,
-        title="劳动争议测试案卷",
-        case_type="劳动争议",
-        summary="workspace benchmark dossier",
-    )
-    dossier = update_dossier_participant_aliases(
-        headers,
-        dossier["id"],
-        primary_label="我",
-        primary_role="劳动者",
-        opposing_label="A公司",
-        opposing_role="用人单位",
-    )
-    attached_c = attach_conversation_to_dossier(headers, conversation_c["id"], dossier["id"])
-    dossier_list = list_dossiers(headers)
-    dossier_detail = get_dossier(headers, dossier["id"])
-    snapshot_c_after_attach = get_conversation_snapshot(headers, conversation_c["id"])
-    record_c_after_attach = get_conversation_record(snapshot_c_after_attach)
-    case_d = BenchmarkCase(
-        code="D",
-        name="dossier creation and tracked conversation binding",
-        notes={"dossier_id": dossier["id"], "latency_ms": 0},
-        checks=[
-            CheckResult(
-                "dossier appears in dossier list",
-                any(int(item.get("id") or 0) == dossier["id"] for item in dossier_list),
-                f"list_count={len(dossier_list)}",
-            ),
-            CheckResult(
-                "attach-dossier returns conversation binding",
-                int(attached_c.get("dossier_id") or 0) == dossier["id"],
-                json.dumps(attached_c, ensure_ascii=False),
-            ),
-            CheckResult(
-                "conversation snapshot shows dossier_id",
-                int(record_c_after_attach.get("dossier_id") or 0) == dossier["id"],
-                json.dumps(record_c_after_attach, ensure_ascii=False),
-            ),
-            CheckResult(
-                "dossier detail shows bound conversation",
-                any(int(item.get("id") or 0) == conversation_c["id"] for item in dossier_detail.get("conversations", [])),
-                f"conversation_count={dossier_detail.get('conversation_count')}",
-            ),
-            CheckResult(
-                "participant aliases saved on dossier",
-                str(dossier_detail.get("participant_aliases", {}).get("opposing_party", {}).get("label") or "") == "A公司",
-                json.dumps(dossier_detail.get("participant_aliases", {}), ensure_ascii=False),
-            ),
-        ],
-    )
-    cases.append(case_d)
-    _record_workspace_case(
-        case=case_d,
-        case_index=4,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-        started=case_started,
-        progress=run_progress,
-    )
-    context["dossier_id"] = dossier["id"]
-
-    # E
-    plan = plan_by_code["E"]
-    case_started = _workspace_case_start(
-        case_index=5,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-    )
-    dossier_conversation = create_conversation(
-        headers,
-        title="workspace-E-dossier-bound",
-        dossier_id=dossier["id"],
-    )
-    case_e = BenchmarkCase(
-        code="E",
-        name="creating a conversation from dossier binds tracked defaults immediately",
-        notes={"conversation_id": dossier_conversation["id"], "latency_ms": 0},
-        checks=[
-            CheckResult("conversation is bound to dossier", int(dossier_conversation.get("dossier_id") or 0) == dossier["id"], json.dumps(dossier_conversation, ensure_ascii=False)),
-            CheckResult("conversation mode defaults to TRACKED_CASE", dossier_conversation.get("conversation_mode") == "TRACKED_CASE", json.dumps(dossier_conversation, ensure_ascii=False)),
-            CheckResult("persistence consent defaults to tracked", dossier_conversation.get("persistence_consent") == "tracked", json.dumps(dossier_conversation, ensure_ascii=False)),
-            CheckResult("mode reason is created_from_dossier", dossier_conversation.get("mode_reason") == "created_from_dossier", json.dumps(dossier_conversation, ensure_ascii=False)),
-        ],
-    )
-    cases.append(case_e)
-    _record_workspace_case(
-        case=case_e,
-        case_index=5,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-        started=case_started,
-        progress=run_progress,
-    )
-    context["dossier_conversation_id"] = dossier_conversation["id"]
-
-    # F
-    plan = plan_by_code["F"]
-    case_started = _workspace_case_start(
-        case_index=6,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-    )
-    _, result_f = run_dialog(
-        headers,
-        conversation_id=dossier_conversation["id"],
-        text=memory_question,
-        mode_consent_enabled=False,
-        progress=_build_workspace_turn_progress(
-            case_index=6,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            turn_index=1,
-            turn_total=plan.turns,
-        ),
-    )
-    text_f = str(result_f.get("response") or "")
-    case_f = BenchmarkCase(
-        code="F",
-        name="dossier memory query answers from dossier context / graph context",
-        notes={
-            "route_intent": result_f.get("route_intent"),
-            "sources_count": len(result_f.get("sources", [])),
-            "latency_ms": _latency_sum_ms(result_f),
-        },
-        checks=[
-            CheckResult("dialog completed", result_f.get("status") == "completed", str(result_f.get("status"))),
-            CheckResult("response identifies the company", contains_any(text_f, "A公司"), text_f[:240]),
-            CheckResult(
-                "response avoids unrelated criminal / pollution RAG",
-                not contains_any(text_f, "污染环境", "刑法", "危险驾驶"),
-                text_f[:240],
-            ),
-        ],
-    )
-    cases.append(case_f)
-    _record_workspace_case(
-        case=case_f,
-        case_index=6,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-        started=case_started,
-        progress=run_progress,
-    )
-
-    # G
-    plan = plan_by_code["G"]
-    case_started = _workspace_case_start(
-        case_index=7,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-    )
-    _, result_g = run_dialog(
-        headers,
-        conversation_id=dossier_conversation["id"],
-        text=legal_question,
-        mode_consent_enabled=False,
-        progress=_build_workspace_turn_progress(
-            case_index=7,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            turn_index=1,
-            turn_total=plan.turns,
-        ),
-    )
-    text_g = str(result_g.get("response") or "")
-    case_g = BenchmarkCase(
-        code="G",
-        name="explicit law query in dossier conversation still behaves like legal QA",
-        notes={
-            "route_intent": result_g.get("route_intent"),
-            "sources_count": len(result_g.get("sources", [])),
-            "latency_ms": _latency_sum_ms(result_g),
-        },
-        checks=[
-            CheckResult("dialog completed", result_g.get("status") == "completed", str(result_g.get("status"))),
-            CheckResult("response cites article 87", contains_any(text_g, "第八十七条", "87条"), text_g[:240]),
-            CheckResult("response discusses unlawful termination compensation", contains_any(text_g, "赔偿金", "违法解除"), text_g[:240]),
-            CheckResult("sources are present", len(result_g.get("sources", [])) >= 1, f"sources={len(result_g.get('sources', []))}"),
-            CheckResult("response is not polluted by dossier company label", "A公司" not in text_g, text_g[:240]),
-        ],
-    )
-    cases.append(case_g)
-    _record_workspace_case(
-        case=case_g,
-        case_index=7,
-        case_total=run_progress.case_total,
-        case_key=plan.key,
-        started=case_started,
-        progress=run_progress,
-    )
-
-    if not smoke:
-        # H
-        plan = plan_by_code["H"]
+    for case_index, plan in enumerate(case_plans, start=1):
         case_started = _workspace_case_start(
-            case_index=8,
+            case_index=case_index,
             case_total=run_progress.case_total,
             case_key=plan.key,
         )
-        conversation_h = create_conversation(
-            headers,
-            title="workspace-H-participant-resolution",
-            dossier_id=dossier["id"],
+        case = WORKSPACE_CASE_RUNNERS[plan.code](
+            scenario,
+            plan=plan,
+            case_index=case_index,
+            case_total=run_progress.case_total,
         )
-        _, result_h_fact = run_dialog(
-            headers,
-            conversation_id=conversation_h["id"],
-            text=followup_fact_message,
-            mode_consent_enabled=False,
-            progress=_build_workspace_turn_progress(
-                case_index=8,
-                case_total=run_progress.case_total,
-                case_key=plan.key,
-                turn_index=1,
-                turn_total=plan.turns,
-            ),
-        )
-        candidates_payload = retry_value(
-            lambda: get_dossier_participant_candidates(headers, dossier["id"]),
-            lambda payload: bool((payload.get("candidates") if isinstance(payload, dict) else []) or []),
-            attempts=4,
-            sleep_s=2.0,
-        )
-        candidates = (
-            candidates_payload.get("candidates")
-            if isinstance(candidates_payload, dict) and isinstance(candidates_payload.get("candidates"), list)
-            else []
-        )
-        candidate = next(
-            (
-                item
-                for item in candidates
-                if isinstance(item, dict)
-                and item.get("entity_type") == "organization"
-            ),
-            candidates[0] if candidates else None,
-        )
-        resolve_result: dict[str, Any] | None = None
-        if isinstance(candidate, dict):
-            resolve_result = resolve_dossier_participant(
-                headers,
-                dossier["id"],
-                {
-                    "participant": {
-                        "label": str(candidate.get("suggested_label") or "A公司"),
-                        "role": str(candidate.get("suggested_role") or "用人单位") or None,
-                        "party_side": str(candidate.get("party_side") or "opponent"),
-                        "entity_type": str(candidate.get("entity_type") or "organization"),
-                        "description": "workspace benchmark confirmed participant",
-                    },
-                    "mentions": candidate.get("mentions") or [],
-                },
-            )
-        participants_payload = get_dossier_participants(headers, dossier["id"])
-        dossier_graph_after_resolve = get_dossier_graph(headers, dossier["id"])
-        participants_list = (
-            participants_payload.get("participants")
-            if isinstance(participants_payload.get("participants"), list)
-            else []
-        )
-        mentions_list = (
-            participants_payload.get("mentions")
-            if isinstance(participants_payload.get("mentions"), list)
-            else []
-        )
-        graph_nodes = (
-            dossier_graph_after_resolve.get("graph", {}).get("nodes", [])
-            if isinstance(dossier_graph_after_resolve.get("graph"), dict)
-            else []
-        )
-        resolved_label = (
-            str(candidate.get("suggested_label") or "A公司")
-            if isinstance(candidate, dict)
-            else "A公司"
-        )
-        case_h = BenchmarkCase(
-            code="H",
-            name="participant candidates and confirmation API flow",
-            notes={
-                "fact_route_intent": result_h_fact.get("route_intent"),
-                "candidate_count": len(candidates),
-                "latency_ms": _latency_sum_ms(result_h_fact),
-            },
-            checks=[
-                CheckResult("fact update dialog completed", result_h_fact.get("status") == "completed", str(result_h_fact.get("status"))),
-                CheckResult("participant candidates endpoint returns candidates", len(candidates) >= 1, f"candidate_count={len(candidates)}"),
-                CheckResult("resolve endpoint succeeded", isinstance(resolve_result, dict) and resolve_result.get("status") == "success", json.dumps(resolve_result or {}, ensure_ascii=False)),
-                CheckResult("confirmed participant is persisted", len(participants_list) >= 1, f"participants={len(participants_list)}"),
-                CheckResult("participant mentions are persisted", len(mentions_list) >= 1, f"mentions={len(mentions_list)}"),
-                CheckResult(
-                    "dossier graph exposes participant mappings",
-                    len(dossier_graph_after_resolve.get("participant_mappings", []) or []) >= 1,
-                    f"participant_mappings={len(dossier_graph_after_resolve.get('participant_mappings', []) or [])}",
-                ),
-                CheckResult(
-                    "dossier graph nodes can show resolved display_label",
-                    any(str(node.get("display_label") or "") == resolved_label for node in graph_nodes if isinstance(node, dict)),
-                    f"resolved_label={resolved_label}",
-                ),
-            ],
-        )
-        cases.append(case_h)
+        cases.append(case)
         _record_workspace_case(
-            case=case_h,
-            case_index=8,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-            started=case_started,
-            progress=run_progress,
-        )
-
-        # I
-        plan = plan_by_code["I"]
-        case_started = _workspace_case_start(
-            case_index=9,
-            case_total=run_progress.case_total,
-            case_key=plan.key,
-        )
-        participants_before_archive = len(participants_list)
-        archived = archive_dossier(headers, dossier["id"])
-        dossier_after_archive = get_dossier(headers, dossier["id"])
-        participants_after_archive = get_dossier_participants(headers, dossier["id"])
-        archived_participant_count = len(
-            participants_after_archive.get("participants")
-            if isinstance(participants_after_archive.get("participants"), list)
-            else []
-        )
-        archived_write_status, archived_write_payload = request_json(
-            "POST",
-            f"/dossiers/{dossier['id']}/participants",
-            headers=headers,
-            json_body={
-                "label": "归档后新增主体",
-                "role": "测试",
-                "party_side": "unknown",
-                "entity_type": "unknown",
-                "description": "should fail",
-            },
-        )
-        case_i = BenchmarkCase(
-            code="I",
-            name="archive dossier keeps historical data and blocks new writes",
-            notes={"dossier_id": dossier["id"], "latency_ms": 0},
-            checks=[
-                CheckResult("archive endpoint returns archived dossier", str(archived.get("status") or "") == "archived", json.dumps(archived, ensure_ascii=False)),
-                CheckResult("archived dossier remains readable", str(dossier_after_archive.get("status") or "") == "archived", json.dumps(dossier_after_archive, ensure_ascii=False)),
-                CheckResult("participants remain after archive", archived_participant_count == participants_before_archive, f"before={participants_before_archive} after={archived_participant_count}"),
-                CheckResult("archived dossier rejects participant writes", archived_write_status == 409, f"status={archived_write_status} payload={archived_write_payload}"),
-            ],
-        )
-        cases.append(case_i)
-        _record_workspace_case(
-            case=case_i,
-            case_index=9,
+            case=case,
+            case_index=case_index,
             case_total=run_progress.case_total,
             case_key=plan.key,
             started=case_started,
@@ -1545,6 +1715,7 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         "base_url": BASE_URL,
         "username": benchmark_username,
         "smoke": smoke,
+        "only": normalized_only,
         "summary": {
             "check_score": f"{total_passed}/{total_checks}",
             "check_pass_rate": (total_passed / total_checks) if total_checks else 0.0,
@@ -1570,12 +1741,7 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
             for case in cases
         ],
     }
-    output_name = (
-        "personalized_workspace_benchmark_smoke.json"
-        if smoke
-        else "personalized_workspace_benchmark_report.json"
-    )
-    output_path = RESULTS_DIR / output_name
+    output_path = RESULTS_DIR / _workspace_output_name(smoke=smoke, only=normalized_only)
     output_path.write_text(
         json.dumps(report, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1606,7 +1772,11 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
 
 def main() -> None:
     args = parse_args()
-    case_plans = _workspace_case_plans(bool(args.smoke))
+    normalized_only = str(args.only or "all").strip().lower() or "all"
+    if normalized_only != "all" and bool(args.smoke):
+        print("[workspace] warning: --only overrides --smoke")
+    smoke = bool(args.smoke) if normalized_only == "all" else False
+    case_plans = _select_workspace_case_plans(smoke=smoke, only=normalized_only)
     planned_turns = sum(plan.turns for plan in case_plans)
     planned_checks = sum(plan.checks for plan in case_plans)
     if args.dry_run:
@@ -1618,17 +1788,22 @@ def main() -> None:
             f"checks={planned_checks}"
         )
         print(
-            f"mode: smoke={bool(args.smoke)} dry_run=True "
+            f"mode: smoke={smoke} only={normalized_only} dry_run=True "
+            f"progress_interval={max(1.0, float(args.progress_interval)):.1f}s "
             f"username={str(args.username or '').strip() or '<random>'}"
         )
+        if normalized_only == "delete" and not DELETE_GROUP_IMPLEMENTED:
+            print("[workspace] warning: only=delete is reserved; delete suite is not implemented yet")
         print("=" * 72)
         print("Planned personalized workspace benchmark cases:")
-        for item in planned_case_names(bool(args.smoke)):
+        for item in planned_case_names(case_plans):
             print(f"  - {item}")
         return
 
     report = run_benchmark(
-        smoke=bool(args.smoke),
+        smoke=smoke,
+        only=normalized_only,
+        progress_interval=float(args.progress_interval),
         username=str(args.username or "").strip(),
         password=str(args.password or "workspace123"),
     )
@@ -1638,6 +1813,11 @@ def main() -> None:
     print("=" * 72)
     print(f"Check score: {summary['check_score']} ({summary['check_pass_rate']:.0%})")
     print(f"Case score:  {summary['case_score']} ({summary['case_pass_rate']:.0%})")
+    failed_cases = [
+        case for case in report.get("cases", [])
+        if isinstance(case, dict) and not bool(case.get("passed"))
+    ]
+    raise SystemExit(1 if failed_cases else 0)
 
 
 if __name__ == "__main__":

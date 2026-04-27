@@ -1,0 +1,89 @@
+# Benchmark Strategy
+
+## Overview
+
+The benchmark system is split into smaller, independently runnable suites.
+The goal is to make regression results easier to interpret and to keep modern
+workspace validation separate from legacy ordinary legal QA regression.
+
+## Layers
+
+### `pytest`
+
+- Purpose: fast code-level regression for services, routes, policies, and data handling.
+- Usage: run frequently during development.
+- Strength: quickest signal when a code change breaks expected logic.
+
+### `smoke_benchmark.py`
+
+- Purpose: fastest end-to-end smoke benchmark for the default ordinary legal QA path.
+- Scope:
+  - strict legal QA questions only
+  - explicit `mode_consent_enabled=false`
+  - no dossier binding
+  - no workspace / graph / participant flows
+- Strength: catches accidental workspace pollution in the ordinary `/dialog` path.
+
+### `personalized_workspace_benchmark.py --only <group>`
+
+- Purpose: targeted validation for independent workspace capabilities.
+- Supported groups:
+  - `baseline`
+  - `consent`
+  - `temporary`
+  - `tracked`
+  - `dossier`
+  - `memory`
+  - `graph`
+  - `participant`
+  - `archive`
+  - `delete` (reserved; currently not implemented)
+  - `all`
+- Strength: each workspace capability can be isolated and rerun without paying the cost of a full, mixed benchmark.
+
+### `run_benchmarks.py`
+
+- Purpose: modern orchestrator entry point.
+- Behavior:
+  - `quick` runs a minimal sequence of independent suites
+  - `workspace` runs the workspace-focused suite sequence
+  - `full` runs the modern end-to-end suite sequence
+  - `legacy` explicitly runs the old quality benchmark
+- Important:
+  - modern `full` is defined as sequential orchestration of independent suites
+  - modern `full` does not automatically run the old monolithic quality benchmark
+
+### `quality_benchmark.py`
+
+- Purpose: legacy quality regression for the older broad legal QA / general consult benchmark.
+- Status: low-frequency manual regression.
+- Recommended use:
+  - release checks
+  - defense/demo prep
+  - historical comparison against the old 80-point quality baseline
+
+## Recommended Usage
+
+### During development
+
+1. Run `pytest`.
+2. Run `smoke_benchmark.py` when touching ordinary legal QA behavior.
+3. Run `personalized_workspace_benchmark.py --only <group>` for the specific workspace feature you changed.
+
+### Before merging larger changes
+
+1. Run `pytest`.
+2. Run `run_benchmarks.py --profile quick`.
+3. If the change touched workspace logic, run `run_benchmarks.py --profile workspace`.
+
+### Before release / defense
+
+1. Run `pytest`.
+2. Run `run_benchmarks.py --profile full`.
+3. Optionally run `quality_benchmark.py` as a legacy comparison baseline.
+
+## Rationale
+
+- Smaller suites reduce diagnosis time.
+- Modern workspace features should not contaminate default ordinary legal QA regression.
+- A modern full regression should be composable from smaller suites instead of being trapped in one large script.
