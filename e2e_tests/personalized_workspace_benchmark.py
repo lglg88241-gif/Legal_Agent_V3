@@ -4,7 +4,7 @@ API-level regression benchmark for the H2-H5 personalized workspace flow.
 This benchmark is intentionally separate from quality_benchmark.py:
   - quality_benchmark.py focuses on the legacy ordinary legal-QA / general consult path
   - personalized_workspace_benchmark.py focuses on mode consent, dossier workflow,
-    dossier memory, participant resolution, and archive semantics
+    dossier memory, participant resolution, archive semantics, and hard delete
 """
 from __future__ import annotations
 
@@ -124,6 +124,7 @@ WORKSPACE_CASE_PLANS = [
     WorkspaceCasePlan("G", "G_explicit_law_query", "G explicit law query in dossier conversation still behaves like legal QA", 1, 5),
     WorkspaceCasePlan("H", "H_participant_resolution", "H participant candidates and confirmation API flow", 1, 7),
     WorkspaceCasePlan("I", "I_archive_semantics", "I archive dossier keeps historical data accessible", 0, 4),
+    WorkspaceCasePlan("J", "J_hard_delete", "J hard delete dossier removes registry data and detaches conversations", 0, 6),
 ]
 
 WORKSPACE_ONLY_GROUPS: dict[str, tuple[str, ...]] = {
@@ -136,9 +137,9 @@ WORKSPACE_ONLY_GROUPS: dict[str, tuple[str, ...]] = {
     "graph": ("C", "F", "H"),
     "participant": ("H",),
     "archive": ("I",),
-    "delete": (),
+    "delete": ("J",),
 }
-DELETE_GROUP_IMPLEMENTED = False
+DELETE_GROUP_IMPLEMENTED = True
 
 
 @dataclass
@@ -577,6 +578,13 @@ def archive_dossier(headers: dict[str, str], dossier_id: int) -> dict[str, Any]:
     if not dossier:
         raise AssertionError(f"Archive dossier failed: {body}")
     return dossier
+
+
+def hard_delete_dossier(headers: dict[str, str], dossier_id: int) -> dict[str, Any]:
+    body = assert_ok("DELETE", f"/dossiers/hard/{dossier_id}", headers=headers)
+    if not isinstance(body, dict) or not body.get("deleted"):
+        raise AssertionError(f"Hard delete dossier failed: {body}")
+    return body
 
 
 def start_dialog(
@@ -1552,6 +1560,88 @@ def run_case_i(
     )
 
 
+def run_case_j(
+    context: WorkspaceScenarioContext,
+    *,
+    plan: WorkspaceCasePlan,
+    case_index: int,
+    case_total: int,
+) -> BenchmarkCase:
+    participant_resolution = ensure_participant_resolution(context)
+    dossier_setup = ensure_dossier_setup(context)
+    dossier_id = int(dossier_setup["dossier"]["id"])
+    tracked_conversation_id = int(dossier_setup["attached_conversation"]["id"])
+    participant_conversation_id = int(participant_resolution["conversation"]["id"])
+
+    delete_result = hard_delete_dossier(context.headers, dossier_id)
+    deleted_dossier_status, deleted_dossier_payload = request_json(
+        "GET",
+        f"/dossiers/{dossier_id}",
+        headers=context.headers,
+    )
+    deleted_participant_status, deleted_participant_payload = request_json(
+        "GET",
+        f"/dossiers/{dossier_id}/participants",
+        headers=context.headers,
+    )
+    dossier_list_after_delete = list_dossiers(context.headers)
+    tracked_snapshot = get_conversation_snapshot(context.headers, tracked_conversation_id)
+    participant_snapshot = get_conversation_snapshot(
+        context.headers,
+        participant_conversation_id,
+    )
+    tracked_record = get_conversation_record(tracked_snapshot)
+    participant_record = get_conversation_record(participant_snapshot)
+
+    return BenchmarkCase(
+        code="J",
+        name="hard delete dossier removes registry data and detaches conversations",
+        notes={
+            "dossier_id": dossier_id,
+            "tracked_conversation_id": tracked_conversation_id,
+            "participant_conversation_id": participant_conversation_id,
+            "deleted_participants": delete_result.get("deleted_participants", 0),
+            "deleted_mentions": delete_result.get("deleted_mentions", 0),
+        },
+        checks=[
+            CheckResult(
+                "hard delete endpoint reports success",
+                bool(delete_result.get("success")) and bool(delete_result.get("deleted")),
+                json.dumps(delete_result, ensure_ascii=False),
+            ),
+            CheckResult(
+                "hard delete detaches bound conversations",
+                int(delete_result.get("detached_conversations", 0)) >= 2,
+                json.dumps(delete_result, ensure_ascii=False),
+            ),
+            CheckResult(
+                "hard delete removes participant registry data",
+                int(delete_result.get("deleted_participants", 0)) >= 1,
+                json.dumps(delete_result, ensure_ascii=False),
+            ),
+            CheckResult(
+                "deleted dossier routes are no longer readable",
+                deleted_dossier_status == 404 and deleted_participant_status == 404,
+                (
+                    f"detail_status={deleted_dossier_status} detail_payload={deleted_dossier_payload} "
+                    f"participants_status={deleted_participant_status} participants_payload={deleted_participant_payload}"
+                ),
+            ),
+            CheckResult(
+                "deleted dossier disappears from dossier list",
+                all(int(item.get("id", 0)) != dossier_id for item in dossier_list_after_delete if isinstance(item, dict)),
+                json.dumps(dossier_list_after_delete, ensure_ascii=False),
+            ),
+            CheckResult(
+                "historical conversations remain but are detached",
+                tracked_record.get("dossier_id") is None
+                and participant_record.get("dossier_id") is None,
+                f"tracked={tracked_record.get('dossier_id')} participant={participant_record.get('dossier_id')}",
+            ),
+        ],
+    )
+
+
 WORKSPACE_CASE_RUNNERS = {
     "A": run_case_a,
     "B": run_case_b,
@@ -1562,6 +1652,7 @@ WORKSPACE_CASE_RUNNERS = {
     "G": run_case_g,
     "H": run_case_h,
     "I": run_case_i,
+    "J": run_case_j,
 }
 
 

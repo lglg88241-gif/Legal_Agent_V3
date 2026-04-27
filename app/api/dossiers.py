@@ -16,6 +16,7 @@ from app.services.conversation_store import (
     ensure_storage_schema,
     get_dossier_for_user,
     get_dossier_participant_for_user,
+    hard_delete_dossier_record,
     list_dossier_conversations,
     list_dossier_participant_mentions,
     list_dossier_participants,
@@ -533,6 +534,46 @@ async def archive_dossier(
         await db.refresh(dossier)
 
     return {"status": "success", "dossier": serialize_dossier(dossier)}
+
+
+async def _hard_delete_dossier_endpoint(
+    dossier_id: int,
+    current_user: AuthenticatedUser,
+    db: AsyncSession,
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    result = await hard_delete_dossier_record(db, dossier)
+    await db.commit()
+    return {
+        "success": True,
+        "deleted": True,
+        "dossier_id": dossier_id,
+        "detached_conversations": int(result.get("detached_conversations", 0)),
+        "deleted_participants": int(result.get("deleted_participants", 0)),
+        "deleted_mentions": int(result.get("deleted_mentions", 0)),
+    }
+
+
+@router.delete("/{dossier_id}/hard")
+async def hard_delete_dossier(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _hard_delete_dossier_endpoint(dossier_id, current_user, db)
+
+
+@router.delete("/hard/{dossier_id}")
+async def hard_delete_dossier_alias(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _hard_delete_dossier_endpoint(dossier_id, current_user, db)
 
 
 @router.patch("/{dossier_id}/participants")

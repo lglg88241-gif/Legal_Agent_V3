@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import delete, inspect, or_, select, text
+from sqlalchemy import delete, inspect, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from app.database.mysql_db import Base, engine
@@ -571,6 +571,72 @@ async def archive_dossier_record(
     dossier.status = "archived"
     await touch_dossier(db, dossier=dossier)
     return dossier
+
+
+async def hard_delete_dossier_record(
+    db: AsyncSession,
+    dossier: Dossier,
+) -> dict[str, int]:
+    dossier_id = int(dossier.id)
+
+    conversation_ids = list(
+        (
+            await db.execute(
+                select(Conversation.id).where(Conversation.dossier_id == dossier_id)
+            )
+        ).scalars()
+    )
+    detached_conversations = len(conversation_ids)
+
+    mention_ids = list(
+        (
+            await db.execute(
+                select(DossierParticipantMention.id).where(
+                    DossierParticipantMention.dossier_id == dossier_id
+                )
+            )
+        ).scalars()
+    )
+    deleted_mentions = len(mention_ids)
+
+    participant_ids = list(
+        (
+            await db.execute(
+                select(DossierParticipant.id).where(
+                    DossierParticipant.dossier_id == dossier_id
+                )
+            )
+        ).scalars()
+    )
+    deleted_participants = len(participant_ids)
+
+    if detached_conversations:
+        await db.execute(
+            update(Conversation)
+            .where(Conversation.dossier_id == dossier_id)
+            .values(dossier_id=None)
+        )
+
+    if deleted_mentions:
+        await db.execute(
+            delete(DossierParticipantMention).where(
+                DossierParticipantMention.dossier_id == dossier_id
+            )
+        )
+
+    if deleted_participants:
+        await db.execute(
+            delete(DossierParticipant).where(DossierParticipant.dossier_id == dossier_id)
+        )
+
+    await db.execute(delete(Dossier).where(Dossier.id == dossier_id))
+
+    return {
+        "dossier_id": dossier_id,
+        "detached_conversations": detached_conversations,
+        "deleted_participants": deleted_participants,
+        "deleted_mentions": deleted_mentions,
+    }
 
 
 async def update_dossier_auto_summary(

@@ -339,11 +339,19 @@
                 <el-button
                   size="small"
                   text
-                  type="danger"
+                  type="warning"
                   :disabled="dossier.status === 'archived'"
                   @click.stop="handleArchiveDossier(dossier)"
                 >
                   {{ dossier.status === 'archived' ? '已归档' : '归档' }}
+                </el-button>
+                <el-button
+                  size="small"
+                  text
+                  type="danger"
+                  @click.stop="handleHardDeleteDossier(dossier)"
+                >
+                  删除
                 </el-button>
               </div>
             </div>
@@ -376,12 +384,20 @@
             </el-button>
             <el-button
               size="small"
-              type="danger"
+              type="warning"
               plain
               :disabled="selectedDossierDetail?.status === 'archived'"
               @click="handleArchiveDossier(selectedDossierDetail)"
             >
               {{ selectedDossierDetail?.status === 'archived' ? '已归档' : '归档案卷' }}
+            </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              @click="handleHardDeleteDossier(selectedDossierDetail)"
+            >
+              删除案卷
             </el-button>
           </div>
         </div>
@@ -1177,6 +1193,7 @@ import {
   getDossierParticipantCandidates,
   getDossierParticipants,
   getDossiers,
+  hardDeleteDossier,
   getLocalModelStatus,
   resolveDossierParticipants,
   searchConversations,
@@ -2276,6 +2293,56 @@ async function handleArchiveDossier(dossier) {
     console.error('Failed to archive dossier:', error)
     const detail = error?.response?.data?.detail
     ElMessage.error(typeof detail === 'string' && detail ? detail : '归档案卷失败')
+  }
+}
+
+async function handleHardDeleteDossier(dossier) {
+  if (!dossier?.id) return
+
+  const deletingSelectedDossier = selectedDossierId.value === dossier.id
+
+  try {
+    await ElMessageBox.confirm(
+      '删除后案卷、主体确认关系和案卷摘要会被移除。历史聊天不会默认删除，但会与该案卷解绑。',
+      '删除案卷确认',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      }
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    console.error('Failed to confirm dossier hard delete:', error)
+    ElMessage.error('删除案卷确认失败')
+    return
+  }
+
+  try {
+    const { data } = await hardDeleteDossier(dossier.id)
+    dossierParticipantCandidateDialogVisible.value = false
+    await refreshConversationList(currentConversationId.value)
+    await refreshDossiers({ silent: true })
+    if (deletingSelectedDossier) {
+      selectedDossierId.value = null
+      applySelectedDossierDetail(null)
+      resetDossierGraphState()
+    } else if (selectedDossierId.value) {
+      await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
+    } else {
+      applySelectedDossierDetail(null)
+      resetDossierGraphState()
+    }
+    const detachedCount = Number(data?.detached_conversations || 0)
+    ElMessage.success(
+      detachedCount > 0
+        ? `案卷已删除，已解绑 ${detachedCount} 个历史会话`
+        : '案卷已删除'
+    )
+  } catch (error) {
+    console.error('Failed to hard delete dossier:', error)
+    const detail = error?.response?.data?.detail || error?.message || '删除案卷失败'
+    ElMessage.error(typeof detail === 'string' && detail ? detail : '删除案卷失败')
   }
 }
 

@@ -106,6 +106,12 @@ export const updateDossierParticipants = (dossierId, payload) =>
 export const generateDossierSummary = (dossierId) =>
   api.post(`/dossiers/${dossierId}/generate-summary`)
 export const archiveDossier = (dossierId) => api.delete(`/dossiers/${dossierId}`)
+export const hardDeleteDossier = (dossierId) => {
+  if (dossierId == null || dossierId === '') {
+    throw new Error('invalid dossier id')
+  }
+  return api.delete(`/dossiers/hard/${dossierId}`)
+}
 export const attachConversationToDossier = (conversationId, dossierId) =>
   api.post(`/conversations/${conversationId}/attach-dossier`, { dossier_id: dossierId })
 export const batchDeleteConversations = (conversationIds) =>
