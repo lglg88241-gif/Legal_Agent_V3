@@ -13,6 +13,12 @@ Legal Agent V3 — 全面回答质量基准测试
 """
 from __future__ import annotations
 
+# NOTE:
+# This benchmark is reserved for the legacy ordinary legal-QA / general case-consult
+# path. It intentionally does not cover personalized workspace flows such as
+# mode-consent onboarding, dossier binding, dossier graph context, or participant
+# resolution. Those flows should be evaluated by a separate workspace benchmark.
+
 import argparse
 import io
 import json
@@ -115,7 +121,10 @@ def _normalize_dialog_result(
     if latency_ms <= 0:
         latency_ms = fallback_latency_ms
 
-    data["status"] = str(data.get("status") or default_status)
+    status_value = str(data.get("status") or default_status)
+    if status_value.lower() == "success":
+        status_value = "completed"
+    data["status"] = status_value
     data["response"] = response_text
     data["sources"] = sources
     data["confidence_score"] = confidence
@@ -136,6 +145,7 @@ def ask(headers: dict, cid: int, text: str, force: bool = False) -> dict:
                 "force_current_case": force,
                 "is_precise_mode": False,
                 "proactive_graph_mode": True,
+                "mode_consent_enabled": False,
             },
             timeout=15,
         )
