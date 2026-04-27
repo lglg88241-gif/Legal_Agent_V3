@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import requests
+
 
 def print(*args, **kwargs):
     kwargs.setdefault("flush", True)
@@ -27,7 +29,31 @@ def print(*args, **kwargs):
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROGRESS_INTERVAL = 5.0
 DEFAULT_SUITE_TIMEOUT = 0.0
+DEFAULT_READINESS_TIMEOUT = 5.0
 TERMINATE_TIMEOUT_SECONDS = 5.0
+DEFAULT_API_BASE_URL = "http://127.0.0.1:8000"
+REQUIRED_OPENAPI_PATHS: tuple[str, ...] = (
+    "/dialog",
+    "/conversations",
+    "/conversations/search",
+    "/conversations/batch",
+    "/conversations/{conversation_id}/attach-dossier",
+    "/conversations/{conversation_id}/mode-consent",
+    "/dossiers",
+    "/dossiers/{dossier_id}",
+    "/dossiers/{dossier_id}/graph",
+    "/dossiers/{dossier_id}/participants",
+    "/dossiers/{dossier_id}/participant-candidates",
+    "/dossiers/{dossier_id}/generate-summary",
+    "/dossiers/{dossier_id}/hard",
+    "/dossiers/hard/{dossier_id}",
+)
+REQUIRED_OPENAPI_METHODS: dict[str, tuple[str, ...]] = {
+    "/dialog": ("post",),
+    "/dossiers": ("get", "post"),
+    "/dossiers/{dossier_id}/hard": ("delete",),
+    "/dossiers/hard/{dossier_id}": ("delete",),
+}
 
 PROFILE_SUITE_NAMES: dict[str, tuple[str, ...]] = {
     "quick": (
@@ -91,6 +117,13 @@ class SuiteResult:
     elapsed_seconds: float
 
 
+@dataclass
+class ReadinessCheckResult:
+    label: str
+    passed: bool
+    detail: str = ""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run modern benchmark suites in a targeted, orchestrated order."
@@ -147,6 +180,22 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_SUITE_TIMEOUT,
         help="maximum seconds allowed for each suite; 0 means no timeout",
+    )
+    parser.add_argument(
+        "--check-readiness",
+        action="store_true",
+        help="check the live backend OpenAPI and required routes before running suites",
+    )
+    parser.add_argument(
+        "--api-base-url",
+        default=DEFAULT_API_BASE_URL,
+        help="base URL used for readiness checks; default http://127.0.0.1:8000",
+    )
+    parser.add_argument(
+        "--readiness-timeout",
+        type=float,
+        default=DEFAULT_READINESS_TIMEOUT,
+        help="timeout in seconds for readiness HTTP requests; default 5",
     )
     parser.add_argument(
         "--report-json",
@@ -435,6 +484,134 @@ def _print_overall_progress(
     )
 
 
+def _normalize_api_base_url(api_base_url: str) -> str:
+    return str(api_base_url or DEFAULT_API_BASE_URL).strip().rstrip("/") or DEFAULT_API_BASE_URL
+
+
+def _run_readiness_checks(
+    *,
+    api_base_url: str,
+    readiness_timeout: float,
+) -> tuple[bool, list[ReadinessCheckResult]]:
+    base_url = _normalize_api_base_url(api_base_url)
+    timeout_seconds = max(1.0, float(readiness_timeout))
+    checks: list[ReadinessCheckResult] = []
+    openapi_url = f"{base_url}/openapi.json"
+    paths: dict[str, Any] = {}
+
+    try:
+        response = requests.get(openapi_url, timeout=timeout_seconds)
+        if response.status_code != 200:
+            checks.append(
+                ReadinessCheckResult(
+                    label="openapi reachable",
+                    passed=False,
+                    detail=f"status={response.status_code} url={openapi_url}",
+                )
+            )
+        else:
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                checks.append(
+                    ReadinessCheckResult(
+                        label="openapi reachable",
+                        passed=False,
+                        detail=f"error=invalid_json url={openapi_url} exc={exc}",
+                    )
+                )
+            else:
+                if not isinstance(payload, dict) or not isinstance(payload.get("paths"), dict):
+                    checks.append(
+                        ReadinessCheckResult(
+                            label="openapi reachable",
+                            passed=False,
+                            detail=f"error=missing_paths url={openapi_url}",
+                        )
+                    )
+                else:
+                    paths = payload["paths"]
+                    checks.append(
+                        ReadinessCheckResult(
+                            label="openapi reachable",
+                            passed=True,
+                            detail=f"url={openapi_url}",
+                        )
+                    )
+    except requests.RequestException as exc:
+        checks.append(
+            ReadinessCheckResult(
+                label="openapi reachable",
+                passed=False,
+                detail=f"error={exc}",
+            )
+        )
+
+    if not paths:
+        return False, checks
+
+    for path in REQUIRED_OPENAPI_PATHS:
+        exists = path in paths
+        checks.append(
+            ReadinessCheckResult(
+                label=f"route {path}",
+                passed=exists,
+                detail="" if exists else "missing from live OpenAPI",
+            )
+        )
+
+    for path, methods in REQUIRED_OPENAPI_METHODS.items():
+        path_item = paths.get(path) if isinstance(paths.get(path), dict) else {}
+        for method in methods:
+            exists = isinstance(path_item, dict) and method in path_item
+            checks.append(
+                ReadinessCheckResult(
+                    label=f"route-method {method.upper()} {path}",
+                    passed=exists,
+                    detail="" if exists else "missing from live OpenAPI",
+                )
+            )
+
+    return all(check.passed for check in checks), checks
+
+
+def _print_readiness_results(
+    *,
+    passed: bool,
+    checks: list[ReadinessCheckResult],
+) -> None:
+    for check in checks:
+        status = "PASS" if check.passed else "FAIL"
+        if check.label == "openapi reachable":
+            if check.passed:
+                print(f"[readiness] {check.label} {status} {check.detail}")
+            else:
+                print(f"[readiness] {check.label} {status} {check.detail}")
+            continue
+        if check.detail:
+            print(f"[readiness] {check.label} {status} {check.detail}")
+        else:
+            print(f"[readiness] {check.label} {status}")
+
+    if passed:
+        print("[readiness] summary PASS")
+        return
+
+    print("[readiness] summary FAIL")
+    print(
+        "[readiness] hint: if openapi is unreachable, confirm the backend is running "
+        "and --api-base-url is correct."
+    )
+    print(
+        "[readiness] hint: if a route is missing from live OpenAPI, restart the "
+        "FastAPI backend so the running service loads the latest routes."
+    )
+    print(
+        "[readiness] hint: readiness does not verify Celery; if async suites fail "
+        "later, check the Celery worker separately."
+    )
+
+
 def _run_suite(plan: SuitePlan, *, suite_timeout: float) -> SuiteResult:
     started = time.perf_counter()
     print(f'[runner] suite START name={plan.key} cmd="{_format_command(plan.command)}"')
@@ -505,6 +682,8 @@ def main() -> None:
     args = parse_args()
     progress_interval = max(1.0, float(args.progress_interval))
     suite_timeout = max(0.0, float(args.suite_timeout))
+    readiness_timeout = max(1.0, float(args.readiness_timeout))
+    api_base_url = _normalize_api_base_url(str(args.api_base_url or DEFAULT_API_BASE_URL))
     username = str(args.username or "").strip()
     password = str(args.password or "workspace123")
     normalized_profile = str(args.profile)
@@ -555,13 +734,41 @@ def main() -> None:
         f"[runner] include_pytest={bool(args.include_pytest)} "
         f"include_legacy_quality={bool(args.include_legacy_quality)} "
         f"progress_interval={progress_interval:.1f}s "
-        f"suite_timeout={_format_seconds(suite_timeout)}"
+        f"suite_timeout={_format_seconds(suite_timeout)} "
+        f"check_readiness={bool(args.check_readiness)} "
+        f"api_base_url={api_base_url} "
+        f"readiness_timeout={_format_seconds(readiness_timeout)}"
     )
     print("=" * 72)
 
     started_at = datetime.now().isoformat()
     runner_started = time.perf_counter()
     results: list[SuiteResult] = []
+
+    if args.check_readiness:
+        passed, checks = _run_readiness_checks(
+            api_base_url=api_base_url,
+            readiness_timeout=readiness_timeout,
+        )
+        _print_readiness_results(passed=passed, checks=checks)
+        if not passed:
+            report = _build_report(
+                profile=normalized_profile,
+                dry_run=bool(args.dry_run),
+                fail_fast=bool(args.fail_fast),
+                started_at=started_at,
+                finished_at=datetime.now().isoformat(),
+                elapsed_seconds=time.perf_counter() - runner_started,
+                suite_results=[],
+            )
+            if args.report_json:
+                report["readiness"] = {
+                    "enabled": True,
+                    "passed": False,
+                    "checks": [asdict(item) for item in checks],
+                }
+                _write_report(str(args.report_json), report)
+            raise SystemExit(1)
 
     if args.dry_run:
         for index, suite in enumerate(suites, start=1):
@@ -589,6 +796,11 @@ def main() -> None:
             suite_results=results,
         )
         if args.report_json:
+            if args.check_readiness:
+                report["readiness"] = {
+                    "enabled": True,
+                    "passed": True,
+                }
             _write_report(str(args.report_json), report)
         return
 
@@ -632,6 +844,11 @@ def main() -> None:
         suite_results=results,
     )
     if args.report_json:
+        if args.check_readiness:
+            report["readiness"] = {
+                "enabled": True,
+                "passed": True,
+            }
         _write_report(str(args.report_json), report)
 
     print("=" * 72)

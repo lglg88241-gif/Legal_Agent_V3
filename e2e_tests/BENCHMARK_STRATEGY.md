@@ -108,6 +108,12 @@ workspace validation separate from legacy ordinary legal QA regression.
   - optionally persist an orchestration report
 - `--dry-run`
   - print suite order and commands without executing them
+- `--check-readiness`
+  - validate the live backend OpenAPI and required routes before running suites
+- `--api-base-url http://127.0.0.1:8000`
+  - override the backend base URL used by readiness checks
+- `--readiness-timeout 5`
+  - set the HTTP timeout for readiness checks
 
 Example commands:
 
@@ -116,10 +122,23 @@ Example commands:
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --dry-run
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --only legal_qa --dry-run
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile full --dry-run
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile full --check-readiness
+.venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile full --check-readiness --api-base-url http://127.0.0.1:8000
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --only workspace_delete --dry-run
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --suite-timeout 300
 .venv\Scripts\python.exe e2e_tests\run_benchmarks.py --profile quick --dry-run --report-json e2e_tests/results/latest_runner_report.json
 ```
+
+### Readiness checks
+
+- `run_benchmarks.py --check-readiness` validates the live backend OpenAPI before any suite runs.
+- The runner checks `GET {api_base_url}/openapi.json`, verifies the response is JSON with a `paths` object, and confirms critical benchmark routes are present.
+- This check targets the running backend service, not `import main` from local code.
+- It is designed to catch problems such as:
+  - code already defines a route
+  - but the running FastAPI service was not restarted and the live OpenAPI still misses that route
+- Readiness checks do not replace `pytest`; they only confirm the e2e environment is pointed at a usable live backend.
+- Readiness checks also do not validate Celery workers. If suites fail later during async processing, verify the Celery worker separately.
 
 ### `quality_benchmark.py`
 
