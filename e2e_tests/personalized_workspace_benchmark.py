@@ -487,16 +487,13 @@ def retry_value(fetcher, predicate, *, attempts: int = 4, sleep_s: float = 2.0):
 def is_empty_graph(payload: dict[str, Any] | None) -> bool:
     if not isinstance(payload, dict):
         return True
-    nodes = (
-        payload.get("graph", {}).get("nodes", [])
-        if isinstance(payload.get("graph"), dict)
-        else []
-    )
-    edges = (
-        payload.get("graph", {}).get("edges", [])
-        if isinstance(payload.get("graph"), dict)
-        else []
-    )
+    if isinstance(payload.get("graph"), dict):
+        graph_payload = payload.get("graph", {})
+        nodes = graph_payload.get("nodes", []) if isinstance(graph_payload.get("nodes"), list) else []
+        edges = graph_payload.get("edges", []) if isinstance(graph_payload.get("edges"), list) else []
+    else:
+        nodes = payload.get("nodes", []) if isinstance(payload.get("nodes"), list) else []
+        edges = payload.get("edges", []) if isinstance(payload.get("edges"), list) else []
     return not nodes and not edges
 
 
