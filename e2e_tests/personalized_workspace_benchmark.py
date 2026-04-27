@@ -33,6 +33,9 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 BASE_URL = "http://127.0.0.1:8000"
 POLL_INTERVAL = 1.5
 POLL_TIMEOUT = 120
+WORKSPACE_GRAPH_POLL_INTERVAL = 2.0
+WORKSPACE_GRAPH_TIMEOUT_SMOKE = 60.0
+WORKSPACE_GRAPH_TIMEOUT_FULL = 90.0
 RESULTS_DIR = Path("e2e_tests/results")
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -497,6 +500,64 @@ def is_empty_graph(payload: dict[str, Any] | None) -> bool:
     return not nodes and not edges
 
 
+def has_structured_case_persisted(record: dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    case_summary_present = bool(str(record.get("case_summary") or "").strip())
+    case_type_present = bool(str(record.get("case_type") or "").strip())
+    case_state_present = record.get("case_state") not in (None, {}, "")
+    return case_summary_present and (case_type_present or case_state_present)
+
+
+def wait_for_tracked_graph_update(
+    headers: dict[str, str],
+    conversation_id: int,
+    *,
+    smoke: bool,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    max_wait_s = (
+        WORKSPACE_GRAPH_TIMEOUT_SMOKE
+        if smoke
+        else WORKSPACE_GRAPH_TIMEOUT_FULL
+    )
+    started = time.perf_counter()
+    last_snapshot = get_conversation_snapshot(headers, conversation_id)
+    last_record = get_conversation_record(last_snapshot)
+
+    while (time.perf_counter() - started) < max_wait_s:
+        if has_structured_case_persisted(last_record):
+            break
+        time.sleep(WORKSPACE_GRAPH_POLL_INTERVAL)
+        last_snapshot = get_conversation_snapshot(headers, conversation_id)
+        last_record = get_conversation_record(last_snapshot)
+
+    structured_case_persisted = has_structured_case_persisted(last_record)
+    last_graph = get_conversation_graph(headers, conversation_id)
+    if not structured_case_persisted:
+        return (
+            last_snapshot,
+            last_graph,
+            f"structured case persistence timeout after {int(max_wait_s)}s",
+        )
+
+    while (time.perf_counter() - started) < max_wait_s:
+        if not is_empty_graph(last_graph):
+            return last_snapshot, last_graph, ""
+        time.sleep(WORKSPACE_GRAPH_POLL_INTERVAL)
+        last_snapshot = get_conversation_snapshot(headers, conversation_id)
+        last_record = get_conversation_record(last_snapshot)
+        last_graph = get_conversation_graph(headers, conversation_id)
+
+    return (
+        last_snapshot,
+        last_graph,
+        (
+            f"graph async update timeout; structured case had been persisted; "
+            f"graph still empty after {int(max_wait_s)} seconds"
+        ),
+    )
+
+
 def get_conversation_record(snapshot: dict[str, Any]) -> dict[str, Any]:
     conversation = snapshot.get("conversation")
     return conversation if isinstance(conversation, dict) else {}
@@ -680,14 +741,12 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
         text=case_message,
         mode_consent_enabled=False,
     )
-    snapshot_c = get_conversation_snapshot(headers, conversation_c["id"])
-    record_c = get_conversation_record(snapshot_c)
-    graph_c = retry_value(
-        lambda: get_conversation_graph(headers, conversation_c["id"]),
-        lambda payload: not is_empty_graph(payload),
-        attempts=4,
-        sleep_s=2.0,
+    snapshot_c, graph_c, graph_c_timeout_detail = wait_for_tracked_graph_update(
+        headers,
+        conversation_c["id"],
+        smoke=smoke,
     )
+    record_c = get_conversation_record(snapshot_c)
     cases.append(
         BenchmarkCase(
             code="C",
@@ -695,6 +754,7 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
             notes={
                 "route_intent": result_c.get("route_intent"),
                 "graph_stats": graph_c.get("stats") or graph_c.get("graph", {}).get("stats", {}),
+                "graph_wait_timeout": graph_c_timeout_detail,
             },
             checks=[
                 CheckResult("mode consent prompt appears", first_c.get("status") == "needs_confirmation", str(first_c)),
@@ -713,7 +773,11 @@ def run_benchmark(*, smoke: bool, username: str, password: str) -> dict[str, Any
                         ensure_ascii=False,
                     ),
                 ),
-                CheckResult("conversation graph is not empty", not is_empty_graph(graph_c)),
+                CheckResult(
+                    "conversation graph is not empty",
+                    not is_empty_graph(graph_c),
+                    graph_c_timeout_detail,
+                ),
             ],
         )
     )
