@@ -139,6 +139,27 @@ cd frontend
 npm run dev
 ```
 
+### Celery 开发自动重载
+
+开发时如果希望 Celery worker 在修改 Python 文件后自动重启，可以使用：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\dev_celery_worker.py
+```
+
+默认行为：
+
+- 启动命令等价于 `python -m celery -A app.celery_app.celery_app worker --loglevel=info -P threads --concurrency 2`
+- 默认监听 `app/**/*.py`、`main.py`、`scripts/**/*.py`
+- 检测到变更后会打印变更文件，优先优雅停止当前 worker，超时后强制 kill，再自动重启
+
+常用参数示例：
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\dev_celery_worker.py --loglevel=debug --concurrency=2
+.\.venv\Scripts\python.exe .\scripts\dev_celery_worker.py --watch .\tests
+```
+
 可选的本地 vLLM：
 
 ```powershell
