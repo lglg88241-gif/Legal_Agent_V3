@@ -374,6 +374,8 @@ async def resolve_dossier_participants(
 
     await db.commit()
     await db.refresh(participant)
+    for mention in mentions:
+        await db.refresh(mention)
     participant_lookup = {participant.id: participant}
     return {
         "status": "success",

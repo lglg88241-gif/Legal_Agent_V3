@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+from datetime import datetime
 from types import ModuleType
 
 import pytest
@@ -11,7 +12,7 @@ from sqlalchemy import create_engine, inspect
 
 from app.agent.nodes.advisor import _format_dossier_context_block
 from app.core.security import AuthenticatedUser
-from app.models import Conversation, Dossier, DossierParticipant
+from app.models import Conversation, Dossier, DossierParticipant, DossierParticipantMention
 from app.services import dossier_graph
 from app.services.conversation_store import (
     build_dossier_participant_candidates,
@@ -39,6 +40,9 @@ def _load_dossiers_api_module():
 
 
 class DummyDB:
+    def __init__(self) -> None:
+        self.refreshed_objects: list[object] = []
+
     def add(self, obj) -> None:
         return None
 
@@ -49,6 +53,14 @@ class DummyDB:
         return None
 
     async def refresh(self, obj) -> None:
+        self.refreshed_objects.append(obj)
+        if isinstance(obj, DossierParticipant) and getattr(obj, "updated_at", None) is None:
+            obj.updated_at = datetime(2026, 1, 1, 0, 0, 0)
+        if (
+            hasattr(obj, "created_at")
+            and getattr(obj, "created_at", None) is None
+        ):
+            obj.created_at = datetime(2026, 1, 1, 0, 0, 0)
         return None
 
 
@@ -160,6 +172,99 @@ def test_create_dossier_participant_success(
     assert result["participant"]["label"] == "A公司"
     assert result["participant"]["party_side"] == "opponent"
     assert result["participant"]["entity_type"] == "organization"
+
+
+def test_resolve_dossier_participant_refreshes_mentions_before_serialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=18,
+        user_id=3,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    db = DummyDB()
+    participant = DossierParticipant(
+        id=31,
+        dossier_id=18,
+        user_id=3,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        description="workspace benchmark confirmed participant",
+        confirmed_by_user=True,
+    )
+    mention = DossierParticipantMention(
+        id=41,
+        dossier_id=18,
+        conversation_id=77,
+        participant_id=31,
+        raw_label="用人单位",
+        source="graph",
+        confidence=None,
+        confirmed_by_user=True,
+    )
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_create_dossier_participant_record(db, **kwargs):
+        return participant
+
+    async def fake_resolve_dossier_participant_mentions(db, **kwargs):
+        return [mention]
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+    monkeypatch.setattr(
+        dossiers_api,
+        "create_dossier_participant_record",
+        fake_create_dossier_participant_record,
+    )
+    monkeypatch.setattr(
+        dossiers_api,
+        "resolve_dossier_participant_mentions",
+        fake_resolve_dossier_participant_mentions,
+    )
+
+    result = asyncio.run(
+        dossiers_api.resolve_dossier_participants(
+            dossier_id=18,
+            payload=dossiers_api.DossierParticipantResolveRequest(
+                participant=dossiers_api.DossierParticipantCreateRequest(
+                    label="A公司",
+                    role="用人单位",
+                    party_side="opponent",
+                    entity_type="organization",
+                    description="workspace benchmark confirmed participant",
+                ),
+                mentions=[
+                    dossiers_api.DossierParticipantResolveMentionRequest(
+                        conversation_id=77,
+                        raw_label="用人单位",
+                        source="graph",
+                        confidence=None,
+                    )
+                ],
+            ),
+            current_user=AuthenticatedUser(user_id=3, username="owner"),
+            db=db,
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["participant"]["id"] == 31
+    assert result["mentions"][0]["id"] == 41
+    assert result["mentions"][0]["created_at"] == "2026-01-01T00:00:00"
+    assert db.refreshed_objects[0] is participant
+    assert db.refreshed_objects[1] is mention
 
 
 def test_create_dossier_participant_archived_dossier_returns_conflict(
