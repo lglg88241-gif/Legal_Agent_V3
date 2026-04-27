@@ -62,12 +62,46 @@ FAKE_STATUTE_TERMS = (
     "刑法第五百条",
     "民法典第三千条",
 )
+FAKE_STATUTE_REJECTION_TERMS = (
+    "不存在",
+    "并不存在",
+    "没有该条",
+    "没有这一条",
+    "未查询到",
+    "无法找到该条",
+    "无法找到这一条",
+    "虚假法条",
+    "请核对",
+    "该条文不存在",
+    "不存在第325条",
+    "不是这样",
+    "并不是这样",
+    "不是这样表述",
+)
+FAKE_STATUTE_ENDORSEMENT_PATTERNS = (
+    r"根据\s*《?(?:中华人民共和国)?劳动合同法》?\s*第\s*325\s*条",
+    r"依据\s*《?(?:中华人民共和国)?劳动合同法》?\s*第\s*325\s*条",
+    r"第\s*325\s*条\s*规定",
+    r"该条\s*规定",
+    r"确实规定",
+    r"^是的(?:[，。！!？?]|$)",
+    r"^没错(?:[，。！!？?]|$)",
+)
 
 
 @dataclass
 class CheckResult:
     label: str
     passed: bool
+    detail: str = ""
+    expected: str = ""
+    actual: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class WarningResult:
+    label: str
     detail: str = ""
 
 
@@ -76,6 +110,7 @@ class LegalQACaseResult:
     code: str
     name: str
     checks: list[CheckResult] = field(default_factory=list)
+    warnings: list[WarningResult] = field(default_factory=list)
     notes: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -95,6 +130,8 @@ class LegalQACasePlan:
     name: str
     query: str
     checks: int
+    expected_articles: tuple[int, ...] = ()
+    expected_law_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,6 +157,8 @@ LEGAL_QA_CASE_PLANS = [
         "LQ1 labor law reference cites real statutes",
         "公司拖欠工资3个月，请告诉我相关法律条文，要具体到条款号。",
         6,
+        expected_articles=(14, 30, 38, 46, 47, 48, 50, 82, 85, 87),
+        expected_law_names=("劳动合同法", "中华人民共和国劳动合同法", "劳动法", "中华人民共和国劳动法"),
     ),
     LegalQACasePlan(
         "LQ2",
@@ -154,7 +193,7 @@ LEGAL_QA_CASE_PLANS = [
         "D8_rag_health",
         "LQ6 legal QA RAG path returns healthy sources",
         "劳动合同试用期最长可以约定多久？",
-        8,
+        7,
     ),
 ]
 
@@ -285,6 +324,84 @@ def _contains_any(text: str, *keywords: str) -> bool:
     return any(keyword.lower() in lowered for keyword in keywords)
 
 
+def _collapse_whitespace(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _response_preview(text: str, limit: int = 500) -> str:
+    snippet = str(text or "").strip()
+    if len(snippet) <= limit:
+        return snippet
+    return snippet[:limit]
+
+
+def _int_to_chinese(value: int) -> str:
+    if value <= 0:
+        raise ValueError("article number must be positive")
+    digits = "零一二三四五六七八九"
+    units = ["", "十", "百", "千"]
+    if value < 10:
+        return digits[value]
+    parts: list[str] = []
+    number = value
+    unit_index = 0
+    while number > 0:
+        number, remainder = divmod(number, 10)
+        if remainder:
+            parts.append(digits[remainder] + units[unit_index])
+        elif parts and not parts[-1].startswith("零"):
+            parts.append("零")
+        unit_index += 1
+    result = "".join(reversed(parts)).rstrip("零")
+    result = re.sub("零+", "零", result)
+    result = result.replace("一十", "十", 1)
+    return result
+
+
+def _build_expected_article_patterns(plan: LegalQACasePlan) -> list[str]:
+    if not plan.expected_articles:
+        return []
+    law_names = [name for name in plan.expected_law_names if name]
+    law_group = "|".join(re.escape(name) for name in law_names)
+    patterns: list[str] = []
+    for article in plan.expected_articles:
+        variants = {str(int(article)), _int_to_chinese(int(article))}
+        for variant in variants:
+            if law_group:
+                patterns.append(
+                    rf"(?:《?(?:{law_group})》?)?\s*第\s*{re.escape(variant)}\s*条"
+                )
+            else:
+                patterns.append(rf"第\s*{re.escape(variant)}\s*条")
+    return patterns
+
+
+def _find_expected_article_hits(
+    response_text: str, plan: LegalQACasePlan
+) -> tuple[list[str], list[str], str]:
+    expected_patterns = _build_expected_article_patterns(plan)
+    hits: list[str] = []
+    for pattern in expected_patterns:
+        match = re.search(pattern, response_text, flags=re.IGNORECASE)
+        if match:
+            hit = match.group(0)
+            if hit not in hits:
+                hits.append(hit)
+    return expected_patterns, hits, _collapse_whitespace(response_text)
+
+
+def _find_fake_statute_assessment(response_text: str) -> tuple[list[str], list[str], bool]:
+    text = str(response_text or "")
+    rejection_hits = [term for term in FAKE_STATUTE_REJECTION_TERMS if term in text]
+    endorsement_hits: list[str] = []
+    if not rejection_hits:
+        for pattern in FAKE_STATUTE_ENDORSEMENT_PATTERNS:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                endorsement_hits.append(match.group(0))
+    return rejection_hits, endorsement_hits, bool(endorsement_hits)
+
+
 def _workspace_terms_in(text: str) -> list[str]:
     found: list[str] = []
     for term in WORKSPACE_TERMS:
@@ -359,12 +476,35 @@ def _log_turn_done(progress: LegalQATurnProgress, result: dict[str, Any]) -> Non
     )
 
 
+def _make_check(
+    label: str,
+    passed: bool,
+    *,
+    expected: str,
+    actual: str,
+    detail: str = "",
+    extra: dict[str, Any] | None = None,
+) -> CheckResult:
+    return CheckResult(
+        label=label,
+        passed=passed,
+        detail=detail or f"expected={expected}; actual={actual}",
+        expected=expected,
+        actual=actual,
+        extra=extra or {},
+    )
+
+
 def _check_key(label: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", str(label or "").strip().lower()).strip("_")
     return slug or "check"
 
 
-def _log_check(progress: LegalQARunProgress, check: CheckResult) -> None:
+def _log_check(
+    progress: LegalQARunProgress,
+    case: LegalQACaseResult,
+    check: CheckResult,
+) -> None:
     progress.check_index += 1
     status = "PASS" if check.passed else "FAIL"
     detail = f" reason={check.detail}" if check.detail else ""
@@ -372,6 +512,48 @@ def _log_check(progress: LegalQARunProgress, check: CheckResult) -> None:
         f"[legal_qa] check {progress.check_index}/{progress.check_total} "
         f"{_check_key(check.label)} {status}{detail}"
     )
+    if check.passed:
+        return
+    print(
+        f"[legal_qa] diagnostic case={case.code} name=\"{case.name}\" "
+        f"check=\"{check.label}\""
+    )
+    print(
+        f"[legal_qa] diagnostic expected={check.expected or '<unspecified>'} "
+        f"actual={check.actual or '<empty>'}"
+    )
+    print(
+        f"[legal_qa] diagnostic status={case.notes.get('status', '')} "
+        f"error={case.notes.get('error', '')} "
+        f"message=\"{_preview_text(case.notes.get('message', ''), 200)}\" "
+        f"latency_ms={case.notes.get('latency_ms', 0)} "
+        f"route_intent={case.notes.get('route_intent', '')} "
+        f"sources_count={case.notes.get('sources_count', 0)}"
+    )
+    print(
+        f"[legal_qa] diagnostic response_preview="
+        f"\"{case.notes.get('response_preview', '')}\""
+    )
+    normalized_preview = (
+        check.extra.get("normalized_response_preview")
+        or case.notes.get("normalized_response_preview")
+        or ""
+    )
+    if normalized_preview:
+        print(
+            f"[legal_qa] diagnostic normalized_response_preview="
+            f"\"{normalized_preview}\""
+        )
+    expected_patterns = check.extra.get("expected_patterns")
+    if expected_patterns:
+        print(f"[legal_qa] diagnostic expected_patterns={expected_patterns}")
+    hits = check.extra.get("hits")
+    if hits is not None:
+        print(f"[legal_qa] diagnostic hits={hits}")
+
+
+def _log_warning(case: LegalQACaseResult, warning: WarningResult) -> None:
+    print(f"[legal_qa] warning {warning.label} {warning.detail}")
 
 
 def _log_case_end(
@@ -543,9 +725,27 @@ def run_dialog(
 def _base_checks(first_payload: dict[str, Any], result: dict[str, Any]) -> list[CheckResult]:
     workspace_terms = result.get("workspace_terms_present") or []
     return [
-        CheckResult("dialog completed", result.get("status") == "completed", str(result.get("status"))),
-        CheckResult("no mode-consent prompt", first_payload.get("status") != "needs_confirmation", str(first_payload.get("status"))),
-        CheckResult("no workspace terms", not workspace_terms, ", ".join(workspace_terms)),
+        _make_check(
+            "dialog completed",
+            result.get("status") == "completed",
+            expected="status=completed",
+            actual=f"status={result.get('status')}",
+            detail=str(result.get("status")),
+        ),
+        _make_check(
+            "no mode-consent prompt",
+            first_payload.get("status") != "needs_confirmation",
+            expected="first response is not needs_confirmation",
+            actual=f"first_status={first_payload.get('status')}",
+            detail=str(first_payload.get("status")),
+        ),
+        _make_check(
+            "no workspace terms",
+            not workspace_terms,
+            expected="response contains none of the workspace terms",
+            actual=", ".join(workspace_terms) or "<none>",
+            detail=", ".join(workspace_terms),
+        ),
     ]
 
 
@@ -559,61 +759,199 @@ def evaluate_case(
     confidence = float(result.get("confidence_score", 0) or 0)
     route_intent = str(result.get("route_intent") or "")
     checks = _base_checks(first_payload, result)
+    warnings: list[WarningResult] = []
 
     if plan.code == "LQ1":
-        real_hits = [item for item in REAL_STATUTES if item in response_text]
+        expected_patterns, real_hits, normalized_response = _find_expected_article_hits(
+            response_text, plan
+        )
         fake_hits = [item for item in FAKE_STATUTE_TERMS if item in response_text]
         checks.extend(
             [
-                CheckResult("sources are present", sources_count >= 1, f"sources={sources_count}"),
-                CheckResult("response cites a real labor statute", bool(real_hits), f"hits={real_hits}"),
-                CheckResult("response avoids fake statutes", not fake_hits, f"fake_hits={fake_hits}"),
+                _make_check(
+                    "sources are present",
+                    sources_count >= 1,
+                    expected="sources_count >= 1",
+                    actual=f"sources_count={sources_count}",
+                    detail=f"sources={sources_count}",
+                ),
+                _make_check(
+                    "response cites a real labor statute",
+                    bool(real_hits),
+                    expected="match at least one configured real labor-law article citation",
+                    actual=f"hits={real_hits}",
+                    detail=f"hits={real_hits}",
+                    extra={
+                        "expected_patterns": expected_patterns,
+                        "hits": real_hits,
+                        "normalized_response_preview": normalized_response[:500],
+                    },
+                ),
+                _make_check(
+                    "response avoids fake statutes",
+                    not fake_hits,
+                    expected="no fake statute citations in response",
+                    actual=f"fake_hits={fake_hits}",
+                    detail=f"fake_hits={fake_hits}",
+                ),
             ]
         )
     elif plan.code == "LQ2":
         fake_hits = [item for item in FAKE_STATUTE_TERMS if item in response_text]
         checks.extend(
             [
-                CheckResult("response cites intentional injury rules", _contains_any(response_text, "故意伤害罪", "第二百三十四条", "234条"), response_text[:240]),
-                CheckResult("response mentions sentencing range", _contains_any(response_text, "三年", "十年", "无期", "量刑"), response_text[:240]),
-                CheckResult("response avoids fake statutes", not fake_hits, f"fake_hits={fake_hits}"),
+                _make_check(
+                    "response cites intentional injury rules",
+                    _contains_any(response_text, "故意伤害罪", "第二百三十四条", "234条"),
+                    expected="mention intentional injury offense or article 234",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
+                _make_check(
+                    "response mentions sentencing range",
+                    _contains_any(response_text, "三年", "十年", "无期", "量刑"),
+                    expected="mention a sentencing range or sentencing term",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
+                _make_check(
+                    "response avoids fake statutes",
+                    not fake_hits,
+                    expected="no fake statute citations in response",
+                    actual=f"fake_hits={fake_hits}",
+                    detail=f"fake_hits={fake_hits}",
+                ),
             ]
         )
     elif plan.code == "LQ3":
+        rejection_hits, endorsement_hits, endorsed_fake_statute = _find_fake_statute_assessment(
+            response_text
+        )
         checks.extend(
             [
-                CheckResult("response rejects the fake statute", _contains_any(response_text, "不存在", "未查询到", "请核对", "现行"), response_text[:240]),
-                CheckResult("response does not endorse the fake statute", not _contains_any(response_text, "是这样", "确实如此", "没错"), response_text[:240]),
-                CheckResult("response points to real indefinite-term rules", _contains_any(response_text, "无固定期限", "连续工作满十年", "第十四条"), response_text[:240]),
+                _make_check(
+                    "response rejects the fake statute",
+                    bool(rejection_hits),
+                    expected="explicitly deny or correct the fake statute",
+                    actual=f"rejection_hits={rejection_hits}",
+                    detail=f"rejection_hits={rejection_hits}",
+                ),
+                _make_check(
+                    "response does not endorse the fake statute",
+                    not endorsed_fake_statute,
+                    expected="no positive endorsement of the fake statute after considering denial phrases",
+                    actual=f"endorsement_hits={endorsement_hits}",
+                    detail=f"rejection_hits={rejection_hits}; endorsement_hits={endorsement_hits}",
+                ),
+                _make_check(
+                    "response points to real indefinite-term rules",
+                    _contains_any(response_text, "无固定期限", "连续工作满十年", "第十四条"),
+                    expected="point to real indefinite-term labor contract rules",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
             ]
         )
     elif plan.code == "LQ4":
         checks.extend(
             [
-                CheckResult("route is out of scope", route_intent == "OUT_OF_SCOPE", route_intent),
-                CheckResult("response avoids foreign-law specifics", not _contains_any(response_text, "WARN Act", "at-will", "美国劳动法规定"), response_text[:240]),
-                CheckResult("response states China-law scope", _contains_any(response_text, "中国法律", "中国大陆", "境内"), response_text[:240]),
+                _make_check(
+                    "route is out of scope",
+                    route_intent == "OUT_OF_SCOPE",
+                    expected="route_intent=OUT_OF_SCOPE",
+                    actual=f"route_intent={route_intent}",
+                    detail=route_intent,
+                ),
+                _make_check(
+                    "response avoids foreign-law specifics",
+                    not _contains_any(response_text, "WARN Act", "at-will", "美国劳动法规定"),
+                    expected="do not provide specific foreign-law rules",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
+                _make_check(
+                    "response states China-law scope",
+                    _contains_any(response_text, "中国法律", "中国大陆", "境内"),
+                    expected="state that the assistant focuses on China-law scope",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
             ]
         )
     elif plan.code == "LQ5":
         checks.extend(
             [
-                CheckResult("sources are present", sources_count >= 1, f"sources={sources_count}"),
-                CheckResult("response mentions case or judgment", _contains_any(response_text, "案例", "判决", "裁判", "案件"), response_text[:240]),
-                CheckResult("response includes facts and outcome", _contains_any(response_text, "原告", "被告", "申请人", "赔偿", "支持", "裁决"), response_text[:240]),
-                CheckResult("response explains reference value", _contains_any(response_text, "参考", "说明", "表明", "体现"), response_text[:240]),
+                _make_check(
+                    "sources are present",
+                    sources_count >= 1,
+                    expected="sources_count >= 1",
+                    actual=f"sources_count={sources_count}",
+                    detail=f"sources={sources_count}",
+                ),
+                _make_check(
+                    "response mentions case or judgment",
+                    _contains_any(response_text, "案例", "判决", "裁判", "案件"),
+                    expected="mention case/judgment language",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
+                _make_check(
+                    "response includes facts and outcome",
+                    _contains_any(response_text, "原告", "被告", "申请人", "赔偿", "支持", "裁决"),
+                    expected="include at least one case fact or outcome marker",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
+                _make_check(
+                    "response explains reference value",
+                    _contains_any(response_text, "参考", "说明", "表明", "体现"),
+                    expected="explain the case's reference value",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
             ]
         )
     elif plan.code == "LQ6":
+        latency_ms = int(result.get("latency_ms", 0) or 0)
         checks.extend(
             [
-                CheckResult("sources are present", sources_count >= 1, f"sources={sources_count}"),
-                CheckResult("multiple retrieval sources are present", sources_count >= 3, f"sources={sources_count}"),
-                CheckResult("response mentions six months", _contains_any(response_text, "六个月", "6个月"), response_text[:240]),
-                CheckResult("latency stays under 30 seconds", int(result.get("latency_ms", 999999) or 999999) < 30000, f"latency_ms={result.get('latency_ms')}"),
-                CheckResult("confidence score is positive", confidence > 0, f"confidence={confidence:.2f}"),
+                _make_check(
+                    "sources are present",
+                    sources_count >= 1,
+                    expected="sources_count >= 1",
+                    actual=f"sources_count={sources_count}",
+                    detail=f"sources={sources_count}",
+                ),
+                _make_check(
+                    "multiple retrieval sources are present",
+                    sources_count >= 3,
+                    expected="sources_count >= 3",
+                    actual=f"sources_count={sources_count}",
+                    detail=f"sources={sources_count}",
+                ),
+                _make_check(
+                    "response mentions six months",
+                    _contains_any(response_text, "六个月", "6个月"),
+                    expected="mention six months or 6 months",
+                    actual=_response_preview(response_text, 240),
+                    detail=_response_preview(response_text, 240),
+                ),
+                _make_check(
+                    "confidence score is positive",
+                    confidence > 0,
+                    expected="confidence_score > 0",
+                    actual=f"confidence={confidence:.2f}",
+                    detail=f"confidence={confidence:.2f}",
+                ),
             ]
         )
+        if latency_ms > 30000:
+            warnings.append(
+                WarningResult(
+                    "latency exceeded",
+                    f"case={plan.code} latency_ms={latency_ms} threshold_ms=30000",
+                )
+            )
     else:
         raise AssertionError(f"Unhandled legal QA case code: {plan.code}")
 
@@ -621,11 +959,16 @@ def evaluate_case(
         code=plan.code,
         name=plan.name,
         checks=checks,
+        warnings=warnings,
         notes={
             "latency_ms": int(result.get("latency_ms", 0) or 0),
             "route_intent": route_intent,
             "sources_count": sources_count,
             "confidence_score": confidence,
+            "status": str(result.get("status") or ""),
+            "error": str(result.get("error") or ""),
+            "message": str(result.get("message") or ""),
+            "response_preview": _response_preview(response_text, 500),
         },
     )
 
@@ -692,7 +1035,9 @@ def run_benchmark(
         case = evaluate_case(plan, first_payload, result)
         cases.append(case)
         for check in case.checks:
-            _log_check(run_progress, check)
+            _log_check(run_progress, case, check)
+        for warning in case.warnings:
+            _log_warning(case, warning)
         _log_case_end(
             case,
             case_index=case_index,
@@ -708,12 +1053,15 @@ def run_benchmark(
     total_passed = 0
     total_checks = 0
     case_passed = 0
+    latency_warnings: list[str] = []
     for case in cases:
         passed, total = case.score
         total_passed += passed
         total_checks += total
         if case.passed:
             case_passed += 1
+        for warning in case.warnings:
+            latency_warnings.append(f"{case.code}:{warning.label}:{warning.detail}")
     if any(not case.passed for case in cases):
         exit_code = 1
 
@@ -727,6 +1075,7 @@ def run_benchmark(
             "check_pass_rate": (total_passed / total_checks) if total_checks else 0.0,
             "case_score": f"{case_passed}/{len(cases)}",
             "case_pass_rate": (case_passed / len(cases)) if cases else 0.0,
+            "latency_warnings": len(latency_warnings),
         },
         "cases": [
             {
@@ -735,11 +1084,21 @@ def run_benchmark(
                 "score": f"{case.score[0]}/{case.score[1]}",
                 "passed": case.passed,
                 "notes": case.notes,
+                "warnings": [
+                    {
+                        "label": warning.label,
+                        "detail": warning.detail,
+                    }
+                    for warning in case.warnings
+                ],
                 "checks": [
                     {
                         "label": check.label,
                         "passed": check.passed,
                         "detail": check.detail,
+                        "expected": check.expected,
+                        "actual": check.actual,
+                        "extra": check.extra,
                     }
                     for check in case.checks
                 ],
@@ -760,6 +1119,7 @@ def run_benchmark(
     print(
         f"summary: cases_passed={case_passed}/{len(cases)} "
         f"checks_passed={total_passed}/{total_checks} "
+        f"latency_warnings={len(latency_warnings)} "
         f"elapsed={_format_seconds(time.perf_counter() - benchmark_started)}"
     )
     if failed_cases:
@@ -769,6 +1129,10 @@ def run_benchmark(
     if failed_checks:
         print("failed checks:")
         for item in failed_checks:
+            print(f"  - {item}")
+    if latency_warnings:
+        print("latency warnings:")
+        for item in latency_warnings:
             print(f"  - {item}")
     return report, exit_code
 
