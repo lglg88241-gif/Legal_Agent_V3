@@ -17,7 +17,6 @@ from app.services.conversation_store import (
     get_conversation_for_user,
     get_message_for_conversation,
     load_dossier_context_for_conversation,
-    load_conversation_persistence_consent,
     list_recent_conversation_messages,
     load_conversation_case_summary,
     maybe_update_conversation_title,
@@ -26,10 +25,21 @@ from app.services.conversation_store import (
     update_conversation_case_summary,
     update_conversation_case_type,
 )
-from app.services.conversation_mode import normalize_persistence_consent
-from app.services.case_followup import is_case_fact_update_message, is_dossier_followup_question
+from app.services.conversation_mode import (
+    normalize_conversation_mode,
+    normalize_persistence_consent,
+)
+from app.services.case_followup import (
+    build_structured_case_summary,
+    is_case_fact_update_message,
+    is_dossier_followup_question,
+    should_persist_structured_case_message,
+)
 from app.services.dossier_graph import build_dossier_graph_summary_for_conversation
-from app.services.dossier_graph_tool import load_dossier_graph_context_for_conversation
+from app.services.dossier_graph_tool import (
+    load_dossier_graph_context_for_conversation,
+    should_include_dossier_context_for_advisor,
+)
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 
@@ -156,7 +166,14 @@ async def _run_task_async(
             saved_case_state = await load_conversation_case_state(db, conversation_id)
 
         async with session_factory() as db:
-            persistence_consent = await load_conversation_persistence_consent(db, conversation_id)
+            conversation = await get_conversation_for_user(db, user_id, conversation_id)
+            persistence_consent = normalize_persistence_consent(
+                getattr(conversation, "persistence_consent", None)
+            )
+            conversation_mode = normalize_conversation_mode(
+                getattr(conversation, "conversation_mode", None)
+            )
+            dossier_id = getattr(conversation, "dossier_id", None) if conversation is not None else None
 
         async with session_factory() as db:
             dossier_context = await load_dossier_context_for_conversation(
@@ -193,6 +210,8 @@ async def _run_task_async(
             "graph_memory": graph_memory,
             "saved_case_state": saved_case_state,
             "persistence_consent": persistence_consent,
+            "conversation_mode": conversation_mode,
+            "dossier_id": dossier_id,
             "dossier_context": dossier_context,
             "dossier_graph_summary": dossier_graph_summary,
             "dossier_graph_context": dossier_graph_context,
@@ -361,6 +380,34 @@ def ask_agent_task(
         chat_history = context["chat_history"]
         case_summary = context["case_summary"]
         graph_memory = context["graph_memory"]
+        persistence_consent = normalize_persistence_consent(context.get("persistence_consent"))
+        conversation_mode = normalize_conversation_mode(context.get("conversation_mode"))
+        raw_dossier_context = context.get("dossier_context")
+        raw_dossier_graph_summary = context.get("dossier_graph_summary")
+        raw_dossier_graph_context = context.get("dossier_graph_context")
+        dossier_id = context.get("dossier_id")
+        if not dossier_id and isinstance(raw_dossier_context, dict):
+            dossier_id = raw_dossier_context.get("id")
+        dossier_scope_hint = dossier_id or (1 if raw_dossier_context else None)
+        include_dossier_context_for_advisor = should_include_dossier_context_for_advisor(
+            conversation_mode=conversation_mode,
+            dossier_id=dossier_scope_hint,
+            user_message=question,
+            persistence_consent=persistence_consent,
+        )
+        advisor_dossier_context = raw_dossier_context if include_dossier_context_for_advisor else None
+        advisor_dossier_graph_summary = (
+            raw_dossier_graph_summary if include_dossier_context_for_advisor else None
+        )
+        advisor_dossier_graph_context = (
+            raw_dossier_graph_context if include_dossier_context_for_advisor else None
+        )
+        if raw_dossier_context and not include_dossier_context_for_advisor:
+            logger.info(
+                "Advisor dossier context skipped for pure legal query | conversation_id=%s user_id=%s",
+                conversation_id,
+                user_id,
+            )
 
         answer = asyncio.run(
             legal_agent.ask(
@@ -374,9 +421,9 @@ def ask_agent_task(
                 proactive_graph_mode=proactive_graph_mode,
                 conversation_id=conversation_id,
                 saved_case_state=context.get("saved_case_state"),
-                dossier_context=context.get("dossier_context"),
-                dossier_graph_summary=context.get("dossier_graph_summary"),
-                dossier_graph_context=context.get("dossier_graph_context"),
+                dossier_context=advisor_dossier_context,
+                dossier_graph_summary=advisor_dossier_graph_summary,
+                dossier_graph_context=advisor_dossier_graph_context,
             )
         )
 
@@ -388,8 +435,7 @@ def ask_agent_task(
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
         case_state_dict = answer.get("case_state_snapshot") if isinstance(answer, dict) else None
         case_type = answer.get("case_type") if isinstance(answer, dict) else None
-        persistence_consent = normalize_persistence_consent(context.get("persistence_consent"))
-        has_dossier_context = bool(context.get("dossier_context"))
+        has_dossier_context = bool(raw_dossier_context)
         dossier_followup_question = has_dossier_context and is_dossier_followup_question(question)
         message_is_fact_update = is_case_fact_update_message(question)
         if route_intent == "CASE_UPDATE" and dossier_followup_question:
@@ -408,11 +454,26 @@ def ask_agent_task(
             updated_case_summary = context.get("case_summary") or ""
             case_state_dict = None
             case_type = None
-        should_persist_structured_case = (
-            route_intent == "CASE_UPDATE"
-            and persistence_consent != "temporary"
-            and (not has_dossier_context or message_is_fact_update)
+        should_persist_structured_case = should_persist_structured_case_message(
+            text=question,
+            route_intent=route_intent,
+            persistence_consent=persistence_consent,
+            conversation_mode=conversation_mode,
+            has_dossier_context=has_dossier_context,
         )
+        if should_persist_structured_case:
+            updated_case_summary = build_structured_case_summary(
+                current_summary=context.get("case_summary"),
+                user_message=question,
+                proposed_summary=updated_case_summary,
+            )
+            if route_intent != "CASE_UPDATE":
+                logger.info(
+                    "Structured case persistence promoted for tracked factual message | conversation_id=%s user_id=%s original_route_intent=%s",
+                    conversation_id,
+                    user_id,
+                    original_route_intent,
+                )
 
         if route_intent == "GREETING":
             agent_actions = [
@@ -478,42 +539,42 @@ def ask_agent_task(
                 )
             )
 
-        if route_intent == "CASE_UPDATE":
-            if not should_persist_structured_case:
-                if persistence_consent == "temporary":
-                    logger.info(
-                        "Structured case persistence skipped due to temporary consent | conversation_id=%s user_id=%s route_intent=%s",
-                        conversation_id,
-                        user_id,
-                        route_intent,
-                    )
-                    logger.info(
-                        "Graph update skipped due to temporary consent | conversation_id=%s user_id=%s",
-                        conversation_id,
-                        user_id,
-                    )
-                else:
-                    logger.info(
-                        "Structured case persistence skipped because message is dossier follow-up question | conversation_id=%s user_id=%s route_intent=%s",
-                        conversation_id,
-                        user_id,
-                        route_intent,
-                    )
-                    logger.info(
-                        "Graph update skipped because message is dossier follow-up question | conversation_id=%s user_id=%s",
-                        conversation_id,
-                        user_id,
-                    )
+        if should_persist_structured_case:
+            user_message_id = persist_result.get("user_message_id")
+            if user_message_id:
+                update_graph_task.delay(conversation_id, user_id, user_message_id)
             else:
-                user_message_id = persist_result.get("user_message_id")
-                if user_message_id:
-                    update_graph_task.delay(conversation_id, user_id, user_message_id)
-                else:
-                    logger.warning(
-                        "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
-                        conversation_id,
-                        user_id,
-                    )
+                logger.warning(
+                    "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
+                    conversation_id,
+                    user_id,
+                )
+        elif route_intent == "CASE_UPDATE":
+            if persistence_consent == "temporary":
+                logger.info(
+                    "Structured case persistence skipped due to temporary consent | conversation_id=%s user_id=%s route_intent=%s",
+                    conversation_id,
+                    user_id,
+                    route_intent,
+                )
+                logger.info(
+                    "Graph update skipped due to temporary consent | conversation_id=%s user_id=%s",
+                    conversation_id,
+                    user_id,
+                )
+            else:
+                logger.info(
+                    "Structured case persistence skipped because message is dossier follow-up question | conversation_id=%s user_id=%s route_intent=%s message_is_fact_update=%s",
+                    conversation_id,
+                    user_id,
+                    route_intent,
+                    message_is_fact_update,
+                )
+                logger.info(
+                    "Graph update skipped because message is dossier follow-up question | conversation_id=%s user_id=%s",
+                    conversation_id,
+                    user_id,
+                )
 
         return result
 

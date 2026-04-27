@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import re
 
+from app.services.conversation_mode import (
+    normalize_conversation_mode,
+    normalize_persistence_consent,
+)
+from app.services.dossier_graph_tool import classify_dossier_graph_query
+
 _FACT_UPDATE_PHRASES = (
     "我补充一下",
     "补充一下",
-    "再补充",
+    "再补充一下",
     "更正一下",
     "纠正一下",
     "更新一下",
@@ -70,9 +76,19 @@ _QUESTION_HINTS = (
     "要不要",
 )
 
+_FACT_PREFIX_PATTERN = re.compile(
+    r"^(?:我)?(?:再)?(?:补充一下(?:案情)?|更正一下(?:案情)?|说明一下(?:案情)?|补充事实|补充情况)[：:，,\s]*"
+)
+
 
 def _normalize_text(text: str | None) -> str:
     return " ".join((text or "").strip().split())
+
+
+def _looks_like_fact_update(text: str) -> bool:
+    if any(phrase in text for phrase in _FACT_UPDATE_PHRASES):
+        return True
+    return any(pattern.search(text) for pattern in _FACT_UPDATE_REGEXES)
 
 
 def is_case_fact_update_message(text: str | None) -> bool:
@@ -80,15 +96,16 @@ def is_case_fact_update_message(text: str | None) -> bool:
     if not cleaned:
         return False
 
-    if any(phrase in cleaned for phrase in _FACT_UPDATE_PHRASES):
-        return True
-    if any(pattern.search(cleaned) for pattern in _FACT_UPDATE_REGEXES):
+    if _looks_like_fact_update(cleaned):
         return True
 
-    if is_dossier_followup_question(cleaned):
+    if classify_dossier_graph_query(cleaned) in {"memory", "advice", "legal"}:
         return False
 
-    return True
+    if "?" in cleaned or "？" in cleaned:
+        return False
+
+    return not any(hint in cleaned for hint in _QUESTION_HINTS)
 
 
 def is_dossier_followup_question(text: str | None) -> bool:
@@ -96,10 +113,11 @@ def is_dossier_followup_question(text: str | None) -> bool:
     if not cleaned:
         return False
 
-    if any(phrase in cleaned for phrase in _FACT_UPDATE_PHRASES):
+    if _looks_like_fact_update(cleaned):
         return False
-    if any(pattern.search(cleaned) for pattern in _FACT_UPDATE_REGEXES):
-        return False
+
+    if classify_dossier_graph_query(cleaned) in {"memory", "advice", "legal"}:
+        return True
 
     if any(phrase in cleaned for phrase in _CONSULT_PHRASES):
         return True
@@ -108,3 +126,58 @@ def is_dossier_followup_question(text: str | None) -> bool:
         return True
 
     return any(hint in cleaned for hint in _QUESTION_HINTS)
+
+
+def should_persist_structured_case_message(
+    *,
+    text: str | None,
+    route_intent: str | None,
+    persistence_consent: str | None,
+    conversation_mode: str | None = None,
+    has_dossier_context: bool = False,
+) -> bool:
+    cleaned = _normalize_text(text)
+    if not cleaned:
+        return False
+
+    normalized_consent = normalize_persistence_consent(persistence_consent)
+    if normalized_consent == "temporary":
+        return False
+
+    normalized_route = str(route_intent or "").strip().upper()
+    normalized_mode = normalize_conversation_mode(conversation_mode)
+    message_kind = classify_dossier_graph_query(cleaned)
+
+    if normalized_route == "CASE_UPDATE":
+        if not has_dossier_context and normalized_consent != "tracked" and normalized_mode != "TRACKED_CASE":
+            return True
+        return message_kind not in {"memory", "advice", "legal"} and is_case_fact_update_message(cleaned)
+
+    if normalized_consent != "tracked":
+        return False
+
+    if normalized_mode != "TRACKED_CASE" and not has_dossier_context:
+        return False
+
+    return message_kind not in {"memory", "advice", "legal"} and is_case_fact_update_message(cleaned)
+
+
+def build_structured_case_summary(
+    *,
+    current_summary: str | None,
+    user_message: str | None,
+    proposed_summary: str | None,
+) -> str:
+    current = _normalize_text(current_summary)
+    proposed = _normalize_text(proposed_summary)
+    fact_text = _FACT_PREFIX_PATTERN.sub("", _normalize_text(user_message))
+
+    if proposed and proposed != current:
+        return proposed
+
+    if current and fact_text:
+        if fact_text in current:
+            return current
+        return f"{current}\n补充事实：{fact_text}"
+
+    return fact_text or proposed or current

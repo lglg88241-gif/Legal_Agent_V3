@@ -116,6 +116,22 @@ _DOSSIER_GRAPH_ADVICE_HINTS = (
     "申请劳动仲裁",
     "劳动仲裁",
 )
+_CASE_CONTEXT_REQUEST_HINTS = (
+    "结合我这个案子",
+    "结合这个案子",
+    "结合这个案件",
+    "结合这个案卷",
+    "按我这个情况",
+    "根据我这个案子",
+    "根据这个案子",
+    "根据这个案件",
+    "根据这个案卷",
+    "结合案情",
+    "按案情",
+    "适用到我这个案子",
+    "怎么适用到我这个案子",
+    "对我这个案子怎么适用",
+)
 _PURE_LEGAL_QUERY_HINTS = (
     "法条",
     "法律规定",
@@ -212,6 +228,13 @@ def _looks_like_pure_legal_query(text: str) -> bool:
     )
 
 
+def has_explicit_case_context_request(text: str | None) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    return any(hint in normalized for hint in _CASE_CONTEXT_REQUEST_HINTS)
+
+
 def classify_dossier_graph_query(text: str | None) -> str:
     normalized = " ".join((text or "").strip().split())
     if not normalized:
@@ -253,12 +276,56 @@ def should_query_dossier_graph_context(
 
     if normalized_consent == "temporary":
         return False
-    if normalized_mode == "LEGAL_QA" or normalized_route == "LEGAL_QA":
+    case_context_requested = has_explicit_case_context_request(normalized_message)
+    if normalized_mode == "LEGAL_QA" and not case_context_requested:
+        return False
+    if normalized_route == "LEGAL_QA" and not case_context_requested:
         return False
     query_kind = classify_dossier_graph_query(normalized_message)
-    if query_kind == "legal":
+    if query_kind == "legal" and not case_context_requested:
         return False
+    if case_context_requested:
+        return normalized_mode in {"TRACKED_CASE", "CASE_ANALYSIS", "UNKNOWN"}
     if query_kind not in {"memory", "advice"}:
+        return False
+
+    return normalized_mode in {"TRACKED_CASE", "CASE_ANALYSIS", "UNKNOWN"}
+
+
+def should_include_dossier_context_for_advisor(
+    *,
+    conversation_mode: str | None,
+    dossier_id: int | None,
+    route_intent: str | None = None,
+    user_message: str,
+    persistence_consent: str | None = None,
+) -> bool:
+    try:
+        normalized_dossier_id = int(dossier_id or 0)
+    except (TypeError, ValueError):
+        normalized_dossier_id = 0
+    if normalized_dossier_id <= 0:
+        return False
+
+    normalized_message = " ".join((user_message or "").strip().split())
+    if not normalized_message:
+        return False
+
+    normalized_mode = normalize_conversation_mode(conversation_mode)
+    normalized_consent = normalize_persistence_consent(persistence_consent)
+    normalized_route = str(route_intent or "").strip().upper()
+
+    if normalized_consent == "temporary":
+        return False
+
+    case_context_requested = has_explicit_case_context_request(normalized_message)
+    if case_context_requested:
+        return normalized_mode in {"TRACKED_CASE", "CASE_ANALYSIS", "UNKNOWN", "LEGAL_QA"}
+
+    if normalized_mode == "LEGAL_QA" or normalized_route == "LEGAL_QA":
+        return False
+
+    if _looks_like_explicit_law_article_query(normalized_message) or _looks_like_pure_legal_query(normalized_message):
         return False
 
     return normalized_mode in {"TRACKED_CASE", "CASE_ANALYSIS", "UNKNOWN"}

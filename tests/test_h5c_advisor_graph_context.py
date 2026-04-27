@@ -92,6 +92,33 @@ def test_should_query_dossier_graph_context_returns_false_for_explicit_article_q
     ) is False
 
 
+def test_should_include_dossier_context_for_advisor_skips_explicit_article_query() -> None:
+    assert dossier_graph_tool.should_include_dossier_context_for_advisor(
+        conversation_mode="TRACKED_CASE",
+        dossier_id=12,
+        user_message="劳动合同法第八十七条规定了什么？",
+        persistence_consent="tracked",
+    ) is False
+
+
+def test_should_include_dossier_context_for_advisor_allows_case_applied_article_query() -> None:
+    assert dossier_graph_tool.should_include_dossier_context_for_advisor(
+        conversation_mode="TRACKED_CASE",
+        dossier_id=12,
+        user_message="结合我这个案子，劳动合同法第八十七条怎么适用？",
+        persistence_consent="tracked",
+    ) is True
+
+
+def test_should_query_dossier_graph_context_allows_case_applied_article_query() -> None:
+    assert dossier_graph_tool.should_query_dossier_graph_context(
+        conversation_mode="TRACKED_CASE",
+        dossier_id=12,
+        user_message="结合我这个案子，劳动合同法第八十七条怎么适用？",
+        persistence_consent="tracked",
+    ) is True
+
+
 def test_load_dossier_graph_context_for_conversation_calls_query_for_memory_question(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -311,6 +338,8 @@ def test_ask_agent_task_passes_dossier_graph_context_to_legal_agent(
             "graph_memory": "",
             "saved_case_state": {"monthly_salary": 12000},
             "persistence_consent": "tracked",
+            "conversation_mode": "TRACKED_CASE",
+            "dossier_id": 12,
             "dossier_context": {"id": 12, "title": "劳动争议案卷"},
             "dossier_graph_summary": "",
             "dossier_graph_context": {
@@ -360,3 +389,122 @@ def test_ask_agent_task_passes_dossier_graph_context_to_legal_agent(
     assert isinstance(captured["dossier_graph_context"], dict)
     assert captured["dossier_graph_context"]["source"] == "graph_context"
     assert captured["dossier_graph_context"]["legal_basis"] is False
+
+
+def test_ask_agent_task_skips_dossier_context_for_explicit_law_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    celery_module = _load_celery_module()
+    captured: dict[str, object] = {}
+
+    async def fake_run_task_async(conversation_id: int, user_id: int, current_question: str | None = None):
+        return {
+            "chat_history": "",
+            "case_summary": "",
+            "graph_memory": "",
+            "saved_case_state": None,
+            "persistence_consent": "tracked",
+            "conversation_mode": "TRACKED_CASE",
+            "dossier_id": 12,
+            "dossier_context": {"id": 12, "title": "劳动争议案卷", "summary": "A公司解除劳动合同"},
+            "dossier_graph_summary": "<dossier_graph_summary>A公司</dossier_graph_summary>",
+            "dossier_graph_context": {
+                "status": "success",
+                "source": "graph_context",
+                "legal_basis": False,
+                "scope": {"user_id": 1, "dossier_id": 12, "conversation_id": 9},
+                "stats": {"conversation_count": 1, "node_count": 1, "edge_count": 0},
+                "participants": [],
+                "participant_mentions": [],
+                "matched_nodes": [],
+                "matched_edges": [],
+                "warnings": [],
+                "notes": ["graph_context 仅代表案卷结构化背景，不构成法律依据。"],
+                "truncated": False,
+            },
+        }
+
+    class FakeLegalAgent:
+        async def ask(self, *args, **kwargs):
+            captured["dossier_context"] = kwargs.get("dossier_context")
+            captured["dossier_graph_summary"] = kwargs.get("dossier_graph_summary")
+            captured["dossier_graph_context"] = kwargs.get("dossier_graph_context")
+            return {
+                "response": "第八十七条规定违法解除时应支付赔偿金。",
+                "sources": ["law-db"],
+                "route_intent": "GENERAL_CONSULT",
+                "case_summary": "",
+            }
+
+    async def fake_persist_dialog_turn_async(**kwargs):
+        return {"user_message_id": 11, "assistant_message_id": 12}
+
+    monkeypatch.setattr(celery_module, "_run_task_async", fake_run_task_async)
+    monkeypatch.setattr(celery_module, "legal_agent", FakeLegalAgent())
+    monkeypatch.setattr(celery_module, "_persist_dialog_turn_async", fake_persist_dialog_turn_async)
+
+    result = celery_module.ask_agent_task.run(
+        1,
+        9,
+        "session-1",
+        "劳动合同法第八十七条规定了什么？",
+        True,
+        True,
+    )
+
+    assert result["status"] == "success"
+    assert captured["dossier_context"] is None
+    assert captured["dossier_graph_summary"] is None
+    assert captured["dossier_graph_context"] is None
+
+
+def test_ask_agent_task_keeps_dossier_context_for_case_applied_law_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    celery_module = _load_celery_module()
+    captured: dict[str, object] = {}
+
+    async def fake_run_task_async(conversation_id: int, user_id: int, current_question: str | None = None):
+        return {
+            "chat_history": "",
+            "case_summary": "",
+            "graph_memory": "",
+            "saved_case_state": None,
+            "persistence_consent": "tracked",
+            "conversation_mode": "TRACKED_CASE",
+            "dossier_id": 12,
+            "dossier_context": {"id": 12, "title": "劳动争议案卷", "summary": "A公司解除劳动合同"},
+            "dossier_graph_summary": "<dossier_graph_summary>A公司</dossier_graph_summary>",
+            "dossier_graph_context": None,
+        }
+
+    class FakeLegalAgent:
+        async def ask(self, *args, **kwargs):
+            captured["dossier_context"] = kwargs.get("dossier_context")
+            captured["dossier_graph_summary"] = kwargs.get("dossier_graph_summary")
+            return {
+                "response": "结合当前案情，可以主张违法解除赔偿。",
+                "sources": ["law-db"],
+                "route_intent": "GENERAL_CONSULT",
+                "case_summary": "",
+            }
+
+    async def fake_persist_dialog_turn_async(**kwargs):
+        return {"user_message_id": 11, "assistant_message_id": 12}
+
+    monkeypatch.setattr(celery_module, "_run_task_async", fake_run_task_async)
+    monkeypatch.setattr(celery_module, "legal_agent", FakeLegalAgent())
+    monkeypatch.setattr(celery_module, "_persist_dialog_turn_async", fake_persist_dialog_turn_async)
+
+    result = celery_module.ask_agent_task.run(
+        1,
+        9,
+        "session-1",
+        "结合我这个案子，劳动合同法第八十七条怎么适用？",
+        True,
+        True,
+    )
+
+    assert result["status"] == "success"
+    assert isinstance(captured["dossier_context"], dict)
+    assert captured["dossier_graph_summary"] == "<dossier_graph_summary>A公司</dossier_graph_summary>"
