@@ -36,6 +36,9 @@ from app.services.conversation_store import (
     update_dossier_participant_record,
 )
 from app.services.dossier_display_graph import build_dossier_display_graph
+from app.services.dossier_coordination_graph import (
+    build_dossier_coordination_graph_for_user,
+)
 from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.dossier_intelligence import build_dossier_intelligence
 from app.services.dossier_summary import generate_dossier_auto_summary
@@ -685,6 +688,34 @@ async def get_dossier_display_graph(
         "view": "display",
         "display_graph": display_graph,
         "generated_at": raw_graph_payload.get("generated_at"),
+    }
+
+
+@router.get("/{dossier_id}/coordination-graph")
+async def get_dossier_coordination_graph(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    try:
+        payload = await build_dossier_coordination_graph_for_user(
+            db,
+            current_user=current_user,
+            dossier_id=dossier_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Dossier not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+    return {
+        "status": "success",
+        "dossier_id": dossier_id,
+        "view": "coordination",
+        "coordination_graph": payload.get("coordination_graph", {}),
+        "generated_at": payload.get("generated_at"),
     }
 
 
