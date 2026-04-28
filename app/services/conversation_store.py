@@ -31,7 +31,13 @@ VALID_DOSSIER_STATUSES = {"active", "archived", "closed"}
 DEFAULT_PARTICIPANT_ALIASES: dict[str, dict[str, Any]] = {}
 VALID_PARTY_SIDES = {"claimant", "opponent", "neutral", "unknown"}
 VALID_ENTITY_TYPES = {"person", "organization", "authority", "unknown"}
-VALID_PARTICIPANT_MENTION_SOURCES = {"graph", "graph_node", "conversation", "user"}
+VALID_PARTICIPANT_MENTION_SOURCES = {
+    "graph",
+    "graph_node",
+    "conversation",
+    "user",
+    "party_naming",
+}
 PARTICIPANT_RESOLVABLE_ENTITY_TYPES = {
     "person",
     "organization",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -98,6 +100,142 @@ class DossierParticipantResolveRequest(BaseModel):
         min_length=1,
         max_length=50,
     )
+
+
+class PartyNamingEvidenceRequest(BaseModel):
+    raw_labels: list[str] = Field(default_factory=list, max_length=50)
+    source_conversation_ids: list[int] = Field(default_factory=list, max_length=50)
+    raw_node_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class PartyNamingSourceTaskRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=32)
+    evidence: PartyNamingEvidenceRequest | None = None
+
+
+class PartyNamingConfirmRequest(BaseModel):
+    display_label: str = Field(..., min_length=1, max_length=50)
+    source_task: PartyNamingSourceTaskRequest
+
+
+_SELF_ANCHOR_SUBJECT = "self_anchor"
+_PARTY_NAMING_ROLE = "当事人"
+_PARTY_NAMING_MENTION_SOURCE = "party_naming"
+_PARTY_NAMING_GRAPH_NODE_TYPE = "person"
+_SELF_ANCHOR_LABELS = {
+    "当事人",
+    "我",
+    "本人",
+    "自己",
+    "用户",
+    "我们",
+    "咱们",
+}
+_EXPLICIT_SELF_DISPLAY_LABELS = {
+    "我",
+    "本人",
+    "自己",
+    "我们",
+    "咱们",
+    "劳动者本人",
+    "我方当事人",
+    "申请人",
+}
+
+
+def _normalize_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split())
+
+
+def _normalize_key(value: Any) -> str:
+    return _normalize_text(value).lower()
+
+
+def _positive_int(value: Any) -> int:
+    try:
+        normalized = int(value or 0)
+    except (TypeError, ValueError):
+        normalized = 0
+    return normalized if normalized > 0 else 0
+
+
+def _find_self_participant(participants: list[Any]) -> Any | None:
+    ranked_matches: list[tuple[int, int, Any]] = []
+    for index, participant in enumerate(participants):
+        label = _normalize_text(getattr(participant, "label", ""))
+        role = _normalize_text(getattr(participant, "role", ""))
+        party_side = _normalize_key(getattr(participant, "party_side", "unknown"))
+        entity_type = _normalize_key(getattr(participant, "entity_type", "unknown"))
+
+        rank: int | None = None
+        if (
+            label in _SELF_ANCHOR_LABELS
+            or role in _SELF_ANCHOR_LABELS
+            or label in _EXPLICIT_SELF_DISPLAY_LABELS
+            or role in _EXPLICIT_SELF_DISPLAY_LABELS
+        ):
+            rank = 0
+        elif party_side == "claimant" and entity_type == "person":
+            rank = 1
+        elif party_side == "claimant" and entity_type == "unknown":
+            rank = 2
+
+        if rank is not None:
+            ranked_matches.append((rank, index, participant))
+
+    if not ranked_matches:
+        return None
+    ranked_matches.sort(key=lambda item: (item[0], item[1]))
+    return ranked_matches[0][2]
+
+
+def _build_party_naming_mentions_payload(
+    display_label: str,
+    evidence: PartyNamingEvidenceRequest | None,
+) -> list[dict[str, Any]]:
+    if evidence is None:
+        return []
+
+    raw_labels = [
+        _normalize_text(item)
+        for item in evidence.raw_labels
+        if _normalize_text(item)
+    ]
+    conversation_ids = [_positive_int(item) for item in evidence.source_conversation_ids]
+    raw_node_ids = [_normalize_text(item) for item in evidence.raw_node_ids]
+    mention_count = max(len(raw_labels), len(conversation_ids), len(raw_node_ids))
+    if mention_count <= 0:
+        return []
+
+    default_raw_label = raw_labels[0] if raw_labels else display_label
+    mentions: list[dict[str, Any]] = []
+    seen_keys: set[tuple[int, str, str]] = set()
+
+    for index in range(mention_count):
+        conversation_id = conversation_ids[index] if index < len(conversation_ids) else 0
+        if conversation_id <= 0:
+            continue
+
+        raw_label = raw_labels[index] if index < len(raw_labels) else default_raw_label
+        raw_node_id = raw_node_ids[index] if index < len(raw_node_ids) else ""
+        seen_key = (conversation_id, raw_label.lower(), raw_node_id)
+        if seen_key in seen_keys:
+            continue
+        seen_keys.add(seen_key)
+
+        mentions.append(
+            {
+                "conversation_id": conversation_id,
+                "raw_label": raw_label or display_label,
+                "source": _PARTY_NAMING_MENTION_SOURCE,
+                "confidence": 1.0,
+                "graph_node_id": raw_node_id or None,
+                "graph_node_label": raw_label or display_label,
+                "graph_node_type": _PARTY_NAMING_GRAPH_NODE_TYPE,
+            }
+        )
+
+    return mentions
 
 
 def _serialize_dossier_with_participants(
@@ -572,6 +710,94 @@ async def get_dossier_intelligence(
         if detail == "Dossier not found":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
+
+
+@router.post("/{dossier_id}/intelligence/tasks/party-naming/confirm")
+async def confirm_dossier_party_naming(
+    dossier_id: int,
+    payload: PartyNamingConfirmRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+    _ensure_dossier_participant_write_allowed(dossier)
+
+    display_label = _normalize_text(payload.display_label)
+    if not display_label:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="display_label is required",
+        )
+    if _normalize_key(payload.source_task.subject) != _SELF_ANCHOR_SUBJECT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="party_naming confirmation only supports self_anchor subject",
+        )
+
+    participants = await list_dossier_participants(db, current_user.user_id, dossier.id)
+    existing_participant = _find_self_participant(participants)
+
+    try:
+        if existing_participant is None:
+            participant = await create_dossier_participant_record(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                label=display_label,
+                role=_PARTY_NAMING_ROLE,
+                party_side="claimant",
+                entity_type="person",
+                description=None,
+                confirmed_by_user=True,
+            )
+        else:
+            participant = await update_dossier_participant_record(
+                db,
+                existing_participant,
+                label=display_label,
+                role=getattr(existing_participant, "role", None) or _PARTY_NAMING_ROLE,
+                party_side="claimant",
+                entity_type="person",
+            )
+            participant.confirmed_by_user = True
+            db.add(participant)
+            await db.flush()
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    mentions_payload = _build_party_naming_mentions_payload(
+        display_label,
+        payload.source_task.evidence,
+    )
+    mentions = []
+    if mentions_payload:
+        try:
+            mentions = await resolve_dossier_participant_mentions(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                participant=participant,
+                mentions=mentions_payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await db.commit()
+    await db.refresh(participant)
+    for mention in mentions:
+        await db.refresh(mention)
+    participant_lookup = {participant.id: participant}
+    return {
+        "status": "success",
+        "participant": serialize_dossier_participant(participant),
+        "mentions": [
+            serialize_dossier_participant_mention(mention, participant_lookup)
+            for mention in mentions
+        ],
+    }
 
 
 @router.patch("/{dossier_id}")
