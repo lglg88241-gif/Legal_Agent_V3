@@ -82,8 +82,8 @@ def test_build_advisor_system_prompt_memory_mode_drops_irrelevant_rag_blocks() -
         question_mode=_DOSSIER_QUESTION_MEMORY,
     )
 
-    assert "当前问题属于案卷记忆查询，本轮不强制使用法律检索结果。" in prompt
-    assert "不要主动引用法条编号、案例名称或展开法律 RAG 内容" in prompt
+    assert "当前问题属于案卷记忆 / 主体指代查询，本轮不强制使用法律检索结果。" in prompt
+    assert "不要主动引用法条编号、案例名称，也不要展开法律 RAG 内容或维权建议" in prompt
     assert "某化工公司污染环境案" not in prompt
     assert "污染环境罪" not in prompt
     assert "必须明确引用法条编号" not in prompt
@@ -154,6 +154,6 @@ def test_generate_final_answer_uses_memory_mode_prompt_for_dossier_memory_questi
     )
 
     assert result["response"].startswith("根据当前案卷已记录的信息")
-    assert "当前问题属于案卷记忆查询" in captured["user"]
+    assert "当前问题属于案卷记忆 / 主体指代查询" in captured["user"]
     assert "某化工公司污染环境案" not in captured["system"]
     assert "污染环境罪" not in captured["system"]

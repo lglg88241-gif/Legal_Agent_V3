@@ -86,6 +86,45 @@ _DOSSIER_GRAPH_MEMORY_TOPIC_HINTS = (
     "公司",
     "对方",
 )
+_DOSSIER_SUBJECT_REFERENCE_HINTS = (
+    "这里的当事人指的是谁",
+    "当事人指的是谁",
+    "当事人是谁",
+    "这里的我是谁",
+    "这里的本人是谁",
+    "这里的自己是谁",
+    "这个主体是谁",
+    "这个主体指的是谁",
+    "这个公司指的是谁",
+    "这个公司指的是哪家公司",
+    "这个公司是谁",
+    "这个人指谁",
+    "这个人指的是谁",
+    "这个人是谁",
+    "当前案卷里的当事人是谁",
+    "案卷里的当事人是谁",
+)
+_DOSSIER_SUBJECT_REFERENCE_ENTITY_HINTS = (
+    "当事人",
+    "这里的我",
+    "这里的本人",
+    "这里的自己",
+    "这个主体",
+    "这个公司",
+    "这家公司",
+    "这个人",
+    "该公司",
+    "该主体",
+    "申请人",
+    "被申请人",
+)
+_DOSSIER_SUBJECT_REFERENCE_QUESTION_HINTS = (
+    "指的是谁",
+    "是谁",
+    "指谁",
+    "哪家公司",
+    "什么关系",
+)
 _DOSSIER_GRAPH_ADVICE_HINTS = (
     "根据这个案子",
     "根据这个案件",
@@ -200,11 +239,25 @@ def _looks_like_memory_query(text: str) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
         return False
+    if _looks_like_subject_reference_query(normalized):
+        return True
     if any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_HINTS):
         return True
     return (
         any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_CONTEXT_HINTS)
         and any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_TOPIC_HINTS)
+    )
+
+
+def _looks_like_subject_reference_query(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    if any(hint in normalized for hint in _DOSSIER_SUBJECT_REFERENCE_HINTS):
+        return True
+    return (
+        any(hint in normalized for hint in _DOSSIER_SUBJECT_REFERENCE_ENTITY_HINTS)
+        and any(hint in normalized for hint in _DOSSIER_SUBJECT_REFERENCE_QUESTION_HINTS)
     )
 
 

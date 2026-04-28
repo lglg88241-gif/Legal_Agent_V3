@@ -10,6 +10,7 @@ from typing import Any
 from app.agent.graph import AgentState
 from app.agent.nodes._llm import LAW_TOOL, CASE_TOOL
 from app.services import graph_extractor as _graph_extractor
+from app.services.dossier_graph_tool import classify_dossier_graph_query
 
 format_graph_memory = _graph_extractor.format_graph_memory
 get_user_cases_graph_overview = getattr(_graph_extractor, "get_user_cases_graph_overview", None)
@@ -24,8 +25,10 @@ async def vector_researcher_node(self, state: AgentState) -> AgentState:
     case_summary = state.get("case_summary", "")
     conversation_id = state.get("conversation_id")
     tool_calls = state.get("tool_calls") or []
+    has_dossier_context = bool(state.get("dossier_context") or state.get("dossier_graph_context"))
+    is_dossier_memory_query = has_dossier_context and classify_dossier_graph_query(current_query) == "memory"
 
-    if not tool_calls or state.get("routed_query") != current_query:
+    if (not tool_calls or state.get("routed_query") != current_query) and not is_dossier_memory_query:
         tool_calls = self._patched_build_tool_calls_for_intent(route_intent, current_query)
 
     enriched_tool_calls = []

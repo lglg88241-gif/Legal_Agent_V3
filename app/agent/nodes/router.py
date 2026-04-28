@@ -23,6 +23,7 @@ from app.agent.nodes._llm import (
 )
 from app.agent.prompts.advisor import TRIPLE_TRACK_ROUTER_PROMPT_V2
 from app.core.llm_provider import get_llm_router
+from app.services.dossier_graph_tool import classify_dossier_graph_query
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +522,10 @@ def history_has_case_continuity(chat_history: str, case_summary: str) -> bool:
     return matched >= 2
 
 
+def _has_dossier_memory_query(question: str, has_dossier_context: bool = False) -> bool:
+    return bool(has_dossier_context) and classify_dossier_graph_query(question) == "memory"
+
+
 def build_tool_calls_for_intent(self, route_intent: str, query: str) -> list[dict[str, Any]]:
     cleaned_query = " ".join((query or "").strip().split())
     if not cleaned_query or route_intent in {"GREETING", OUT_OF_SCOPE_INTENT}:
@@ -561,6 +566,7 @@ async def route_decision(
     chat_history: str = "",
     case_summary: str = "",
     is_precise_mode: bool = False,
+    has_dossier_context: bool = False,
 ) -> dict[str, Any]:
     history_text = (chat_history or "").strip() or "无历史对话"
     has_case_summary = bool((case_summary or "").strip())
@@ -574,6 +580,12 @@ async def route_decision(
         return {
             "route_intent": "GENERAL_CONSULT",
             "tool_calls": self._patched_build_tool_calls_for_intent("GENERAL_CONSULT", cleaned_question),
+        }
+
+    if _has_dossier_memory_query(cleaned_question, has_dossier_context):
+        return {
+            "route_intent": "CASE_UPDATE",
+            "tool_calls": [],
         }
 
     if is_precise_mode:
@@ -681,12 +693,24 @@ async def tool_router_node(self, state: AgentState) -> AgentState:
         if (_wage_from_question is not None and _wage_from_question > 0)
         else _existing_wage
     )
-    decision = await self._patched_route_decision(
-        current_query,
-        chat_history=chat_history,
-        case_summary=case_summary,
-        is_precise_mode=bool(state.get("is_precise_mode", False)),
-    )
+    has_dossier_context = bool(state.get("dossier_context") or state.get("dossier_graph_context"))
+    try:
+        decision = await self._patched_route_decision(
+            current_query,
+            chat_history=chat_history,
+            case_summary=case_summary,
+            is_precise_mode=bool(state.get("is_precise_mode", False)),
+            has_dossier_context=has_dossier_context,
+        )
+    except TypeError as exc:
+        if "has_dossier_context" not in str(exc):
+            raise
+        decision = await self._patched_route_decision(
+            current_query,
+            chat_history=chat_history,
+            case_summary=case_summary,
+            is_precise_mode=bool(state.get("is_precise_mode", False)),
+        )
     return {
         "current_query": current_query,
         "routed_query": current_query,

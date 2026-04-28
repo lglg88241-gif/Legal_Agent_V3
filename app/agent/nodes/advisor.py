@@ -137,9 +137,12 @@ def _build_advisor_user_instruction(question: str, question_mode: str) -> str:
     if normalized_mode == _DOSSIER_QUESTION_MEMORY:
         return (
             f"用户的问题：{question}\n"
-            "当前问题属于案卷记忆查询。请优先依据 system 中的案卷上下文、案卷图谱摘要和案卷图谱查询结果，"
-            "直接回答案卷里记录的主体、事实、证据或关系。"
-            "不要为了补充背景而主动展开无关法律条文、刑法内容或不相干案例。"
+            "当前问题属于案卷记忆 / 主体指代查询。请优先依据 system 中的案卷上下文、案卷图谱摘要和案卷图谱查询结果作答。"
+            "如果用户在问“当事人 / 我 / 本人 / 这个公司 / 这个人指的是谁”，先直接回答主体是谁，"
+            "再用一句话说明依据来自案卷中已确认的主体映射、participant overlay 或原始标签映射。"
+            "如果案卷里还有其他未确认的相似主体，只能说明“尚未确认，不能自动视为同一主体”，不要擅自合并。"
+            "除非用户明确追问法律依据或下一步怎么办，否则不要主动展开法条、案例、仲裁建议或维权步骤。"
+            "整段回答控制在 3 到 6 句话内。"
         )
     if normalized_mode == _DOSSIER_QUESTION_ADVICE:
         return (
@@ -933,9 +936,9 @@ def build_advisor_system_prompt(
     memory_only_mode = normalized_question_mode == _DOSSIER_QUESTION_MEMORY
 
     if memory_only_mode:
-        laws_block = "当前问题属于案卷记忆查询，本轮不强制使用法律检索结果。"
-        cases_block = "当前问题属于案卷记忆查询，本轮不强制使用案例材料。"
-        rag_context = "当前问题属于案卷记忆查询；如用户未追问法律依据，请忽略法律检索材料。"
+        laws_block = "当前问题属于案卷记忆 / 主体指代查询，本轮不强制使用法律检索结果。"
+        cases_block = "当前问题属于案卷记忆 / 主体指代查询，本轮不强制使用案例材料。"
+        rag_context = "当前问题属于案卷记忆 / 主体指代查询；如用户未追问法律依据，请忽略法律检索材料。"
 
     dossier_block = dossier_context.strip()
     dossier_graph_block = dossier_graph_summary.strip()
@@ -950,8 +953,9 @@ def build_advisor_system_prompt(
         rag_binding_block = """
 
 <rag_binding>
-当前问题属于案卷记忆 / 主体关系 / 历史事实回顾。
+当前问题属于案卷记忆 / 主体指代 / 历史事实回顾。
 你应优先依据 <dossier_context>、<dossier_graph_summary>、<dossier_graph_context> 回答，直接说明案卷中已记录或已确认的信息。
+如果问题是在问“当事人 / 我 / 本人 / 这个公司 / 这个人指的是谁”，先直接说明主体是谁，再说明依据来自已确认主体映射或原始标签映射。
 除非用户明确追问法律依据，否则不要主动展开法条解释、案例引用或其他法律检索内容。
 </rag_binding>"""
         output_contract_block = """
@@ -960,9 +964,12 @@ def build_advisor_system_prompt(
 1. 只返回 JSON，格式：{"answer": "...", "sources": [...]}
 2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
 3. answer：当前问题若属于案卷记忆查询，应先直接回答“案卷里记录了什么 / 主体是谁 / 关键事实有哪些 / 证据有哪些”，必要时用条目列出。
-4. 除非用户明确追问法律依据，否则不要主动引用法条编号、案例名称或展开法律 RAG 内容。
-5. 如果案卷信息不足，直接说明“当前案卷已记录的信息有限”，不要编造或补齐未确认事实。
-6. sources：只能填写检索材料中真实出现过的来源，不能编造；如果本轮回答未实际使用法律检索来源，可返回空数组。
+4. 如果问题是主体指代问题，先回答主体名称，再用一句话说明依据来自案卷已确认主体或原始标签映射。
+5. 如果案卷里还有未确认的相似主体，只能说明“尚未确认，不能自动视为同一主体”，不要擅自合并。
+6. 除非用户明确追问法律依据或下一步怎么办，否则不要主动引用法条编号、案例名称，也不要展开法律 RAG 内容或维权建议。
+7. answer：控制在 3 到 6 句话内，保持聚焦，不要展开大段法律分析。
+8. 如果案卷信息不足，直接说明“当前案卷已记录的信息有限”，不要编造或补齐未确认事实。
+9. sources：只能填写检索材料中真实出现过的来源，不能编造；如果本轮回答未实际使用法律检索来源，可返回空数组。
 </output_contract>"""
     else:
         rag_binding_block = """
