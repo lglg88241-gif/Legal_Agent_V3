@@ -477,70 +477,219 @@
             </div>
           </div>
 
-          <div class="dossier-intelligence-section">
+          <div class="dossier-coordination-section">
             <div class="dossier-auto-summary-header">
               <div class="dossier-toolbar-copy">
-                <div class="dossier-detail-conversations-title">案卷智能概览</div>
+                <div class="dossier-detail-conversations-title">案卷实体连接</div>
                 <span class="dossier-toolbar-subtitle">
-                  展示案卷智能体的只读规则结果，不替代手动摘要、主体确认和图谱编辑。
+                  只展示连接多个会话的关键主体、待确认主体和未连接主体锚点。会话仅作为来源和跳转目标。
                 </span>
               </div>
               <el-button
                 size="small"
                 plain
-                :loading="dossierIntelligenceLoading"
-                @click="handleRefreshDossierIntelligence"
+                :loading="dossierCoordinationGraphLoading || dossierIntelligenceLoading"
+                @click="handleRefreshDossierCoordination"
               >
-                刷新智能概览
+                刷新实体连接
               </el-button>
             </div>
-            <div v-if="dossierIntelligenceLoading" class="dossier-list-status">
-              正在加载案卷智能概览...
+            <div v-if="dossierCoordinationGraphLoading" class="dossier-list-status">
+              正在加载案卷实体连接...
             </div>
-            <div v-else-if="dossierIntelligenceState.error" class="dossier-graph-warning dossier-graph-warning-soft">
-              {{ dossierIntelligenceState.error }}
+            <div
+              v-else-if="dossierCoordinationGraphState.error"
+              class="dossier-graph-warning dossier-graph-warning-soft"
+            >
+              {{ dossierCoordinationGraphState.error }}
             </div>
-            <div v-else class="dossier-intelligence-body">
-              <div class="dossier-intelligence-card">
-                <div class="dossier-detail-conversations-title">智能摘要来源</div>
-                <div class="dossier-intelligence-meta">
-                  <span>{{ dossierIntelligenceSummarySourceLabel(selectedDossierIntelligenceSummary.source) }}</span>
-                  <span v-if="selectedDossierIntelligenceSummary.updatedAt">
-                    {{ `最近更新：${formatDossierConversationTime(selectedDossierIntelligenceSummary.updatedAt)}` }}
-                  </span>
-                </div>
-                <div class="dossier-auto-summary-content">
-                  {{ selectedDossierIntelligenceSummary.text || '暂无案卷智能概览摘要。' }}
-                </div>
+            <div v-else class="dossier-coordination-body">
+              <div class="dossier-coordination-summary">
+                <span class="dossier-coordination-chip">
+                  已连接 {{ selectedDossierCoordinationStats.connectedEntities }}
+                </span>
+                <span class="dossier-coordination-chip">
+                  待确认 {{ selectedDossierCoordinationStats.pendingIdentity }}
+                </span>
+                <span class="dossier-coordination-chip">
+                  待命名 {{ selectedDossierCoordinationStats.pendingNaming }}
+                </span>
+                <span class="dossier-coordination-chip">
+                  未连接 {{ selectedDossierCoordinationStats.isolatedAnchors }}
+                </span>
               </div>
 
-              <div class="dossier-intelligence-grid">
-                <div class="dossier-intelligence-card dossier-intelligence-info-card">
-                  <span>Provider</span>
-                  <strong>{{ dossierIntelligenceState.provider || 'rules' }}</strong>
-                </div>
-                <div class="dossier-intelligence-card dossier-intelligence-info-card">
-                  <span>Model</span>
-                  <strong>{{ dossierIntelligenceState.model || 'dossier-intelligence-rules-v0' }}</strong>
-                </div>
-                <div class="dossier-intelligence-card dossier-intelligence-info-card">
-                  <span>Fallback Reason</span>
-                  <strong>{{ dossierIntelligenceState.fallbackReason || '无' }}</strong>
-                </div>
+              <div v-if="selectedDossierCoordinationIsEmpty" class="dossier-coordination-empty">
+                当前案卷还没有形成可连接的主体线索。绑定更多会话或补充案情后，系统会自动检查。
               </div>
 
-              <div class="dossier-intelligence-card">
-                <div class="dossier-detail-conversations-title">待确认事项</div>
+              <template v-else>
                 <div
-                  v-if="selectedDossierIntelligenceConfirmationTasks.length"
-                  class="dossier-intelligence-task-list"
+                  v-if="selectedDossierCoordinationConfirmedEntities.length"
+                  class="dossier-coordination-group"
                 >
+                  <div class="dossier-detail-conversations-title">已连接主体</div>
+                  <div class="dossier-coordination-entity-list">
+                    <div
+                      v-for="entity in selectedDossierCoordinationConfirmedEntities"
+                      :key="entity.id"
+                      class="dossier-coordination-entity-card"
+                    >
+                      <div class="dossier-coordination-entity-main">
+                        <div class="dossier-coordination-entity-title">
+                          <strong>{{ entity.label || '未命名主体' }}</strong>
+                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
+                        </div>
+                        <div class="dossier-coordination-entity-meta">
+                          <span>{{ `最佳会话：${coordinationEntityBestConversationLabel(entity)}` }}</span>
+                          <span v-if="entity.best_conversation_reason">{{ entity.best_conversation_reason }}</span>
+                        </div>
+                      </div>
+                      <div class="dossier-coordination-entity-actions">
+                        <el-button
+                          size="small"
+                          type="primary"
+                          text
+                          :disabled="!coordinationEntityHasBestConversation(entity)"
+                          @click="handleOpenCoordinationEntityConversation(entity)"
+                        >
+                          查看最佳会话
+                        </el-button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  v-if="selectedDossierCoordinationPendingIdentityEntities.length"
+                  class="dossier-coordination-group"
+                >
+                  <div class="dossier-detail-conversations-title">待确认连接</div>
+                  <div class="dossier-coordination-entity-list">
+                    <div
+                      v-for="entity in selectedDossierCoordinationPendingIdentityEntities"
+                      :key="entity.id"
+                      class="dossier-coordination-entity-card"
+                    >
+                      <div class="dossier-coordination-entity-main">
+                        <div class="dossier-coordination-entity-title">
+                          <strong>{{ entity.label || '待确认主体' }}</strong>
+                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
+                        </div>
+                        <div class="dossier-coordination-entity-meta">
+                          <span>{{ `来源称呼：${coordinationEntitySourceLabelText(entity)}` }}</span>
+                          <span v-if="coordinationEntityIdentityReason(entity)">
+                            {{ coordinationEntityIdentityReason(entity) }}
+                          </span>
+                        </div>
+                      </div>
+                      <div class="dossier-coordination-entity-actions">
+                        <el-button size="small" type="primary" text @click="handleOpenCoordinationIdentity">
+                          去确认
+                        </el-button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  v-if="selectedDossierCoordinationPendingNamingEntities.length"
+                  class="dossier-coordination-group"
+                >
+                  <div class="dossier-detail-conversations-title">待命名主体</div>
+                  <div class="dossier-coordination-entity-list">
+                    <div
+                      v-for="entity in selectedDossierCoordinationPendingNamingEntities"
+                      :key="entity.id"
+                      class="dossier-coordination-entity-card"
+                    >
+                      <div class="dossier-coordination-entity-main">
+                        <div class="dossier-coordination-entity-title">
+                          <strong>{{ entity.label || '待命名主体' }}</strong>
+                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
+                        </div>
+                        <div class="dossier-coordination-entity-meta">
+                          <span>{{ `来源称呼：${coordinationEntitySourceLabelText(entity)}` }}</span>
+                          <span v-if="entity.best_conversation_reason">{{ entity.best_conversation_reason }}</span>
+                        </div>
+                      </div>
+                      <div class="dossier-coordination-entity-actions">
+                        <el-button size="small" type="primary" text @click="handleOpenCoordinationNaming">
+                          去命名
+                        </el-button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  v-if="selectedDossierCoordinationIsolatedAnchorEntities.length"
+                  class="dossier-coordination-group"
+                >
+                  <div class="dossier-detail-conversations-title">未连接主体锚点</div>
+                  <div class="dossier-coordination-entity-list">
+                    <div
+                      v-for="entity in selectedDossierCoordinationIsolatedAnchorEntities"
+                      :key="entity.id"
+                      class="dossier-coordination-entity-card"
+                    >
+                      <div class="dossier-coordination-entity-main">
+                        <div class="dossier-coordination-entity-title">
+                          <strong>{{ entity.label || '未连接主体' }}</strong>
+                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
+                        </div>
+                        <div class="dossier-coordination-entity-meta">
+                          <span>{{ `来源会话：${coordinationEntityBestConversationLabel(entity)}` }}</span>
+                          <span>该会话暂未与其他会话形成确认连接</span>
+                        </div>
+                      </div>
+                      <div class="dossier-coordination-entity-actions">
+                        <el-button
+                          size="small"
+                          type="primary"
+                          text
+                          :disabled="!coordinationEntityHasBestConversation(entity)"
+                          @click="handleOpenCoordinationEntityConversation(entity)"
+                        >
+                          查看来源会话
+                        </el-button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  v-if="
+                    selectedDossierCoordinationPendingNamingEntities.length ||
+                    selectedDossierCoordinationPartyNamingTasks.length ||
+                    dossierIntelligenceLoading ||
+                    dossierIntelligenceState.error
+                  "
+                  ref="dossierCoordinationNamingRef"
+                  class="dossier-coordination-group dossier-coordination-task-section"
+                >
+                  <div class="dossier-detail-conversations-title">待命名确认</div>
+                  <div v-if="dossierIntelligenceLoading" class="dossier-list-status">
+                    正在加载命名确认任务...
+                  </div>
                   <div
-                    v-for="(task, index) in selectedDossierIntelligenceConfirmationTasks"
-                    :key="`dossier-intelligence-task-${index}`"
-                    class="dossier-intelligence-task-card"
+                    v-else-if="
+                      dossierIntelligenceState.error &&
+                      !selectedDossierCoordinationPartyNamingTasks.length
+                    "
+                    class="dossier-graph-warning dossier-graph-warning-soft"
                   >
-                    <template v-if="task?.task_type === 'party_naming'">
+                    {{ dossierIntelligenceState.error }}
+                  </div>
+                  <div
+                    v-else-if="selectedDossierCoordinationPartyNamingTasks.length"
+                    class="dossier-intelligence-task-list"
+                  >
+                    <div
+                      v-for="(task, index) in selectedDossierCoordinationPartyNamingTasks"
+                      :key="`dossier-party-naming-task-${index}`"
+                      class="dossier-intelligence-task-card"
+                    >
                       <div class="dossier-intelligence-task-header">
                         <strong>需要命名的当事人</strong>
                         <span class="dossier-intelligence-task-type">{{ task.task_type }}</span>
@@ -596,72 +745,13 @@
                         >
                           确认命名
                         </el-button>
-                        <span>确认后会写入案卷主体 overlay，并刷新图谱预览。</span>
+                        <span>确认后会写入案卷主体 overlay，并刷新实体连接和图谱预览。</span>
                       </div>
-                    </template>
-                    <template v-else>
-                      <div class="dossier-intelligence-task-header">
-                        <strong>{{ task?.task_type || 'unknown_task' }}</strong>
-                        <span class="dossier-intelligence-task-type">通用任务</span>
-                      </div>
-                      <div class="dossier-intelligence-task-meta">
-                        <span>{{ `requires_user_confirmation：${task?.requires_user_confirmation ? '是' : '否'}` }}</span>
-                      </div>
-                      <div class="dossier-intelligence-task-reason">
-                        {{ task?.reason || '暂无原因说明' }}
-                      </div>
-                      <pre class="dossier-intelligence-task-json">{{ formatDossierIntelligenceEvidenceJson(task?.evidence) }}</pre>
-                    </template>
+                    </div>
                   </div>
+                  <div v-else class="dossier-coordination-empty">暂无待处理命名任务</div>
                 </div>
-                <div v-else class="dossier-intelligence-empty">暂无待确认事项</div>
-              </div>
-
-              <div class="dossier-intelligence-card">
-                <div class="dossier-detail-conversations-title">图谱说明</div>
-                <ul
-                  v-if="selectedDossierIntelligenceDisplayGraphNotes.length"
-                  class="dossier-intelligence-note-list"
-                >
-                  <li
-                    v-for="(note, index) in selectedDossierIntelligenceDisplayGraphNotes"
-                    :key="`dossier-intelligence-note-${index}`"
-                  >
-                    {{ note }}
-                  </li>
-                </ul>
-                <div v-else class="dossier-intelligence-empty">暂无图谱说明</div>
-              </div>
-
-              <div class="dossier-intelligence-card">
-                <div class="dossier-detail-conversations-title">系统执行轨迹</div>
-                <div
-                  v-if="selectedDossierIntelligenceTraceSteps.length"
-                  class="dossier-intelligence-trace-list"
-                >
-                  <div
-                    v-for="(step, index) in selectedDossierIntelligenceTraceSteps"
-                    :key="`dossier-intelligence-step-${index}`"
-                    class="dossier-intelligence-trace-item"
-                  >
-                    <strong>{{ dossierIntelligenceTraceStepLabel(step?.step) }}</strong>
-                    <span>{{ dossierIntelligenceTraceStepStatusLabel(step?.status) }}</span>
-                  </div>
-                </div>
-                <div v-else class="dossier-intelligence-empty">暂无执行轨迹</div>
-                <div
-                  v-if="selectedDossierIntelligenceTraceWarnings.length"
-                  class="dossier-intelligence-warning-list"
-                >
-                  <div
-                    v-for="(warning, index) in selectedDossierIntelligenceTraceWarnings"
-                    :key="`dossier-intelligence-warning-${index}`"
-                    class="dossier-graph-warning dossier-graph-warning-soft"
-                  >
-                    {{ warning }}
-                  </div>
-                </div>
-              </div>
+              </template>
             </div>
           </div>
 
@@ -1613,6 +1703,7 @@ import {
   getConversationMessages,
   getConversationSummary,
   getConversations,
+  getDossierCoordinationGraph,
   getDossierDetail,
   getDossierDisplayGraph,
   getDossierIntelligence,
@@ -1680,8 +1771,10 @@ const dossierParticipantCandidateCreateKey = ref('')
 const dossierSummaryGenerating = ref(false)
 const dossierGraphLoading = ref(false)
 const dossierGraphLoaded = ref(false)
+const dossierCoordinationGraphLoading = ref(false)
 const dossierIntelligenceLoading = ref(false)
 const dossierPartyNamingSubmittingKey = ref('')
+const dossierCoordinationNamingRef = ref(null)
 const trackedOnboardingVisible = ref(false)
 const trackedOnboardingSubmitting = ref(false)
 const dossierGraphState = reactive({
@@ -1717,6 +1810,22 @@ const dossierIntelligenceState = reactive({
   fallbackReason: '',
   traceSteps: [],
   traceWarnings: [],
+  error: '',
+})
+const dossierCoordinationGraphState = reactive({
+  dossierId: null,
+  entities: [],
+  edges: [],
+  tasks: [],
+  stats: {
+    boundConversations: 0,
+    connectedEntities: 0,
+    pendingIdentity: 0,
+    pendingNaming: 0,
+    isolatedAnchors: 0,
+  },
+  view: 'coordination',
+  generatedAt: '',
   error: '',
 })
 const dossierPartyNamingDrafts = reactive({})
@@ -1975,6 +2084,60 @@ const selectedDossierIntelligenceTraceWarnings = computed(() =>
   Array.isArray(dossierIntelligenceState.traceWarnings)
     ? dossierIntelligenceState.traceWarnings
     : []
+)
+const selectedDossierCoordinationEntities = computed(() =>
+  Array.isArray(dossierCoordinationGraphState.entities) ? dossierCoordinationGraphState.entities : []
+)
+const selectedDossierCoordinationTasks = computed(() =>
+  Array.isArray(dossierCoordinationGraphState.tasks) ? dossierCoordinationGraphState.tasks : []
+)
+const selectedDossierCoordinationStats = computed(() => ({
+  boundConversations: Number(dossierCoordinationGraphState.stats?.boundConversations || 0),
+  connectedEntities: Number(dossierCoordinationGraphState.stats?.connectedEntities || 0),
+  pendingIdentity: Number(dossierCoordinationGraphState.stats?.pendingIdentity || 0),
+  pendingNaming: Number(dossierCoordinationGraphState.stats?.pendingNaming || 0),
+  isolatedAnchors: Number(dossierCoordinationGraphState.stats?.isolatedAnchors || 0),
+}))
+const selectedDossierCoordinationConfirmedEntities = computed(() =>
+  selectedDossierCoordinationEntities.value.filter(
+    (entity) => String(entity?.status || '').trim() === 'confirmed'
+  )
+)
+const selectedDossierCoordinationPendingIdentityEntities = computed(() =>
+  selectedDossierCoordinationEntities.value.filter(
+    (entity) => String(entity?.status || '').trim() === 'pending_identity'
+  )
+)
+const selectedDossierCoordinationPendingNamingEntities = computed(() =>
+  selectedDossierCoordinationEntities.value.filter(
+    (entity) => String(entity?.status || '').trim() === 'pending_naming'
+  )
+)
+const selectedDossierCoordinationIsolatedAnchorEntities = computed(() =>
+  selectedDossierCoordinationEntities.value.filter(
+    (entity) => String(entity?.status || '').trim() === 'isolated_anchor'
+  )
+)
+const selectedDossierCoordinationIsEmpty = computed(
+  () => selectedDossierCoordinationEntities.value.length === 0
+)
+const selectedDossierCoordinationIdentityTaskLookup = computed(() => {
+  const lookup = {}
+  for (const task of selectedDossierCoordinationTasks.value) {
+    if (String(task?.type || '').trim() !== 'entity_identity') continue
+    const entityIds = Array.isArray(task?.entity_ids) ? task.entity_ids : []
+    for (const entityId of entityIds) {
+      const normalizedId = String(entityId || '').trim()
+      if (!normalizedId) continue
+      lookup[normalizedId] = task
+    }
+  }
+  return lookup
+})
+const selectedDossierCoordinationPartyNamingTasks = computed(() =>
+  selectedDossierIntelligenceConfirmationTasks.value.filter(
+    (task) => String(task?.task_type || '').trim() === 'party_naming'
+  )
 )
 const selectedDossierSelfAnchorParticipants = computed(() =>
   selectedDossierResolvedParticipants.value.filter(
@@ -2316,6 +2479,7 @@ function applySelectedDossierDetail(dossier) {
     resetDossierDetailForm()
     resetDossierParticipantRegistryState()
     resetDossierIntelligenceState()
+    resetDossierCoordinationGraphState()
     return
   }
 
@@ -2514,6 +2678,49 @@ function buildPartyNamingConfirmPayload(task, displayLabel) {
       },
     },
   }
+}
+
+function resetDossierCoordinationGraphState() {
+  dossierCoordinationGraphState.dossierId = null
+  dossierCoordinationGraphState.entities = []
+  dossierCoordinationGraphState.edges = []
+  dossierCoordinationGraphState.tasks = []
+  dossierCoordinationGraphState.stats = {
+    boundConversations: 0,
+    connectedEntities: 0,
+    pendingIdentity: 0,
+    pendingNaming: 0,
+    isolatedAnchors: 0,
+  }
+  dossierCoordinationGraphState.view = 'coordination'
+  dossierCoordinationGraphState.generatedAt = ''
+  dossierCoordinationGraphState.error = ''
+}
+
+function applyDossierCoordinationGraphPayload(dossierId, payload) {
+  const coordinationGraph = payload?.coordination_graph || {}
+  const stats = coordinationGraph?.stats || {}
+
+  dossierCoordinationGraphState.dossierId = dossierId
+  dossierCoordinationGraphState.entities = Array.isArray(coordinationGraph.entities)
+    ? coordinationGraph.entities
+    : []
+  dossierCoordinationGraphState.edges = Array.isArray(coordinationGraph.edges)
+    ? coordinationGraph.edges
+    : []
+  dossierCoordinationGraphState.tasks = Array.isArray(coordinationGraph.tasks)
+    ? coordinationGraph.tasks
+    : []
+  dossierCoordinationGraphState.stats = {
+    boundConversations: Number(stats.bound_conversations || 0),
+    connectedEntities: Number(stats.connected_entities || 0),
+    pendingIdentity: Number(stats.pending_identity || 0),
+    pendingNaming: Number(stats.pending_naming || 0),
+    isolatedAnchors: Number(stats.isolated_anchors || 0),
+  }
+  dossierCoordinationGraphState.view = String(payload?.view || 'coordination').trim() || 'coordination'
+  dossierCoordinationGraphState.generatedAt = payload?.generated_at || ''
+  dossierCoordinationGraphState.error = ''
 }
 
 function resetDossierGraphState() {
@@ -2799,6 +3006,7 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     selectedDossierId.value = null
     applySelectedDossierDetail(null)
     resetDossierGraphState()
+    resetDossierCoordinationGraphState()
     resetDossierIntelligenceState()
     return
   }
@@ -2818,6 +3026,7 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     console.error('Failed to fetch dossier detail:', error)
     applySelectedDossierDetail(null)
     resetDossierGraphState()
+    resetDossierCoordinationGraphState()
     resetDossierIntelligenceState()
     if (!options.silent) {
       ElMessage.error('Failed to load dossier detail')
@@ -2832,6 +3041,9 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
   }
   if (detailLoaded && options.loadGraph !== false) {
     await loadSelectedDossierGraph(dossierId, { silent: true })
+  }
+  if (detailLoaded && options.loadCoordinationGraph !== false) {
+    await loadSelectedDossierCoordinationGraph(dossierId, { silent: true })
   }
   if (detailLoaded && options.loadIntelligence !== false) {
     await loadSelectedDossierIntelligence(dossierId)
@@ -2933,6 +3145,38 @@ async function loadSelectedDossierGraph(dossierId, options = {}) {
   }
 }
 
+async function loadSelectedDossierCoordinationGraph(dossierId, options = {}) {
+  if (!dossierId) {
+    resetDossierCoordinationGraphState()
+    return
+  }
+
+  const isSameDossier = dossierCoordinationGraphState.dossierId === dossierId
+  if (!isSameDossier) {
+    resetDossierCoordinationGraphState()
+    dossierCoordinationGraphState.dossierId = dossierId
+  }
+
+  dossierCoordinationGraphLoading.value = true
+  dossierCoordinationGraphState.error = ''
+  try {
+    const { data } = await getDossierCoordinationGraph(dossierId)
+    applyDossierCoordinationGraphPayload(dossierId, data)
+  } catch (error) {
+    console.error('Failed to fetch dossier coordination graph:', error)
+    dossierCoordinationGraphState.dossierId = dossierId
+    dossierCoordinationGraphState.error =
+      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
+        ? error.response.data.detail
+        : '案卷实体连接暂不可用'
+    if (!options.silent) {
+      ElMessage.error(dossierCoordinationGraphState.error)
+    }
+  } finally {
+    dossierCoordinationGraphLoading.value = false
+  }
+}
+
 async function loadSelectedDossierIntelligence(dossierId) {
   if (!dossierId) {
     resetDossierIntelligenceState()
@@ -2960,6 +3204,14 @@ async function handleRefreshDossierGraph() {
   await loadSelectedDossierGraph(selectedDossierId.value)
 }
 
+async function handleRefreshDossierCoordination() {
+  if (!selectedDossierId.value) return
+  await Promise.allSettled([
+    loadSelectedDossierCoordinationGraph(selectedDossierId.value),
+    loadSelectedDossierIntelligence(selectedDossierId.value),
+  ])
+}
+
 async function handleRefreshDossierIntelligence() {
   if (!selectedDossierId.value) return
   await loadSelectedDossierIntelligence(selectedDossierId.value)
@@ -2967,6 +3219,7 @@ async function handleRefreshDossierIntelligence() {
 
 async function refreshSelectedDossierAfterPartyNaming(dossierId) {
   await Promise.allSettled([
+    loadSelectedDossierCoordinationGraph(dossierId, { silent: true }),
     loadSelectedDossierIntelligence(dossierId),
     loadSelectedDossierParticipants(dossierId, { silent: true }),
     loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
@@ -2974,6 +3227,7 @@ async function refreshSelectedDossierAfterPartyNaming(dossierId) {
   ])
 
   const refreshErrors = [
+    dossierCoordinationGraphState.error,
     dossierIntelligenceState.error,
     dossierParticipantRegistryState.error,
     dossierGraphState.error,
@@ -3022,6 +3276,70 @@ async function handleConfirmPartyNaming(task) {
   } finally {
     dossierPartyNamingSubmittingKey.value = ''
   }
+}
+
+function coordinationEntityConversationCount(entity) {
+  return normalizeGraphConversationIds(entity?.source_conversation_ids).length
+}
+
+function coordinationEntitySourceLabels(entity) {
+  const labels = Array.isArray(entity?.source_labels) ? entity.source_labels : []
+  return labels.map((item) => String(item || '').trim()).filter(Boolean)
+}
+
+function coordinationEntitySourceLabelText(entity) {
+  const labels = coordinationEntitySourceLabels(entity)
+  return labels.length ? labels.join(' / ') : '暂无来源称呼'
+}
+
+function coordinationEntityBestConversationLabel(entity) {
+  const conversationId = Number(entity?.best_conversation_id || 0)
+  return conversationId > 0 ? formatGraphConversationLabel(conversationId) : '暂无可跳转会话'
+}
+
+function coordinationEntityIdentityReason(entity) {
+  const task = selectedDossierCoordinationIdentityTaskLookup.value[String(entity?.id || '').trim()]
+  return String(task?.reason || '').trim()
+}
+
+function coordinationEntityHasBestConversation(entity) {
+  return Number(entity?.best_conversation_id || 0) > 0
+}
+
+async function handleOpenCoordinationEntityConversation(entity) {
+  const conversationId = Number(entity?.best_conversation_id || 0)
+  if (conversationId <= 0) {
+    ElMessage.info('暂无可跳转会话')
+    return
+  }
+  await switchConversation(conversationId)
+}
+
+function handleOpenCoordinationIdentity() {
+  if (!selectedDossierPendingParticipantCount.value) {
+    ElMessage.info('请到主体关系确认模块刷新后处理')
+    return
+  }
+  openParticipantCandidateDialog()
+}
+
+async function handleOpenCoordinationNaming() {
+  await nextTick()
+  if (
+    dossierCoordinationNamingRef.value &&
+    typeof dossierCoordinationNamingRef.value.scrollIntoView === 'function'
+  ) {
+    dossierCoordinationNamingRef.value.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+    return
+  }
+  if (dossierIntelligenceState.error) {
+    ElMessage.info('待命名任务暂不可用，请稍后刷新')
+    return
+  }
+  ElMessage.info('请在下方命名确认区处理')
 }
 
 async function openDossierDrawer() {
@@ -3303,10 +3621,14 @@ async function refreshSelectedDossierParticipantViews(options = {}) {
     silent: true,
     loadParticipants: false,
     loadGraph: false,
+    loadCoordinationGraph: false,
+    loadIntelligence: false,
   })
   await loadSelectedDossierParticipants(selectedDossierId.value, { silent: true })
   await loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true })
   await loadSelectedDossierGraph(selectedDossierId.value, { silent: true })
+  await loadSelectedDossierCoordinationGraph(selectedDossierId.value, { silent: true })
+  await loadSelectedDossierIntelligence(selectedDossierId.value)
   if (!selectedDossierParticipantCandidates.value.length) {
     dossierParticipantCandidateDialogVisible.value = false
   }
@@ -3318,8 +3640,12 @@ async function refreshSelectedDossierParticipantViews(options = {}) {
 async function handleRefreshParticipantTasks() {
   if (!selectedDossierId.value) return
   clearDismissedParticipantCandidates()
-  await loadSelectedDossierParticipants(selectedDossierId.value, { silent: true })
-  await loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true })
+  await Promise.allSettled([
+    loadSelectedDossierParticipants(selectedDossierId.value, { silent: true }),
+    loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true }),
+    loadSelectedDossierCoordinationGraph(selectedDossierId.value, { silent: true }),
+    loadSelectedDossierIntelligence(selectedDossierId.value),
+  ])
   ElMessage.success('主体线索已刷新')
 }
 
@@ -5578,22 +5904,116 @@ body,
   background: #f8fafc;
 }
 
-.dossier-intelligence-section {
+.dossier-coordination-section {
   padding: 12px;
   border: 1px solid #dbeafe;
   border-radius: 12px;
   background: linear-gradient(180deg, #f8fbff, #f3f7ff);
 }
 
-.dossier-intelligence-body {
+.dossier-coordination-body {
   margin-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
 
-.dossier-intelligence-body > .dossier-intelligence-card:last-child {
-  display: none;
+.dossier-coordination-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dossier-coordination-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #bfdbfe;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dossier-coordination-group {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dbeafe;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-coordination-entity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-coordination-entity-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f8fbff;
+  border: 1px solid #dbeafe;
+}
+
+.dossier-coordination-entity-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dossier-coordination-entity-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dossier-coordination-entity-title strong {
+  font-size: 13px;
+  color: #111827;
+}
+
+.dossier-coordination-entity-title span,
+.dossier-coordination-entity-meta {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-coordination-entity-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  line-height: 1.6;
+}
+
+.dossier-coordination-entity-actions {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.dossier-coordination-task-section {
+  scroll-margin-top: 12px;
+}
+
+.dossier-coordination-empty {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px dashed #bfdbfe;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .dossier-intelligence-card {
@@ -6626,6 +7046,15 @@ body,
   .dossier-auto-summary-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .dossier-coordination-entity-card {
+    flex-direction: column;
+  }
+
+  .dossier-coordination-entity-actions {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .dossier-graph-edge-item {
