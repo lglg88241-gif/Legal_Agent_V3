@@ -53,100 +53,150 @@
         </div>
       </div>
 
-      <div class="panel-section">
-        <div class="section-title">组件状态</div>
-        <div class="execution-list">
+      <div class="panel-section panel-section-compact">
+        <div class="section-title-row">
+          <div>
+            <div class="section-title section-title-tight">组件状态</div>
+            <div class="section-description">只突出当前请求真正触发的关键模块。</div>
+          </div>
+          <span class="section-summary">{{ componentStatusSummary }}</span>
+        </div>
+
+        <div class="component-status-list">
           <div
-            v-for="entry in executionComponentEntries"
+            v-for="entry in coreExecutionEntries"
             :key="entry.key"
-            class="execution-item"
+            :class="['component-status-row', `status-${normalizeKey(entry.status)}`]"
           >
-            <div class="execution-header">
+            <div class="component-status-copy">
               <strong>{{ entry.label }}</strong>
-              <el-tag :type="executionStatusTagType(entry.status)" size="small">
-                {{ executionStatusLabel(entry.status) }}
-              </el-tag>
+              <span>
+                {{ showExecutionDetail(entry) ? entry.detail : executionStatusQuietLabel(entry.status) }}
+              </span>
             </div>
-            <div class="execution-detail">{{ entry.detail }}</div>
+            <div class="component-status-meta">
+              <span :class="['status-dot', `status-${normalizeKey(entry.status)}`]"></span>
+              <span class="component-status-badge">{{ executionStatusQuietLabel(entry.status) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="secondaryExecutionEntries.length" class="component-secondary-group">
+          <div class="compact-subsection-title">更多组件状态</div>
+          <div class="component-inline-list">
+            <div
+              v-for="entry in secondaryExecutionEntries"
+              :key="`secondary-${entry.key}`"
+              :class="['component-inline-chip', `status-${normalizeKey(entry.status)}`]"
+            >
+              <span>{{ entry.label }}</span>
+              <span>{{ executionStatusQuietLabel(entry.status) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="highlightedExecutionEntries.length" class="component-note-list">
+          <div
+            v-for="entry in highlightedExecutionEntries"
+            :key="`note-${entry.key}`"
+            class="component-note"
+          >
+            <strong>{{ entry.fullLabel }}</strong>
+            <span>{{ entry.detail }}</span>
           </div>
         </div>
       </div>
 
-      <div class="panel-section">
-        <div class="section-title">本轮分析</div>
-        <div class="analysis-meta-grid">
-          <div class="analysis-meta-card">
-            <span>请求状态</span>
-            <strong>{{ requestStateLabel }}</strong>
-          </div>
-          <div class="analysis-meta-card">
-            <span>路由结果</span>
-            <strong>{{ routeIntentLabel }}</strong>
-          </div>
-          <div class="analysis-meta-card">
-            <span>响应耗时</span>
-            <strong>{{ latencyLabel }}</strong>
-          </div>
-          <div class="analysis-meta-card">
-            <span>置信度</span>
-            <strong>{{ confidenceLabel }}</strong>
+      <div class="panel-section analysis-section">
+        <div class="section-title-row">
+          <div>
+            <div class="section-title section-title-tight">本轮分析</div>
+            <div class="section-description">当前会话请求的处理过程与结果摘要。</div>
           </div>
         </div>
 
-        <div v-if="analysis.requestError" class="analysis-warning">
-          {{ analysis.requestError }}
+        <div v-if="!hasAnalysisContent" class="analysis-empty-state">
+          <div class="analysis-empty-copy">
+            <strong>等待你发送问题后，我会在这里展示本轮分析过程。</strong>
+            <span>系统会按请求类型自动安排处理链路，并同步关键执行状态。</span>
+          </div>
+          <div class="analysis-empty-hints">
+            <span class="analysis-empty-hint">理解案情</span>
+            <span class="analysis-empty-hint">检索依据</span>
+            <span class="analysis-empty-hint">更新图谱</span>
+          </div>
         </div>
 
-        <div v-if="analysisTimeline.length" class="timeline-list">
-          <div
-            v-for="(item, index) in analysisTimeline"
-            :key="`${item.key}-${index}`"
-            class="timeline-item"
-          >
-            <div class="timeline-header">
-              <strong>{{ item.label }}</strong>
-              <el-tag :type="executionStatusTagType(item.status)" size="small" effect="plain">
-                {{ executionStatusLabel(item.status) }}
+        <template v-else>
+          <div class="analysis-meta-grid">
+            <div class="analysis-meta-card">
+              <span>请求状态</span>
+              <strong>{{ requestStateLabel }}</strong>
+            </div>
+            <div class="analysis-meta-card">
+              <span>任务分流</span>
+              <strong>{{ routeIntentLabel }}</strong>
+            </div>
+            <div class="analysis-meta-card">
+              <span>响应耗时</span>
+              <strong>{{ latencyLabel }}</strong>
+            </div>
+            <div class="analysis-meta-card">
+              <span>置信度</span>
+              <strong>{{ confidenceLabel }}</strong>
+            </div>
+          </div>
+
+          <div v-if="analysis.requestError" class="analysis-warning">
+            {{ analysis.requestError }}
+          </div>
+
+          <div v-if="analysisTimeline.length" class="timeline-list">
+            <div
+              v-for="(item, index) in analysisTimeline"
+              :key="`${item.key}-${index}`"
+              class="timeline-item"
+            >
+              <div class="timeline-header">
+                <strong>{{ item.label }}</strong>
+                <el-tag :type="executionStatusTagType(item.status)" size="small" effect="plain">
+                  {{ executionStatusLabel(item.status) }}
+                </el-tag>
+              </div>
+              <div class="timeline-summary">{{ item.summary }}</div>
+            </div>
+          </div>
+
+          <div v-if="normalizedSources.length" class="analysis-subsection">
+            <div class="subsection-title">参考来源</div>
+            <div class="tag-list">
+              <el-tag
+                v-for="source in normalizedSources"
+                :key="source"
+                size="small"
+                effect="plain"
+                type="info"
+              >
+                {{ source }}
               </el-tag>
             </div>
-            <div class="timeline-summary">{{ item.summary }}</div>
           </div>
-        </div>
-        <div v-else class="info-row">
-          <span class="value muted">等待当前会话请求触发后端执行状态...</span>
-        </div>
 
-        <div class="analysis-subsection">
-          <div class="subsection-title">参考来源</div>
-          <div v-if="normalizedSources.length" class="tag-list">
-            <el-tag
-              v-for="source in normalizedSources"
-              :key="source"
-              size="small"
-              effect="plain"
-              type="info"
-            >
-              {{ source }}
-            </el-tag>
+          <div v-if="normalizedMissingInfo.length" class="analysis-subsection">
+            <div class="subsection-title">待补充信息</div>
+            <div class="tag-list">
+              <el-tag
+                v-for="item in normalizedMissingInfo"
+                :key="item"
+                size="small"
+                effect="plain"
+                type="warning"
+              >
+                {{ item }}
+              </el-tag>
+            </div>
           </div>
-          <div v-else class="subsection-empty">当前请求尚未返回参考来源</div>
-        </div>
-
-        <div class="analysis-subsection">
-          <div class="subsection-title">待补充信息</div>
-          <div v-if="normalizedMissingInfo.length" class="tag-list">
-            <el-tag
-              v-for="item in normalizedMissingInfo"
-              :key="item"
-              size="small"
-              effect="plain"
-              type="warning"
-            >
-              {{ item }}
-            </el-tag>
-          </div>
-          <div v-else class="subsection-empty">当前请求未提示额外缺失信息</div>
-        </div>
+        </template>
       </div>
 
       <div class="panel-section">
@@ -218,16 +268,18 @@ const rating = ref(0)
 const comment = ref('')
 
 const executionDefinitions = [
-  { key: 'tool_router', label: 'router' },
-  { key: 'fact_updater', label: 'fact_updater' },
-  { key: 'retrieval_tools', label: 'retrieval_tools' },
-  { key: 'reflector', label: 'reflector' },
-  { key: 'legal_advisor', label: 'advisor' },
-  { key: 'graph_sync', label: 'graph_sync' },
-  { key: 'dossier_intelligence', label: 'dossier_intelligence' },
-  { key: 'summary_update', label: 'summary_update' },
-  { key: 'participant_resolution', label: 'participant_resolution' },
+  { key: 'tool_router', label: '任务分流', fullLabel: '任务分流' },
+  { key: 'fact_updater', label: '案情理解', fullLabel: '案情理解' },
+  { key: 'retrieval_tools', label: '依据检索', fullLabel: '依据检索' },
+  { key: 'reflector', label: '风险审查', fullLabel: '风险审查' },
+  { key: 'legal_advisor', label: '答复生成', fullLabel: '答复生成' },
+  { key: 'graph_sync', label: '图谱更新', fullLabel: '图谱更新' },
+  { key: 'dossier_intelligence', label: '案卷整理', fullLabel: '案卷整理' },
+  { key: 'summary_update', label: '摘要生成', fullLabel: '摘要生成' },
+  { key: 'participant_resolution', label: '主体识别', fullLabel: '主体识别' },
 ]
+
+const coreExecutionKeys = ['fact_updater', 'retrieval_tools', 'graph_sync']
 
 const normalizedSources = computed(() =>
   (props.analysis.sources || [])
@@ -298,6 +350,51 @@ const executionComponentEntries = computed(() =>
   executionDefinitions.map((definition) => buildExecutionEntry(definition))
 )
 
+const coreExecutionEntries = computed(() =>
+  executionComponentEntries.value.filter((entry) => coreExecutionKeys.includes(entry.key))
+)
+
+const secondaryExecutionEntries = computed(() =>
+  executionComponentEntries.value.filter(
+    (entry) =>
+      !coreExecutionKeys.includes(entry.key)
+      && !['idle', 'skipped'].includes(normalizeKey(entry.status))
+  )
+)
+
+const highlightedExecutionEntries = computed(() =>
+  executionComponentEntries.value
+    .filter((entry) => !['idle', 'skipped'].includes(normalizeKey(entry.status)))
+    .slice(0, 3)
+)
+
+const componentStatusSummary = computed(() => {
+  const entries = executionComponentEntries.value
+  const running = entries.filter((entry) => normalizeKey(entry.status) === 'running').length
+  const success = entries.filter((entry) => normalizeKey(entry.status) === 'success').length
+  const warning = entries.filter((entry) => ['warning', 'error'].includes(normalizeKey(entry.status))).length
+
+  if (running > 0) return `${running} 个模块处理中`
+  if (warning > 0) return `${warning} 个模块需关注`
+  if (success > 0) return `${success} 个模块已完成`
+  return '等待问题触发'
+})
+
+const hasAnalysisContent = computed(() => {
+  const requestState = normalizeKey(props.analysis.requestState)
+  if (requestState && requestState !== 'idle') return true
+  if (analysisTimeline.value.length) return true
+  if (normalizeText(props.analysis.requestError)) return true
+  if (routeIntentKey.value) return true
+  if (normalizedSources.value.length || normalizedMissingInfo.value.length) return true
+
+  const latency = Number(props.analysis.latencyMs)
+  if (Number.isFinite(latency) && latency > 0) return true
+
+  const confidence = Number(props.analysis.confidenceScore)
+  return Number.isFinite(confidence) && confidence > 0
+})
+
 const analysisTimeline = computed(() => {
   const items = []
   for (const action of props.analysis.actions || []) {
@@ -307,7 +404,7 @@ const analysisTimeline = computed(() => {
       key,
       label: executionLabelForTool(key),
       status: 'success',
-      summary: normalizeText(action?.result_summary) || '已完成后端执行',
+      summary: normalizeText(action?.result_summary) || '本轮已完成执行',
     })
   }
 
@@ -325,7 +422,7 @@ const analysisTimeline = computed(() => {
   if (!items.length && normalizeKey(props.analysis.requestState) === 'running') {
     items.push({
       key: 'request',
-      label: 'request',
+      label: '请求处理',
       status: 'running',
       summary: '主请求处理中，等待后端节点返回执行结果',
     })
@@ -354,20 +451,20 @@ function componentLabel(key) {
 
 function executionLabelForTool(key) {
   const labels = {
-    request: 'request',
-    tool_router: 'router',
-    fact_updater: 'fact_updater',
-    retrieval_tools: 'retrieval_tools',
-    reflector: 'reflector',
-    legal_advisor: 'advisor',
-    greeting: 'greeting',
-    out_of_scope: 'out_of_scope',
-    graph_sync: 'graph_sync',
-    dossier_intelligence: 'dossier_intelligence',
-    summary_update: 'summary_update',
-    participant_resolution: 'participant_resolution',
+    request: '请求处理',
+    tool_router: '任务分流',
+    fact_updater: '案情理解',
+    retrieval_tools: '依据检索',
+    reflector: '风险审查',
+    legal_advisor: '答复生成',
+    greeting: '问候响应',
+    out_of_scope: '范围拦截',
+    graph_sync: '图谱更新',
+    dossier_intelligence: '案卷整理',
+    summary_update: '摘要生成',
+    participant_resolution: '主体识别',
   }
-  return labels[key] || key || 'unknown'
+  return labels[key] || key || '未知组件'
 }
 
 function executionStatusLabel(status) {
@@ -386,6 +483,44 @@ function executionStatusLabel(status) {
       return '已跳过'
     default:
       return '空闲'
+  }
+}
+
+function executionStatusCompactLabel(status) {
+  switch (normalizeKey(status)) {
+    case 'success':
+      return '已完成'
+    case 'running':
+      return '进行中'
+    case 'pending':
+      return '待执行'
+    case 'warning':
+      return '关注'
+    case 'error':
+      return '失败'
+    case 'skipped':
+      return '跳过'
+    default:
+      return '待命'
+  }
+}
+
+function executionStatusQuietLabel(status) {
+  switch (normalizeKey(status)) {
+    case 'success':
+      return '已完成'
+    case 'running':
+      return '进行中'
+    case 'pending':
+      return '等待中'
+    case 'warning':
+      return '需关注'
+    case 'error':
+      return '失败'
+    case 'skipped':
+      return '本轮未涉及'
+    default:
+      return '待命'
   }
 }
 
@@ -419,6 +554,7 @@ function buildExecutionEntry(definition) {
     return {
       key,
       label: definition.label,
+      fullLabel: definition.fullLabel,
       status: graphSyncStatus,
       detail: normalizeText(props.analysis.graphSyncSummary) || defaultIdleDetail(key),
     }
@@ -428,6 +564,7 @@ function buildExecutionEntry(definition) {
     return {
       key,
       label: definition.label,
+      fullLabel: definition.fullLabel,
       status: 'success',
       detail: normalizeText(action?.result_summary) || '本轮已执行',
     }
@@ -438,13 +575,15 @@ function buildExecutionEntry(definition) {
       return {
         key,
         label: definition.label,
+        fullLabel: definition.fullLabel,
         status: 'running',
-        detail: '正在判定当前会话请求的路由',
+        detail: '正在判定当前会话请求的处理路径',
       }
     }
     return {
       key,
       label: definition.label,
+      fullLabel: definition.fullLabel,
       status: 'pending',
       detail: '等待上游节点结果',
     }
@@ -455,13 +594,15 @@ function buildExecutionEntry(definition) {
       return {
         key,
         label: definition.label,
+        fullLabel: definition.fullLabel,
         status: 'error',
-        detail: '主请求失败，未完整返回后端执行结果',
+        detail: '主请求失败，未完整返回执行结果',
       }
     }
     return {
       key,
       label: definition.label,
+      fullLabel: definition.fullLabel,
       status: 'idle',
       detail: defaultIdleDetail(key),
     }
@@ -471,6 +612,7 @@ function buildExecutionEntry(definition) {
     return {
       key,
       label: definition.label,
+      fullLabel: definition.fullLabel,
       status: shouldSkipForRoute(key, routeIntent) ? 'skipped' : 'idle',
       detail: skippedOrIdleDetail(key, routeIntent),
     }
@@ -479,6 +621,7 @@ function buildExecutionEntry(definition) {
   return {
     key,
     label: definition.label,
+    fullLabel: definition.fullLabel,
     status: 'idle',
     detail: defaultIdleDetail(key),
   }
@@ -500,25 +643,30 @@ function shouldSkipForRoute(key, routeIntent) {
 
 function skippedOrIdleDetail(key, routeIntent) {
   if (shouldSkipForRoute(key, routeIntent)) {
-    return '当前请求路由下未触发该后端模块'
+    return '当前请求路由下未触发该模块'
   }
   return defaultIdleDetail(key)
 }
 
 function defaultIdleDetail(key) {
   if (key === 'dossier_intelligence') {
-    return '案卷级智能整理不属于当前会话主请求链路'
+    return '案卷级整理不属于当前会话主链路'
   }
   if (key === 'summary_update') {
-    return '当前请求未触发摘要更新任务'
+    return '本轮未触发摘要更新'
   }
   if (key === 'participant_resolution') {
-    return '当前请求未触发主体确认写入任务'
+    return '本轮未触发主体确认写入'
   }
   if (key === 'graph_sync') {
-    return '当前请求未触发图谱同步状态更新'
+    return '当前未触发图谱同步状态更新'
   }
   return '等待当前会话请求触发'
+}
+
+function showExecutionDetail(entry) {
+  const status = normalizeKey(entry?.status)
+  return ['success', 'running', 'warning', 'error', 'pending'].includes(status)
 }
 
 function submit() {
@@ -534,7 +682,7 @@ function submit() {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   overflow-y: auto;
 }
 
@@ -589,10 +737,15 @@ function submit() {
 }
 
 .panel-section {
-  border-radius: 18px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
-  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 252, 0.96) 100%);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.04);
   padding: 14px;
+}
+
+.panel-section-compact {
+  padding-bottom: 12px;
 }
 
 .graph-first {
@@ -601,18 +754,36 @@ function submit() {
     linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
-.section-title {
+.section-title,
+.subsection-title {
   font-size: 13px;
   font-weight: 700;
   color: #1f2937;
+  margin-bottom: 10px;
+}
+
+.section-title-tight {
+  margin-bottom: 4px;
+}
+
+.section-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
   margin-bottom: 12px;
 }
 
-.subsection-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #334155;
-  margin-bottom: 8px;
+.section-summary {
+  font-size: 11px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.section-description {
+  font-size: 11px;
+  line-height: 1.5;
+  color: #94a3b8;
 }
 
 .info-row,
@@ -642,22 +813,150 @@ function submit() {
 }
 
 .system-component-list,
-.execution-list,
-.timeline-list {
+.timeline-list,
+.component-note-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
-.execution-item,
-.timeline-item {
-  padding: 10px;
-  background: rgba(248, 250, 252, 0.95);
+.component-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.component-status-row {
+  min-width: 0;
+  padding: 10px 12px;
   border-radius: 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(248, 250, 252, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.execution-header,
+.component-status-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.component-status-copy strong {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.component-status-copy span {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.component-status-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #cbd5e1;
+}
+
+.status-dot.status-success {
+  background: #22c55e;
+}
+
+.status-dot.status-running {
+  background: #f59e0b;
+}
+
+.status-dot.status-pending,
+.status-dot.status-skipped {
+  background: #93c5fd;
+}
+
+.status-dot.status-warning,
+.status-dot.status-error {
+  background: #f97316;
+}
+
+.component-status-badge {
+  font-size: 11px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+.component-secondary-group {
+  margin-top: 12px;
+}
+
+.compact-subsection-title {
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.component-inline-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.component-inline-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(248, 250, 252, 0.75);
+  font-size: 11px;
+  color: #475569;
+}
+
+.component-inline-chip span:first-child {
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.component-note {
+  padding: 9px 11px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.component-note strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.component-note span {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.timeline-item {
+  padding: 10px 12px;
+  background: rgba(248, 250, 252, 0.75);
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
 .timeline-header {
   display: flex;
   justify-content: space-between;
@@ -665,13 +964,11 @@ function submit() {
   gap: 10px;
 }
 
-.execution-header strong,
 .timeline-header strong {
   font-size: 12px;
   color: #0f172a;
 }
 
-.execution-detail,
 .timeline-summary {
   margin-top: 6px;
   font-size: 12px;
@@ -687,10 +984,10 @@ function submit() {
 }
 
 .analysis-meta-card {
-  padding: 10px;
+  padding: 10px 12px;
   border-radius: 12px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: rgba(248, 250, 252, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.14);
 }
 
 .analysis-meta-card span {
@@ -709,11 +1006,56 @@ function submit() {
   margin-bottom: 12px;
   padding: 10px 12px;
   border-radius: 12px;
-  background: #fff7ed;
-  border: 1px solid #fdba74;
+  background: rgba(255, 247, 237, 0.92);
+  border: 1px solid rgba(251, 146, 60, 0.34);
   color: #9a3412;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.analysis-empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(248, 250, 252, 0.72);
+  border: 1px dashed rgba(148, 163, 184, 0.2);
+}
+
+.analysis-empty-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.analysis-empty-copy strong {
+  font-size: 13px;
+  color: #0f172a;
+  line-height: 1.6;
+}
+
+.analysis-empty-copy span {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.6;
+}
+
+.analysis-empty-hints {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.analysis-empty-hint {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  font-size: 11px;
+  color: #475569;
 }
 
 .analysis-subsection {
