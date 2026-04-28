@@ -122,7 +122,7 @@ WORKSPACE_CASE_PLANS = [
     WorkspaceCasePlan("E", "E_dossier_created_conversation", "E dossier-bound conversation defaults to tracked", 0, 4),
     WorkspaceCasePlan("F", "F_memory_query", "F dossier memory query answers from dossier context", 1, 3),
     WorkspaceCasePlan("G", "G_explicit_law_query", "G explicit law query in dossier conversation still behaves like legal QA", 1, 5),
-    WorkspaceCasePlan("H", "H_participant_resolution", "H cross-conversation participant resolution and dossier mapping overlay", 2, 10),
+    WorkspaceCasePlan("H", "H_participant_resolution", "H cross-conversation participant resolution and dossier mapping overlay", 2, 13),
     WorkspaceCasePlan("I", "I_archive_semantics", "I archive dossier keeps historical data accessible", 0, 4),
     WorkspaceCasePlan("J", "J_hard_delete", "J hard delete dossier removes registry data and detaches conversations", 0, 6),
 ]
@@ -478,6 +478,10 @@ def get_dossier(headers: dict[str, str], dossier_id: int) -> dict[str, Any]:
 
 def get_dossier_graph(headers: dict[str, str], dossier_id: int) -> dict[str, Any]:
     return assert_ok("GET", f"/dossiers/{dossier_id}/graph", headers=headers)
+
+
+def get_dossier_display_graph(headers: dict[str, str], dossier_id: int) -> dict[str, Any]:
+    return assert_ok("GET", f"/dossiers/{dossier_id}/display-graph", headers=headers)
 
 
 def get_dossier_participants(headers: dict[str, str], dossier_id: int) -> dict[str, Any]:
@@ -1074,6 +1078,57 @@ def _summarize_participant_mapping(mapping: dict[str, Any] | None) -> dict[str, 
     }
 
 
+def _extract_display_node_labels(node: dict[str, Any] | None) -> set[str]:
+    if not isinstance(node, dict):
+        return set()
+    labels = {
+        str(node.get("display_label") or "").strip(),
+        str(node.get("label") or "").strip(),
+        str(node.get("raw_label") or "").strip(),
+        str(node.get("graph_node_label") or "").strip(),
+    }
+    raw_labels = node.get("raw_labels")
+    if isinstance(raw_labels, list):
+        labels.update(str(item or "").strip() for item in raw_labels)
+    return {label for label in labels if label}
+
+
+def _display_node_conversation_ids(node: dict[str, Any] | None) -> list[int]:
+    if not isinstance(node, dict):
+        return []
+    source_ids = node.get("source_conversation_ids")
+    if not isinstance(source_ids, list):
+        source_ids = []
+    normalized_ids: list[int] = []
+    for item in source_ids:
+        try:
+            conversation_id = int(item or 0)
+        except (TypeError, ValueError):
+            conversation_id = 0
+        if conversation_id > 0 and conversation_id not in normalized_ids:
+            normalized_ids.append(conversation_id)
+    return normalized_ids
+
+
+def _summarize_display_node(node: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        return {}
+    raw_node_ids = node.get("raw_node_ids") if isinstance(node.get("raw_node_ids"), list) else []
+    raw_labels = node.get("raw_labels") if isinstance(node.get("raw_labels"), list) else []
+    return {
+        "id": node.get("id"),
+        "kind": node.get("kind"),
+        "display_label": node.get("display_label"),
+        "entity_type": node.get("entity_type"),
+        "confirmed": node.get("confirmed"),
+        "pending_confirmation": node.get("pending_confirmation"),
+        "participant_id": node.get("participant_id"),
+        "source_conversation_ids": _display_node_conversation_ids(node),
+        "raw_node_ids": raw_node_ids[:4],
+        "raw_labels": raw_labels[:4],
+    }
+
+
 def _cross_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
     confidence = str(candidate.get("confidence") or "").strip().lower()
     confidence_score = {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
@@ -1345,6 +1400,7 @@ def ensure_participant_resolution(
         if isinstance(candidates_payload, dict) and isinstance(candidates_payload.get("candidates"), list)
         else []
     )
+    pre_display_graph = get_dossier_display_graph(context.headers, dossier_setup["dossier"]["id"])
     cross_candidate = _select_cross_conversation_candidate(candidates)
     candidate = cross_candidate
     generic_candidate = next(
@@ -1421,6 +1477,7 @@ def ensure_participant_resolution(
         dossier_setup["dossier"]["id"],
     )
     dossier_graph = get_dossier_graph(context.headers, dossier_setup["dossier"]["id"])
+    post_display_graph = get_dossier_display_graph(context.headers, dossier_setup["dossier"]["id"])
     participants = (
         participants_payload.get("participants")
         if isinstance(participants_payload.get("participants"), list)
@@ -1434,6 +1491,16 @@ def ensure_participant_resolution(
     graph_nodes = (
         dossier_graph.get("graph", {}).get("nodes", [])
         if isinstance(dossier_graph.get("graph"), dict)
+        else []
+    )
+    pre_display_nodes = (
+        pre_display_graph.get("display_graph", {}).get("nodes", [])
+        if isinstance(pre_display_graph.get("display_graph"), dict)
+        else []
+    )
+    post_display_nodes = (
+        post_display_graph.get("display_graph", {}).get("nodes", [])
+        if isinstance(post_display_graph.get("display_graph"), dict)
         else []
     )
     resolved_label = (
@@ -1462,10 +1529,14 @@ def ensure_participant_resolution(
         "resolve_result": resolve_result,
         "participants_payload": participants_payload,
         "dossier_graph": dossier_graph,
+        "pre_display_graph": pre_display_graph,
+        "post_display_graph": post_display_graph,
         "participants": participants,
         "mentions": mentions,
         "matched_mentions": matched_mentions,
         "graph_nodes": graph_nodes,
+        "pre_display_nodes": pre_display_nodes,
+        "post_display_nodes": post_display_nodes,
         "resolved_label": resolved_label,
     }
     return context.participant_resolution
@@ -1887,23 +1958,140 @@ def run_case_h(
         and any(str(item.get("graph_node_label") or "").strip() for item in matched_mentions if isinstance(item, dict))
     )
     participant_mappings = participant_resolution["dossier_graph"].get("participant_mappings", []) or []
+    pre_display_nodes = (
+        participant_resolution.get("pre_display_nodes")
+        if isinstance(participant_resolution.get("pre_display_nodes"), list)
+        else []
+    )
+    post_display_nodes = (
+        participant_resolution.get("post_display_nodes")
+        if isinstance(participant_resolution.get("post_display_nodes"), list)
+        else []
+    )
     expected_labels = _candidate_evidence_labels(cross_candidate)
+    relevant_conversation_ids = {
+        int(cross_candidate_source.get("conversation_id") or 0),
+        int(cross_candidate_target.get("conversation_id") or 0),
+    }
+    relevant_conversation_ids = {
+        conversation_id for conversation_id in relevant_conversation_ids if conversation_id > 0
+    }
     mapping_label_ok = any(
         _extract_mapping_labels(mapping) & expected_labels
         for mapping in participant_mappings
         if isinstance(mapping, dict)
     )
-    raw_graph_ok = any(
-        _extract_graph_node_labels(node) & expected_labels
+    matching_raw_graph_nodes = [
+        node
         for node in participant_resolution["graph_nodes"]
-        if isinstance(node, dict)
-    )
+        if isinstance(node, dict) and (_extract_graph_node_labels(node) & expected_labels)
+    ]
+    raw_graph_ok = len(matching_raw_graph_nodes) >= 2
     node_overlay_ok = any(
         _node_overlay_evidence(node)
         for node in participant_resolution["graph_nodes"]
         if isinstance(node, dict)
     )
     graph_overlay_ok = mapping_label_ok or node_overlay_ok or len(participant_mappings) >= 1
+    pre_matching_display_nodes = [
+        node
+        for node in pre_display_nodes
+        if isinstance(node, dict) and (_extract_display_node_labels(node) & expected_labels)
+    ]
+    pre_pending_display_nodes = [
+        node
+        for node in pre_matching_display_nodes
+        if str(node.get("kind") or "").strip() == "raw_entity" and bool(node.get("pending_confirmation"))
+    ]
+    pre_confirmed_display_nodes = [
+        node
+        for node in pre_matching_display_nodes
+        if str(node.get("kind") or "").strip() == "participant"
+        or bool(node.get("confirmed"))
+        or int(node.get("participant_id") or 0) > 0
+    ]
+    pre_pending_conversation_ids = {
+        conversation_id
+        for node in pre_pending_display_nodes
+        for conversation_id in _display_node_conversation_ids(node)
+    }
+    pre_display_unmerged_ok = (
+        len(pre_pending_display_nodes) >= 2
+        and relevant_conversation_ids.issubset(pre_pending_conversation_ids)
+        and not pre_confirmed_display_nodes
+    )
+    post_matching_display_nodes = [
+        node
+        for node in post_display_nodes
+        if isinstance(node, dict) and (_extract_display_node_labels(node) & expected_labels)
+    ]
+    merged_display_nodes = [
+        node
+        for node in post_matching_display_nodes
+        if str(node.get("kind") or "").strip() == "participant"
+        or bool(node.get("confirmed"))
+        or int(node.get("participant_id") or 0) > 0
+    ]
+    merged_display_node = max(
+        merged_display_nodes,
+        key=lambda node: (
+            len(_display_node_conversation_ids(node)),
+            len(node.get("raw_node_ids") if isinstance(node.get("raw_node_ids"), list) else []),
+        ),
+        default=None,
+    )
+    merged_display_conversation_ids = (
+        set(_display_node_conversation_ids(merged_display_node))
+        if isinstance(merged_display_node, dict)
+        else set()
+    )
+    merged_display_raw_node_ids = (
+        merged_display_node.get("raw_node_ids")
+        if isinstance(merged_display_node, dict) and isinstance(merged_display_node.get("raw_node_ids"), list)
+        else []
+    )
+    merged_display_raw_labels = (
+        merged_display_node.get("raw_labels")
+        if isinstance(merged_display_node, dict) and isinstance(merged_display_node.get("raw_labels"), list)
+        else []
+    )
+    post_display_merge_ok = (
+        isinstance(merged_display_node, dict)
+        and relevant_conversation_ids.issubset(merged_display_conversation_ids)
+        and len(merged_display_conversation_ids) >= 2
+    )
+    post_display_evidence_ok = (
+        isinstance(merged_display_node, dict)
+        and len(merged_display_raw_node_ids) >= 2
+        and bool(set(str(item or "").strip() for item in merged_display_raw_labels if str(item or "").strip()) & expected_labels)
+    )
+    pre_display_reason = json.dumps(
+        {
+            "expected_labels": sorted(expected_labels),
+            "relevant_conversation_ids": sorted(relevant_conversation_ids),
+            "pending_nodes_preview": [
+                _summarize_display_node(node)
+                for node in pre_pending_display_nodes[:3]
+            ],
+            "confirmed_nodes_preview": [
+                _summarize_display_node(node)
+                for node in pre_confirmed_display_nodes[:2]
+            ],
+        },
+        ensure_ascii=False,
+    )
+    post_display_reason = json.dumps(
+        {
+            "expected_labels": sorted(expected_labels),
+            "relevant_conversation_ids": sorted(relevant_conversation_ids),
+            "merged_node": _summarize_display_node(merged_display_node),
+            "matching_nodes_preview": [
+                _summarize_display_node(node)
+                for node in post_matching_display_nodes[:3]
+            ],
+        },
+        ensure_ascii=False,
+    )
     graph_overlay_reason = json.dumps(
         {
             "expected_labels": sorted(expected_labels),
@@ -1978,6 +2166,21 @@ def run_case_h(
                 "participant mentions persist graph provenance",
                 persisted_provenance_ok,
                 json.dumps(matched_mentions or participant_resolution["mentions"][:2], ensure_ascii=False),
+            ),
+            CheckResult(
+                "display graph keeps unresolved same-label raw nodes separate before resolve",
+                pre_display_unmerged_ok,
+                pre_display_reason,
+            ),
+            CheckResult(
+                "display graph merges confirmed participant after resolve",
+                post_display_merge_ok,
+                post_display_reason,
+            ),
+            CheckResult(
+                "display graph merged participant keeps multi-conversation raw evidence",
+                post_display_evidence_ok,
+                post_display_reason,
             ),
             CheckResult(
                 "dossier graph keeps raw nodes and exposes participant mappings",
