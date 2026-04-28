@@ -477,6 +477,106 @@
             </div>
           </div>
 
+          <div class="dossier-intelligence-section">
+            <div class="dossier-auto-summary-header">
+              <div class="dossier-toolbar-copy">
+                <div class="dossier-detail-conversations-title">案卷智能概览</div>
+                <span class="dossier-toolbar-subtitle">
+                  展示案卷智能体的只读规则结果，不替代手动摘要、主体确认和图谱编辑。
+                </span>
+              </div>
+              <el-button
+                size="small"
+                plain
+                :loading="dossierIntelligenceLoading"
+                @click="handleRefreshDossierIntelligence"
+              >
+                刷新智能概览
+              </el-button>
+            </div>
+            <div v-if="dossierIntelligenceLoading" class="dossier-list-status">
+              正在加载案卷智能概览...
+            </div>
+            <div v-else-if="dossierIntelligenceState.error" class="dossier-graph-warning dossier-graph-warning-soft">
+              {{ dossierIntelligenceState.error }}
+            </div>
+            <div v-else class="dossier-intelligence-body">
+              <div class="dossier-intelligence-card">
+                <div class="dossier-detail-conversations-title">智能摘要来源</div>
+                <div class="dossier-intelligence-meta">
+                  <span>{{ dossierIntelligenceSummarySourceLabel(selectedDossierIntelligenceSummary.source) }}</span>
+                  <span v-if="selectedDossierIntelligenceSummary.updatedAt">
+                    {{ `最近更新：${formatDossierConversationTime(selectedDossierIntelligenceSummary.updatedAt)}` }}
+                  </span>
+                </div>
+                <div class="dossier-auto-summary-content">
+                  {{ selectedDossierIntelligenceSummary.text || '暂无案卷智能概览摘要。' }}
+                </div>
+              </div>
+
+              <div class="dossier-intelligence-grid">
+                <div class="dossier-intelligence-card dossier-intelligence-info-card">
+                  <span>Provider</span>
+                  <strong>{{ dossierIntelligenceState.provider || 'rules' }}</strong>
+                </div>
+                <div class="dossier-intelligence-card dossier-intelligence-info-card">
+                  <span>Model</span>
+                  <strong>{{ dossierIntelligenceState.model || 'dossier-intelligence-rules-v0' }}</strong>
+                </div>
+                <div class="dossier-intelligence-card dossier-intelligence-info-card">
+                  <span>Fallback Reason</span>
+                  <strong>{{ dossierIntelligenceState.fallbackReason || '无' }}</strong>
+                </div>
+              </div>
+
+              <div class="dossier-intelligence-card">
+                <div class="dossier-detail-conversations-title">图谱说明</div>
+                <ul
+                  v-if="selectedDossierIntelligenceDisplayGraphNotes.length"
+                  class="dossier-intelligence-note-list"
+                >
+                  <li
+                    v-for="(note, index) in selectedDossierIntelligenceDisplayGraphNotes"
+                    :key="`dossier-intelligence-note-${index}`"
+                  >
+                    {{ note }}
+                  </li>
+                </ul>
+                <div v-else class="dossier-intelligence-empty">暂无图谱说明</div>
+              </div>
+
+              <div class="dossier-intelligence-card">
+                <div class="dossier-detail-conversations-title">系统执行轨迹</div>
+                <div
+                  v-if="selectedDossierIntelligenceTraceSteps.length"
+                  class="dossier-intelligence-trace-list"
+                >
+                  <div
+                    v-for="(step, index) in selectedDossierIntelligenceTraceSteps"
+                    :key="`dossier-intelligence-step-${index}`"
+                    class="dossier-intelligence-trace-item"
+                  >
+                    <strong>{{ dossierIntelligenceTraceStepLabel(step?.step) }}</strong>
+                    <span>{{ dossierIntelligenceTraceStepStatusLabel(step?.status) }}</span>
+                  </div>
+                </div>
+                <div v-else class="dossier-intelligence-empty">暂无执行轨迹</div>
+                <div
+                  v-if="selectedDossierIntelligenceTraceWarnings.length"
+                  class="dossier-intelligence-warning-list"
+                >
+                  <div
+                    v-for="(warning, index) in selectedDossierIntelligenceTraceWarnings"
+                    :key="`dossier-intelligence-warning-${index}`"
+                    class="dossier-graph-warning dossier-graph-warning-soft"
+                  >
+                    {{ warning }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div class="dossier-participants-section">
             <div class="dossier-auto-summary-header">
               <div class="dossier-toolbar-copy">
@@ -1426,6 +1526,7 @@ import {
   getConversations,
   getDossierDetail,
   getDossierDisplayGraph,
+  getDossierIntelligence,
   getDossierGraph,
   getDossierParticipantCandidates,
   getDossierParticipants,
@@ -1490,6 +1591,7 @@ const dossierParticipantCandidateCreateKey = ref('')
 const dossierSummaryGenerating = ref(false)
 const dossierGraphLoading = ref(false)
 const dossierGraphLoaded = ref(false)
+const dossierIntelligenceLoading = ref(false)
 const trackedOnboardingVisible = ref(false)
 const trackedOnboardingSubmitting = ref(false)
 const dossierGraphState = reactive({
@@ -1509,6 +1611,21 @@ const dossierParticipantRegistryState = reactive({
   participants: [],
   mentions: [],
   candidates: [],
+  error: '',
+})
+const dossierIntelligenceState = reactive({
+  dossierId: null,
+  summary: {
+    text: '',
+    source: '',
+    updatedAt: '',
+  },
+  displayGraphNotes: [],
+  provider: '',
+  model: '',
+  fallbackReason: '',
+  traceSteps: [],
+  traceWarnings: [],
   error: '',
 })
 const dossierForm = reactive({
@@ -1734,6 +1851,20 @@ const selectedDossierGraphPrimaryAlias = computed(() =>
 )
 const selectedDossierGraphOpposingAlias = computed(() =>
   formatParticipantAliasSummary(selectedDossierGraphParticipantAliases.value?.opposing_party)
+)
+const selectedDossierIntelligenceSummary = computed(() => dossierIntelligenceState.summary || {})
+const selectedDossierIntelligenceDisplayGraphNotes = computed(() =>
+  Array.isArray(dossierIntelligenceState.displayGraphNotes)
+    ? dossierIntelligenceState.displayGraphNotes
+    : []
+)
+const selectedDossierIntelligenceTraceSteps = computed(() =>
+  Array.isArray(dossierIntelligenceState.traceSteps) ? dossierIntelligenceState.traceSteps : []
+)
+const selectedDossierIntelligenceTraceWarnings = computed(() =>
+  Array.isArray(dossierIntelligenceState.traceWarnings)
+    ? dossierIntelligenceState.traceWarnings
+    : []
 )
 const selectedDossierSelfAnchorParticipants = computed(() =>
   selectedDossierResolvedParticipants.value.filter(
@@ -2074,6 +2205,7 @@ function applySelectedDossierDetail(dossier) {
   if (!dossier) {
     resetDossierDetailForm()
     resetDossierParticipantRegistryState()
+    resetDossierIntelligenceState()
     return
   }
 
@@ -2134,6 +2266,45 @@ function applyDossierParticipantCandidatesPayload(payload) {
     if (!key) continue
     dossierParticipantCandidateSelections[key] = null
   }
+}
+
+function resetDossierIntelligenceState() {
+  dossierIntelligenceState.dossierId = null
+  dossierIntelligenceState.summary = {
+    text: '',
+    source: '',
+    updatedAt: '',
+  }
+  dossierIntelligenceState.displayGraphNotes = []
+  dossierIntelligenceState.provider = ''
+  dossierIntelligenceState.model = ''
+  dossierIntelligenceState.fallbackReason = ''
+  dossierIntelligenceState.traceSteps = []
+  dossierIntelligenceState.traceWarnings = []
+  dossierIntelligenceState.error = ''
+}
+
+function applyDossierIntelligencePayload(dossierId, payload) {
+  const summary = payload?.summary && typeof payload.summary === 'object' ? payload.summary : {}
+  const trace = payload?.trace && typeof payload.trace === 'object' ? payload.trace : {}
+
+  dossierIntelligenceState.dossierId = dossierId
+  dossierIntelligenceState.summary = {
+    text: typeof summary.text === 'string' ? summary.text : '',
+    source: typeof summary.source === 'string' ? summary.source : '',
+    updatedAt: typeof summary.updated_at === 'string' ? summary.updated_at : '',
+  }
+  dossierIntelligenceState.displayGraphNotes = Array.isArray(payload?.display_graph_notes)
+    ? payload.display_graph_notes
+    : []
+  dossierIntelligenceState.provider =
+    typeof payload?.provider === 'string' ? payload.provider : ''
+  dossierIntelligenceState.model = typeof payload?.model === 'string' ? payload.model : ''
+  dossierIntelligenceState.fallbackReason =
+    typeof payload?.fallback_reason === 'string' ? payload.fallback_reason : ''
+  dossierIntelligenceState.traceSteps = Array.isArray(trace.steps) ? trace.steps : []
+  dossierIntelligenceState.traceWarnings = Array.isArray(trace.warnings) ? trace.warnings : []
+  dossierIntelligenceState.error = ''
 }
 
 function resetDossierGraphState() {
@@ -2364,6 +2535,7 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     selectedDossierId.value = null
     applySelectedDossierDetail(null)
     resetDossierGraphState()
+    resetDossierIntelligenceState()
     return
   }
 
@@ -2382,6 +2554,7 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     console.error('Failed to fetch dossier detail:', error)
     applySelectedDossierDetail(null)
     resetDossierGraphState()
+    resetDossierIntelligenceState()
     if (!options.silent) {
       ElMessage.error('Failed to load dossier detail')
     }
@@ -2395,6 +2568,9 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
   }
   if (detailLoaded && options.loadGraph !== false) {
     await loadSelectedDossierGraph(dossierId, { silent: true })
+  }
+  if (detailLoaded && options.loadIntelligence !== false) {
+    await loadSelectedDossierIntelligence(dossierId)
   }
 }
 
@@ -2493,9 +2669,36 @@ async function loadSelectedDossierGraph(dossierId, options = {}) {
   }
 }
 
+async function loadSelectedDossierIntelligence(dossierId) {
+  if (!dossierId) {
+    resetDossierIntelligenceState()
+    return
+  }
+
+  dossierIntelligenceLoading.value = true
+  dossierIntelligenceState.error = ''
+  try {
+    const { data } = await getDossierIntelligence(dossierId, {
+      include_display_graph: true,
+    })
+    applyDossierIntelligencePayload(dossierId, data)
+  } catch (error) {
+    console.error('Failed to fetch dossier intelligence:', error)
+    dossierIntelligenceState.dossierId = dossierId
+    dossierIntelligenceState.error = '案卷智能概览暂不可用'
+  } finally {
+    dossierIntelligenceLoading.value = false
+  }
+}
+
 async function handleRefreshDossierGraph() {
   if (!selectedDossierId.value) return
   await loadSelectedDossierGraph(selectedDossierId.value)
+}
+
+async function handleRefreshDossierIntelligence() {
+  if (!selectedDossierId.value) return
+  await loadSelectedDossierIntelligence(selectedDossierId.value)
 }
 
 async function openDossierDrawer() {
@@ -3478,6 +3681,49 @@ function formatDossierConversationTime(value) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function dossierIntelligenceSummarySourceLabel(source) {
+  switch (String(source || '').trim().toLowerCase()) {
+    case 'auto_summary':
+      return 'AI 自动摘要'
+    case 'manual_summary':
+      return '手动摘要'
+    case 'rule_fallback':
+      return '规则兜底'
+    default:
+      return '未标注来源'
+  }
+}
+
+function dossierIntelligenceTraceStepLabel(step) {
+  switch (String(step || '').trim().toLowerCase()) {
+    case 'load_dossier':
+      return '加载案卷'
+    case 'load_display_graph':
+      return '加载展示图谱'
+    case 'skip_display_graph':
+      return '跳过展示图谱'
+    case 'build_summary':
+      return '构建摘要'
+    case 'build_confirmation_tasks':
+      return '构建确认任务'
+    default:
+      return step || '未知步骤'
+  }
+}
+
+function dossierIntelligenceTraceStepStatusLabel(status) {
+  switch (String(status || '').trim().toLowerCase()) {
+    case 'success':
+      return '成功'
+    case 'warning':
+      return '警告'
+    case 'skipped':
+      return '已跳过'
+    default:
+      return status || '未知状态'
+  }
 }
 
 function formatParticipantAliasSummary(alias) {
@@ -4960,6 +5206,111 @@ body,
   background: #f8fafc;
 }
 
+.dossier-intelligence-section {
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbff, #f3f7ff);
+}
+
+.dossier-intelligence-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dossier-intelligence-card {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dbeafe;
+}
+
+.dossier-intelligence-meta {
+  margin-top: 8px;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-intelligence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dossier-intelligence-info-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dossier-intelligence-info-card span {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-intelligence-info-card strong {
+  font-size: 13px;
+  color: #111827;
+  word-break: break-word;
+}
+
+.dossier-intelligence-note-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #374151;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dossier-intelligence-empty {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px dashed #bfdbfe;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.dossier-intelligence-trace-list,
+.dossier-intelligence-warning-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dossier-intelligence-trace-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #dbeafe;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dossier-intelligence-trace-item strong {
+  font-size: 12px;
+  color: #111827;
+}
+
+.dossier-intelligence-trace-item span {
+  font-size: 11px;
+  color: #6b7280;
+  white-space: nowrap;
+}
+
 .dossier-participants-section {
   padding: 12px;
   border: 1px solid #e5e7eb;
@@ -5793,6 +6144,7 @@ body,
 
 @media (max-width: 768px) {
   .dossier-graph-stats,
+  .dossier-intelligence-grid,
   .dossier-graph-aliases,
   .dossier-participant-summary-grid,
   .dossier-participants-grid,
