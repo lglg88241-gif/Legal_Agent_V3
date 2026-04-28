@@ -482,7 +482,7 @@
               <div class="dossier-toolbar-copy">
                 <div class="dossier-detail-conversations-title">案卷实体连接</div>
                 <span class="dossier-toolbar-subtitle">
-                  只展示连接多个会话的关键主体、待确认主体和未连接主体锚点。会话仅作为来源和跳转目标。
+                  这里只展示案卷中的责任主体和关键主体关系，例如个人、公司、单位、机构及其代表关系。劳动合同、社保、金额、通知等事实信息会作为详情证据展示，不作为主节点。
                 </span>
               </div>
               <el-button
@@ -2291,8 +2291,6 @@ const selectedDossierCoordinationGraphPreview = computed(() =>
   buildDossierCoordinationGraphPreview({
     entities: selectedDossierCoordinationEntities.value,
     edges: Array.isArray(dossierCoordinationGraphState.edges) ? dossierCoordinationGraphState.edges : [],
-    displayNodes: Array.isArray(dossierGraphState.nodes) ? dossierGraphState.nodes : [],
-    displayEdges: Array.isArray(dossierGraphState.edges) ? dossierGraphState.edges : [],
     loading: dossierCoordinationGraphLoading.value,
     error: dossierCoordinationGraphState.error,
   })
@@ -3945,11 +3943,6 @@ function buildCoordinationGraphLegendItems(nodes) {
     { category: 'pending_identity', label: '待确认主体', color: '#f59e0b' },
     { category: 'pending_naming', label: '待命名主体', color: '#7c3aed' },
     { category: 'isolated_anchor', label: '未连接主体锚点', color: '#64748b' },
-    { category: 'event', label: '事件节点', color: '#dc2626' },
-    { category: 'evidence', label: '证据节点', color: '#16a34a' },
-    { category: 'document', label: '文书节点', color: '#92400e' },
-    { category: 'amount', label: '金额节点', color: '#4338ca' },
-    { category: 'time', label: '时间节点', color: '#0f766e' },
     { category: 'other', label: '其他节点', color: '#475569' },
   ]
   const usedCategories = new Set(
@@ -3958,131 +3951,144 @@ function buildCoordinationGraphLegendItems(nodes) {
   return baseItems.filter((item) => usedCategories.has(item.category))
 }
 
-function buildCoordinationDisplayEdge(edge, sourceId, targetId, sourceNode, targetNode) {
+function normalizeCoordinationEdgeEvidence(edge) {
+  return Array.isArray(edge?.evidence)
+    ? edge.evidence.filter((item) => item && typeof item === 'object')
+    : []
+}
+
+function buildCoordinationRelationGraphEdge(edge) {
+  const evidence = normalizeCoordinationEdgeEvidence(edge)
   const edgeConversationIds = [
-    ...normalizeGraphConversationIds(edge?.conversation_ids),
     ...normalizeGraphConversationIds(edge?.source_conversation_ids),
-    ...normalizeGraphConversationIds(edge?.target_conversation_ids),
-    ...normalizeGraphConversationIds(edge?.properties?.conversation_id),
-    ...graphNodeConversationIds(sourceNode),
-    ...graphNodeConversationIds(targetNode),
+    ...evidence.flatMap((item) => normalizeGraphConversationIds(item?.conversation_id)),
   ].filter((value, index, array) => array.indexOf(value) === index)
 
   return {
-    id: `display:${String(edge?.id || `${sourceId}-${targetId}-${edge?.label || edge?.type || 'relation'}`)}`,
-    source: sourceId,
-    target: targetId,
-    label: String(edge?.label || edge?.type || '关联').trim() || '关联',
-    properties: edge?.properties && typeof edge.properties === 'object' ? edge.properties : {},
+    id: String(
+      edge?.id ||
+        `${String(edge?.source || '').trim()}-${String(edge?.target || '').trim()}-${
+          edge?.label || edge?.relation_type || 'relation'
+        }`
+    ),
+    source: String(edge?.source || '').trim(),
+    target: String(edge?.target || '').trim(),
+    label: String(edge?.label || edge?.relation_type || '关联').trim() || '关联',
+    properties: {
+      relation_type: String(edge?.relation_type || '').trim(),
+      confidence: String(edge?.confidence || '').trim(),
+    },
     conversationIds: edgeConversationIds,
+    evidence,
+  }
+}
+
+function appendCoordinationRelationDetails(graphNodes, graphEdges) {
+  const incidentEdgeLookup = new Map()
+  for (const node of graphNodes) {
+    incidentEdgeLookup.set(node.id, [])
+  }
+
+  for (const edge of graphEdges) {
+    if (incidentEdgeLookup.has(edge.source)) {
+      incidentEdgeLookup.get(edge.source).push(edge)
+    }
+    if (incidentEdgeLookup.has(edge.target)) {
+      incidentEdgeLookup.get(edge.target).push(edge)
+    }
+  }
+
+  for (const node of graphNodes) {
+    const relatedEdges = incidentEdgeLookup.get(node.id) || []
+    if (!relatedEdges.length) continue
+
+    const relationLabels = []
+    const evidenceSummaries = []
+    const evidenceConversationIds = []
+
+    for (const edge of relatedEdges) {
+      const label = String(edge?.label || '').trim()
+      if (label && !relationLabels.includes(label)) {
+        relationLabels.push(label)
+      }
+      for (const evidence of normalizeCoordinationEdgeEvidence(edge)) {
+        const summary = String(evidence?.summary || '').trim()
+        if (summary && !evidenceSummaries.includes(summary)) {
+          evidenceSummaries.push(summary)
+        }
+        for (const conversationId of normalizeGraphConversationIds(evidence?.conversation_id)) {
+          if (!evidenceConversationIds.includes(conversationId)) {
+            evidenceConversationIds.push(conversationId)
+          }
+        }
+      }
+    }
+
+    const detailRows = Array.isArray(node.detailRows) ? [...node.detailRows] : []
+    if (relationLabels.length) {
+      detailRows.push({ key: '关系线索', value: relationLabels.join(' / ') })
+    }
+    if (evidenceSummaries.length) {
+      detailRows.push({ key: '关系证据', value: evidenceSummaries.slice(0, 2).join('；') })
+    }
+    node.detailRows = detailRows
+
+    if (evidenceSummaries.length > 2) {
+      node.detailNote = `已汇总 ${evidenceSummaries.length} 条关系证据，可切换到详细对话继续查看。`
+    }
+
+    const actionConversationId = Number(node.actionConversationId || 0)
+    if (actionConversationId <= 0 && evidenceConversationIds.length) {
+      node.actionConversationId = evidenceConversationIds[0]
+      node.actionLabel = '查看详细对话'
+      node.actionDisabled = false
+      node.detailRows.push({
+        key: '详细对话',
+        value: formatGraphConversationLabel(evidenceConversationIds[0]),
+      })
+    }
   }
 }
 
 function buildDossierCoordinationGraphPreview(payload = {}) {
   const entities = Array.isArray(payload.entities) ? payload.entities : []
   const coordinationEdges = Array.isArray(payload.edges) ? payload.edges : []
-  const displayNodes = Array.isArray(payload.displayNodes) ? payload.displayNodes : []
-  const displayEdges = Array.isArray(payload.displayEdges) ? payload.displayEdges : []
   const graphNodes = []
   const graphEdges = []
   const nodeLookup = new Map()
-  const participantLookup = new Map()
-  const rawNodeLookup = new Map()
 
   for (const entity of entities) {
     const graphNode = buildCoordinationEntityGraphNode(entity)
     if (!graphNode.id) continue
     graphNodes.push(graphNode)
     nodeLookup.set(graphNode.id, graphNode)
-
-    const participantId = Number(entity?.participant_id || 0)
-    if (participantId > 0) {
-      participantLookup.set(participantId, graphNode.id)
-    }
-    for (const rawNodeId of coordinationEntityRawNodeIds(entity)) {
-      rawNodeLookup.set(rawNodeId, graphNode.id)
-    }
-  }
-
-  const displayNodeLookup = new Map()
-  const displayNodeAlias = new Map()
-  for (const node of displayNodes) {
-    const nodeId = String(node?.id || '').trim()
-    if (!nodeId || isConversationGraphNode(node)) continue
-    displayNodeLookup.set(nodeId, node)
-    const matchedEntityId = matchCoordinationEntityIdForDisplayNode(node, participantLookup, rawNodeLookup)
-    if (matchedEntityId) {
-      displayNodeAlias.set(nodeId, matchedEntityId)
-    }
-  }
-
-  let extraNodeCount = 0
-  function ensureDisplayGraphNode(node) {
-    if (!node || typeof node !== 'object' || isConversationGraphNode(node)) return ''
-    const rawNodeId = String(node?.id || '').trim()
-    if (!rawNodeId) return ''
-    const existingAlias = displayNodeAlias.get(rawNodeId)
-    if (existingAlias) return existingAlias
-    if (extraNodeCount >= DOSSIER_COORDINATION_GRAPH_EXTRA_NODE_LIMIT) return ''
-
-    const graphNode = buildCoordinationSupplementGraphNode(node)
-    if (!graphNode.id || nodeLookup.has(graphNode.id)) {
-      return graphNode.id
-    }
-    extraNodeCount += 1
-    graphNodes.push(graphNode)
-    nodeLookup.set(graphNode.id, graphNode)
-    displayNodeAlias.set(rawNodeId, graphNode.id)
-    return graphNode.id
   }
 
   const edgeKeys = new Set()
-  for (const edge of displayEdges) {
+  for (const edge of coordinationEdges) {
     if (graphEdges.length >= DOSSIER_COORDINATION_GRAPH_EDGE_LIMIT) break
-    const sourceNodeId = String(edge?.source || '').trim()
-    const targetNodeId = String(edge?.target || '').trim()
-    if (!sourceNodeId || !targetNodeId) continue
-
-    const sourceNode = displayNodeLookup.get(sourceNodeId)
-    const targetNode = displayNodeLookup.get(targetNodeId)
-    let sourceGraphNodeId = displayNodeAlias.get(sourceNodeId) || ''
-    let targetGraphNodeId = displayNodeAlias.get(targetNodeId) || ''
-
-    if (!sourceGraphNodeId && !targetGraphNodeId) continue
-    if (!sourceGraphNodeId) sourceGraphNodeId = ensureDisplayGraphNode(sourceNode)
-    if (!targetGraphNodeId) targetGraphNodeId = ensureDisplayGraphNode(targetNode)
-    if (!sourceGraphNodeId || !targetGraphNodeId || sourceGraphNodeId === targetGraphNodeId) continue
-
-    const edgeKey = [sourceGraphNodeId, targetGraphNodeId, String(edge?.label || edge?.type || '关联').trim()]
-      .join('::')
+    const graphEdge = buildCoordinationRelationGraphEdge(edge)
+    if (
+      !graphEdge.source ||
+      !graphEdge.target ||
+      !nodeLookup.has(graphEdge.source) ||
+      !nodeLookup.has(graphEdge.target) ||
+      graphEdge.source === graphEdge.target
+    ) {
+      continue
+    }
+    const edgeKey = [graphEdge.source, graphEdge.target, graphEdge.label].join('::')
     if (edgeKeys.has(edgeKey)) continue
     edgeKeys.add(edgeKey)
-    graphEdges.push(
-      buildCoordinationDisplayEdge(edge, sourceGraphNodeId, targetGraphNodeId, sourceNode, targetNode)
-    )
+    graphEdges.push(graphEdge)
   }
 
-  if (!graphEdges.length) {
-    for (const edge of coordinationEdges) {
-      if (graphEdges.length >= DOSSIER_COORDINATION_GRAPH_EDGE_LIMIT) break
-      const sourceId = String(edge?.source || '').trim()
-      const targetId = String(edge?.target || '').trim()
-      if (!sourceId || !targetId || !nodeLookup.has(sourceId) || !nodeLookup.has(targetId)) continue
-      const edgeKey = [sourceId, targetId, String(edge?.kind || edge?.label || 'related_in_dossier').trim()].join('::')
-      if (edgeKeys.has(edgeKey)) continue
-      edgeKeys.add(edgeKey)
-      graphEdges.push({
-        id: String(edge?.id || edgeKey),
-        source: sourceId,
-        target: targetId,
-        label: String(edge?.kind || edge?.label || 'related_in_dossier').trim() || 'related_in_dossier',
-      })
-    }
-  }
+  appendCoordinationRelationDetails(graphNodes, graphEdges)
 
   return {
     metaLabel: '案卷实体连接图谱',
-    query: '按案卷内可连接主体聚合展示，关系边优先复用已加载的展示图谱。',
+    query:
+      '这里只展示案卷中的责任主体和关键主体关系，例如个人、公司、单位、机构及其代表关系。劳动合同、社保、金额、通知等事实信息会作为详情证据展示，不作为主节点。',
     nodes: graphNodes,
     edges: graphEdges,
     loading: Boolean(payload.loading),
