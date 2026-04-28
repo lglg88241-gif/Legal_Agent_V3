@@ -18,7 +18,7 @@ Do not mix dossier, participant, graph-memory, or mode-consent scenarios into th
 - creating a new conversation from dossier defaults to tracked
 - dossier memory queries
 - explicit law queries inside dossier-bound conversations
-- participant candidate / confirmation API flow
+- cross-conversation participant resolution candidate / confirmation API flow
 - dossier archive semantics
 
 ## Usage

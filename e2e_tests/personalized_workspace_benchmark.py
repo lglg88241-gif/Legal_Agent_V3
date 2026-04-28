@@ -122,7 +122,7 @@ WORKSPACE_CASE_PLANS = [
     WorkspaceCasePlan("E", "E_dossier_created_conversation", "E dossier-bound conversation defaults to tracked", 0, 4),
     WorkspaceCasePlan("F", "F_memory_query", "F dossier memory query answers from dossier context", 1, 3),
     WorkspaceCasePlan("G", "G_explicit_law_query", "G explicit law query in dossier conversation still behaves like legal QA", 1, 5),
-    WorkspaceCasePlan("H", "H_participant_resolution", "H participant candidates and confirmation API flow", 1, 8),
+    WorkspaceCasePlan("H", "H_participant_resolution", "H cross-conversation participant resolution and dossier mapping overlay", 2, 10),
     WorkspaceCasePlan("I", "I_archive_semantics", "I archive dossier keeps historical data accessible", 0, 4),
     WorkspaceCasePlan("J", "J_hard_delete", "J hard delete dossier removes registry data and detaches conversations", 0, 6),
 ]
@@ -904,6 +904,251 @@ def contains_any(text: str, *keywords: str) -> bool:
     return any(keyword.lower() in lowered for keyword in keywords)
 
 
+def _candidate_task_type(candidate: dict[str, Any] | None) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    return str(candidate.get("task_type") or "raw_label_resolution").strip().lower()
+
+
+def _is_cross_conversation_candidate(candidate: dict[str, Any] | None) -> bool:
+    return _candidate_task_type(candidate) == "cross_conversation_entity_resolution"
+
+
+def _graph_node_label(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ""
+    return str(node.get("graph_node_label") or node.get("raw_label") or "").strip()
+
+
+def _recursive_contains_key(payload: Any, key: str) -> bool:
+    if isinstance(payload, dict):
+        if key in payload:
+            return True
+        return any(_recursive_contains_key(value, key) for value in payload.values())
+    if isinstance(payload, list):
+        return any(_recursive_contains_key(item, key) for item in payload)
+    return False
+
+
+def _build_resolution_mention_from_node(node: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        return {}
+    return {
+        "conversation_id": node.get("conversation_id"),
+        "raw_label": str(node.get("raw_label") or node.get("graph_node_label") or "").strip(),
+        "source": "graph_node",
+        "graph_node_id": str(node.get("graph_node_id") or "").strip() or None,
+        "graph_node_label": str(node.get("graph_node_label") or "").strip() or None,
+        "graph_node_type": str(node.get("graph_node_type") or "").strip() or None,
+    }
+
+
+def _node_has_graph_provenance(node: dict[str, Any] | None) -> bool:
+    if not isinstance(node, dict):
+        return False
+    return bool(
+        str(node.get("graph_node_id") or "").strip()
+        or str(node.get("graph_node_label") or "").strip()
+        or str(node.get("graph_node_type") or "").strip()
+    )
+
+
+def _node_overlay_evidence(node: dict[str, Any] | None) -> bool:
+    if not isinstance(node, dict):
+        return False
+    properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+    return bool(
+        str(node.get("display_label") or "").strip()
+        or int(node.get("participant_id") or 0) > 0
+        or str(properties.get("display_label") or "").strip()
+        or int(properties.get("participant_id") or 0) > 0
+    )
+
+
+def _extract_graph_node_labels(node: dict[str, Any] | None) -> set[str]:
+    if not isinstance(node, dict):
+        return set()
+    properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+    labels = {
+        str(node.get("label") or "").strip(),
+        str(node.get("name") or "").strip(),
+        str(node.get("raw_label") or "").strip(),
+        str(node.get("graph_node_label") or "").strip(),
+        str(properties.get("name") or "").strip(),
+        str(properties.get("label") or "").strip(),
+        str(properties.get("raw_label") or "").strip(),
+        str(properties.get("graph_node_label") or "").strip(),
+    }
+    return {label for label in labels if label}
+
+
+def _extract_mapping_labels(mapping: dict[str, Any] | None) -> set[str]:
+    if not isinstance(mapping, dict):
+        return set()
+    labels: set[str] = set()
+    for key, value in mapping.items():
+        key_text = str(key or "").lower()
+        if isinstance(value, dict):
+            labels.update(_extract_mapping_labels(value))
+            continue
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    labels.update(_extract_mapping_labels(item))
+                elif isinstance(item, str) and (
+                    "label" in key_text or "name" in key_text or "raw" in key_text or "graph" in key_text
+                ):
+                    normalized = item.strip()
+                    if normalized:
+                        labels.add(normalized)
+            continue
+        if isinstance(value, str) and (
+            "label" in key_text or "name" in key_text or "raw" in key_text or "graph" in key_text
+        ):
+            normalized = value.strip()
+            if normalized:
+                labels.add(normalized)
+    return labels
+
+
+def _candidate_evidence_labels(candidate: dict[str, Any] | None) -> set[str]:
+    if not isinstance(candidate, dict):
+        return {"A公司"}
+    labels = {
+        str(candidate.get("raw_label") or "").strip(),
+        str(candidate.get("suggested_label") or "").strip(),
+    }
+    for node_key in ("source_node", "target_node"):
+        labels.add(_graph_node_label(candidate.get(node_key) if isinstance(candidate.get(node_key), dict) else None))
+    normalized = {label for label in labels if label}
+    return normalized or {"A公司"}
+
+
+def _summarize_resolution_node(node: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        return {}
+    return {
+        "conversation_id": node.get("conversation_id"),
+        "raw_label": node.get("raw_label"),
+        "graph_node_label": node.get("graph_node_label"),
+        "graph_node_type": node.get("graph_node_type"),
+        "graph_node_id": node.get("graph_node_id"),
+    }
+
+
+def _summarize_graph_node(node: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        return {}
+    properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+    return {
+        "conversation_id": node.get("conversation_id"),
+        "type": node.get("type"),
+        "label": node.get("label"),
+        "name": node.get("name"),
+        "raw_label": node.get("raw_label"),
+        "graph_node_label": node.get("graph_node_label"),
+        "display_label": node.get("display_label"),
+        "participant_id": node.get("participant_id"),
+        "properties": {
+            "name": properties.get("name"),
+            "label": properties.get("label"),
+            "raw_label": properties.get("raw_label"),
+            "graph_node_label": properties.get("graph_node_label"),
+            "display_label": properties.get("display_label"),
+            "participant_id": properties.get("participant_id"),
+        },
+    }
+
+
+def _summarize_participant_mapping(mapping: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(mapping, dict):
+        return {}
+    return {
+        "participant_id": mapping.get("participant_id"),
+        "participant_label": mapping.get("participant_label"),
+        "raw_label": mapping.get("raw_label"),
+        "graph_node_label": mapping.get("graph_node_label"),
+        "display_label": mapping.get("display_label"),
+        "conversation_id": mapping.get("conversation_id"),
+        "graph_node_id": mapping.get("graph_node_id"),
+    }
+
+
+def _cross_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
+    confidence = str(candidate.get("confidence") or "").strip().lower()
+    confidence_score = {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
+    source_node = candidate.get("source_node") if isinstance(candidate.get("source_node"), dict) else {}
+    target_node = candidate.get("target_node") if isinstance(candidate.get("target_node"), dict) else {}
+    exact_a_company = int(_graph_node_label(source_node) == "A公司" and _graph_node_label(target_node) == "A公司")
+    provenance_score = int(_node_has_graph_provenance(source_node)) + int(_node_has_graph_provenance(target_node))
+    recommended_score = 1 if int(candidate.get("recommended_participant_id") or 0) > 0 else 0
+    return confidence_score, exact_a_company, provenance_score, recommended_score
+
+
+def _select_cross_conversation_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    cross_candidates = [
+        item
+        for item in candidates
+        if isinstance(item, dict) and _is_cross_conversation_candidate(item)
+    ]
+    if not cross_candidates:
+        return None
+    return max(cross_candidates, key=_cross_candidate_score)
+
+
+def _pick_participant_label_for_cross_candidate(candidate: dict[str, Any] | None) -> str:
+    if not isinstance(candidate, dict):
+        return "A公司"
+    suggested_label = str(candidate.get("suggested_label") or "").strip()
+    if suggested_label:
+        return suggested_label
+    for node_key in ("source_node", "target_node"):
+        node = candidate.get(node_key) if isinstance(candidate.get(node_key), dict) else None
+        label = _graph_node_label(node)
+        if label:
+            return label
+    return "A公司"
+
+
+def _find_matching_mentions_for_candidate(
+    mentions: list[dict[str, Any]],
+    candidate: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return []
+
+    expected_nodes = [
+        candidate.get("source_node") if isinstance(candidate.get("source_node"), dict) else None,
+        candidate.get("target_node") if isinstance(candidate.get("target_node"), dict) else None,
+    ]
+    matched: list[dict[str, Any]] = []
+    for expected_node in expected_nodes:
+        if not isinstance(expected_node, dict):
+            continue
+        expected_graph_node_id = str(expected_node.get("graph_node_id") or "").strip()
+        expected_conversation_id = int(expected_node.get("conversation_id") or 0)
+        expected_raw_label = str(expected_node.get("raw_label") or "").strip()
+        for mention in mentions:
+            if not isinstance(mention, dict):
+                continue
+            mention_graph_node_id = str(mention.get("graph_node_id") or "").strip()
+            mention_conversation_id = int(mention.get("conversation_id") or 0)
+            mention_raw_label = str(mention.get("raw_label") or "").strip()
+            if expected_graph_node_id and mention_graph_node_id == expected_graph_node_id:
+                matched.append(mention)
+                break
+            if (
+                not expected_graph_node_id
+                and expected_conversation_id > 0
+                and mention_conversation_id == expected_conversation_id
+                and expected_raw_label
+                and mention_raw_label == expected_raw_label
+            ):
+                matched.append(mention)
+                break
+    return matched
+
+
 def _workspace_setup(message: str) -> None:
     print(f"[workspace] setup {message}")
 
@@ -1046,30 +1291,53 @@ def ensure_dossier_conversation(context: WorkspaceScenarioContext) -> dict[str, 
 def ensure_participant_resolution(
     context: WorkspaceScenarioContext,
     *,
-    fact_progress: WorkspaceTurnProgress | None = None,
+    source_progress: WorkspaceTurnProgress | None = None,
+    target_progress: WorkspaceTurnProgress | None = None,
 ) -> dict[str, Any]:
     if context.participant_resolution is not None:
         return context.participant_resolution
 
     dossier_setup = ensure_dossier_setup(context)
-    if fact_progress is None:
+    if source_progress is None and target_progress is None:
         _workspace_setup("creating participant resolution prerequisite")
-    conversation = create_conversation(
+    source_conversation = create_conversation(
         context.headers,
-        title="workspace-H-participant-resolution",
+        title="workspace-H-participant-source",
+        dossier_id=dossier_setup["dossier"]["id"],
+    )
+    _, source_result = run_dialog(
+        context.headers,
+        conversation_id=source_conversation["id"],
+        text="我在A公司工作，劳动合同是和A公司签的，王经理通知我离职。",
+        mode_consent_enabled=False,
+        progress=source_progress,
+    )
+    source_snapshot, source_graph, source_graph_timeout_detail = wait_for_tracked_graph_update(
+        context.headers,
+        source_conversation["id"],
+        smoke=context.smoke,
+    )
+    target_conversation = create_conversation(
+        context.headers,
+        title="workspace-H-participant-target",
         dossier_id=dossier_setup["dossier"]["id"],
     )
     _, fact_result = run_dialog(
         context.headers,
-        conversation_id=conversation["id"],
-        text=context.followup_fact_message,
+        conversation_id=target_conversation["id"],
+        text="后来A公司的人事又通知我补签协议。",
         mode_consent_enabled=False,
-        progress=fact_progress,
+        progress=target_progress,
+    )
+    target_snapshot, target_graph, target_graph_timeout_detail = wait_for_tracked_graph_update(
+        context.headers,
+        target_conversation["id"],
+        smoke=context.smoke,
     )
     candidates_payload = retry_value(
         lambda: get_dossier_participant_candidates(context.headers, dossier_setup["dossier"]["id"]),
         lambda payload: bool((payload.get("candidates") if isinstance(payload, dict) else []) or []),
-        attempts=4,
+        attempts=6,
         sleep_s=2.0,
     )
     candidates = (
@@ -1077,25 +1345,8 @@ def ensure_participant_resolution(
         if isinstance(candidates_payload, dict) and isinstance(candidates_payload.get("candidates"), list)
         else []
     )
-    candidate = next(
-        (
-            item
-            for item in candidates
-            if isinstance(item, dict)
-            and item.get("label_kind") == "specific"
-            and item.get("entity_type") == "organization"
-        ),
-        candidates[0] if candidates else None,
-    )
-    if isinstance(candidate, dict) and candidate.get("label_kind") != "specific":
-        candidate = next(
-            (
-                item
-                for item in candidates
-                if isinstance(item, dict) and item.get("label_kind") == "specific"
-            ),
-            candidate,
-        )
+    cross_candidate = _select_cross_conversation_candidate(candidates)
+    candidate = cross_candidate
     generic_candidate = next(
         (
             item
@@ -1105,35 +1356,66 @@ def ensure_participant_resolution(
         None,
     )
     resolve_result: dict[str, Any] | None = None
+    resolve_payload: dict[str, Any] | None = None
     if isinstance(candidate, dict):
+        resolve_mentions = (
+            [
+                _build_resolution_mention_from_node(candidate.get("source_node")),
+                _build_resolution_mention_from_node(candidate.get("target_node")),
+            ]
+            if _is_cross_conversation_candidate(candidate)
+            else (candidate.get("mentions") or [])
+        )
+        resolve_mentions = [
+            item
+            for item in resolve_mentions
+            if isinstance(item, dict)
+            and int(item.get("conversation_id") or 0) > 0
+            and str(item.get("raw_label") or "").strip()
+        ]
         recommended_participant_id = (
             candidate.get("recommended_participant_id")
             or candidate.get("existing_participant_id")
         )
         if recommended_participant_id:
+            resolve_payload = {
+                "participant_id": int(recommended_participant_id),
+                "mentions": resolve_mentions,
+            }
             resolve_result = resolve_dossier_participant(
                 context.headers,
                 dossier_setup["dossier"]["id"],
-                {
-                    "participant_id": int(recommended_participant_id),
-                    "mentions": candidate.get("mentions") or [],
-                },
+                resolve_payload,
             )
         else:
-            resolve_result = resolve_dossier_participant(
-                context.headers,
-                dossier_setup["dossier"]["id"],
-                {
+            resolve_payload = {
                 "participant": {
-                    "label": str(candidate.get("suggested_label") or "A公司"),
-                    "role": str(candidate.get("suggested_role") or "用人单位") or None,
+                    "label": _pick_participant_label_for_cross_candidate(candidate),
+                    "role": (
+                        str(candidate.get("suggested_role") or "用人单位") or None
+                    ),
                     "party_side": str(candidate.get("party_side") or "opponent"),
                     "entity_type": str(candidate.get("entity_type") or "organization"),
                     "description": "workspace benchmark confirmed participant",
                 },
-                "mentions": candidate.get("mentions") or [],
-                },
+                "mentions": resolve_mentions,
+            }
+            resolve_result = resolve_dossier_participant(
+                context.headers,
+                dossier_setup["dossier"]["id"],
+                resolve_payload,
             )
+    elif candidates:
+        resolve_result = {
+            "status": "skipped",
+            "reason": "cross conversation candidate missing",
+            "candidate_preview": candidates[:2],
+        }
+    else:
+        resolve_result = {
+            "status": "skipped",
+            "reason": "participant candidates endpoint returned no candidates",
+        }
     participants_payload = get_dossier_participants(
         context.headers,
         dossier_setup["dossier"]["id"],
@@ -1159,17 +1441,30 @@ def ensure_participant_resolution(
         if isinstance(candidate, dict)
         else "A公司"
     )
+    matched_mentions = _find_matching_mentions_for_candidate(mentions, cross_candidate)
     context.participant_resolution = {
-        "conversation": conversation,
+        "conversation": target_conversation,
+        "source_conversation": source_conversation,
+        "target_conversation": target_conversation,
+        "source_result": source_result,
         "fact_result": fact_result,
+        "source_snapshot": source_snapshot,
+        "source_graph": source_graph,
+        "source_graph_timeout_detail": source_graph_timeout_detail,
+        "target_snapshot": target_snapshot,
+        "target_graph": target_graph,
+        "target_graph_timeout_detail": target_graph_timeout_detail,
         "candidates": candidates,
+        "cross_candidate": cross_candidate,
         "candidate": candidate,
         "generic_candidate": generic_candidate,
+        "resolve_payload": resolve_payload,
         "resolve_result": resolve_result,
         "participants_payload": participants_payload,
         "dossier_graph": dossier_graph,
         "participants": participants,
         "mentions": mentions,
+        "matched_mentions": matched_mentions,
         "graph_nodes": graph_nodes,
         "resolved_label": resolved_label,
     }
@@ -1512,14 +1807,22 @@ def run_case_h(
 ) -> BenchmarkCase:
     participant_resolution = ensure_participant_resolution(
         context,
-        fact_progress=_build_workspace_turn_progress(
+        source_progress=_build_workspace_turn_progress(
             case_index=case_index,
             case_total=case_total,
             case_key=plan.key,
             turn_index=1,
             turn_total=plan.turns,
         ),
+        target_progress=_build_workspace_turn_progress(
+            case_index=case_index,
+            case_total=case_total,
+            case_key=plan.key,
+            turn_index=2,
+            turn_total=plan.turns,
+        ),
     )
+    cross_candidate = participant_resolution.get("cross_candidate")
     generic_candidate = participant_resolution.get("generic_candidate")
     generic_candidate_ok = (
         not isinstance(generic_candidate, dict)
@@ -1529,35 +1832,164 @@ def run_case_h(
             and generic_candidate.get("can_create_new") is False
         )
     )
+    cross_candidate_ok = isinstance(cross_candidate, dict)
+    cross_candidate_source = (
+        cross_candidate.get("source_node")
+        if isinstance(cross_candidate, dict) and isinstance(cross_candidate.get("source_node"), dict)
+        else {}
+    )
+    cross_candidate_target = (
+        cross_candidate.get("target_node")
+        if isinstance(cross_candidate, dict) and isinstance(cross_candidate.get("target_node"), dict)
+        else {}
+    )
+    candidate_structure_ok = (
+        cross_candidate_ok
+        and _candidate_task_type(cross_candidate) == "cross_conversation_entity_resolution"
+        and bool(str(cross_candidate.get("candidate_key") or "").strip())
+        and bool(str(cross_candidate.get("task_key") or "").strip())
+        and bool(str(cross_candidate.get("reason") or "").strip())
+        and bool(str(cross_candidate.get("confidence") or "").strip())
+        and int(cross_candidate_source.get("conversation_id") or 0) > 0
+        and int(cross_candidate_target.get("conversation_id") or 0) > 0
+        and int(cross_candidate_source.get("conversation_id") or 0)
+        != int(cross_candidate_target.get("conversation_id") or 0)
+    )
+    candidate_provenance_ok = (
+        cross_candidate_ok
+        and not _recursive_contains_key(cross_candidate, "node_reference_keys")
+        and (_node_has_graph_provenance(cross_candidate_source) or _node_has_graph_provenance(cross_candidate_target))
+    )
+    resolve_payload = participant_resolution.get("resolve_payload") or {}
+    resolve_mentions = (
+        resolve_payload.get("mentions")
+        if isinstance(resolve_payload, dict) and isinstance(resolve_payload.get("mentions"), list)
+        else []
+    )
+    resolve_payload_ok = (
+        len(resolve_mentions) >= 2
+        and all(
+            isinstance(mention, dict)
+            and int(mention.get("conversation_id") or 0) > 0
+            and str(mention.get("raw_label") or "").strip()
+            and str(mention.get("source") or "").strip() == "graph_node"
+            for mention in resolve_mentions
+        )
+        and any(str(mention.get("graph_node_id") or "").strip() for mention in resolve_mentions)
+    )
+    matched_mentions = (
+        participant_resolution.get("matched_mentions")
+        if isinstance(participant_resolution.get("matched_mentions"), list)
+        else []
+    )
+    persisted_provenance_ok = (
+        len(matched_mentions) >= 1
+        and any(str(item.get("graph_node_label") or "").strip() for item in matched_mentions if isinstance(item, dict))
+    )
+    participant_mappings = participant_resolution["dossier_graph"].get("participant_mappings", []) or []
+    expected_labels = _candidate_evidence_labels(cross_candidate)
+    mapping_label_ok = any(
+        _extract_mapping_labels(mapping) & expected_labels
+        for mapping in participant_mappings
+        if isinstance(mapping, dict)
+    )
+    raw_graph_ok = any(
+        _extract_graph_node_labels(node) & expected_labels
+        for node in participant_resolution["graph_nodes"]
+        if isinstance(node, dict)
+    )
+    node_overlay_ok = any(
+        _node_overlay_evidence(node)
+        for node in participant_resolution["graph_nodes"]
+        if isinstance(node, dict)
+    )
+    graph_overlay_ok = mapping_label_ok or node_overlay_ok or len(participant_mappings) >= 1
+    graph_overlay_reason = json.dumps(
+        {
+            "expected_labels": sorted(expected_labels),
+            "mapping_label_ok": mapping_label_ok,
+            "node_overlay_ok": node_overlay_ok,
+            "participant_mappings_preview": [
+                _summarize_participant_mapping(mapping)
+                for mapping in participant_mappings[:2]
+                if isinstance(mapping, dict)
+            ],
+            "raw_nodes_preview": [
+                _summarize_graph_node(node)
+                for node in participant_resolution["graph_nodes"][:3]
+                if isinstance(node, dict)
+            ],
+            "source_node": _summarize_resolution_node(cross_candidate_source),
+            "target_node": _summarize_resolution_node(cross_candidate_target),
+        },
+        ensure_ascii=False,
+    )
     return BenchmarkCase(
         code="H",
-        name="participant candidates and confirmation API flow",
+        name="cross-conversation participant resolution candidate and mapping overlay",
         notes={
             "fact_route_intent": participant_resolution["fact_result"].get("route_intent"),
             "candidate_count": len(participant_resolution["candidates"]),
-            "latency_ms": _latency_sum_ms(participant_resolution["fact_result"]),
+            "cross_candidate_count": sum(
+                1
+                for item in participant_resolution["candidates"]
+                if isinstance(item, dict) and _is_cross_conversation_candidate(item)
+            ),
+            "latency_ms": _latency_sum_ms(
+                participant_resolution.get("source_result"),
+                participant_resolution["fact_result"],
+            ),
         },
         checks=[
-            CheckResult("fact update dialog completed", participant_resolution["fact_result"].get("status") == "completed", str(participant_resolution["fact_result"].get("status"))),
-            CheckResult("participant candidates endpoint returns candidates", len(participant_resolution["candidates"]) >= 1, f"candidate_count={len(participant_resolution['candidates'])}"),
-            CheckResult("resolve endpoint succeeded", isinstance(participant_resolution["resolve_result"], dict) and participant_resolution["resolve_result"].get("status") == "success", json.dumps(participant_resolution["resolve_result"] or {}, ensure_ascii=False)),
-            CheckResult("confirmed participant is persisted", len(participant_resolution["participants"]) >= 1, f"participants={len(participant_resolution['participants'])}"),
-            CheckResult("participant mentions are persisted", len(participant_resolution["mentions"]) >= 1, f"mentions={len(participant_resolution['mentions'])}"),
             CheckResult(
-                "generic candidate is not auto merged",
+                "cross conversation fact dialogs completed",
+                participant_resolution.get("source_result", {}).get("status") == "completed"
+                and participant_resolution["fact_result"].get("status") == "completed",
+                json.dumps(
+                    {
+                        "source_status": participant_resolution.get("source_result", {}).get("status"),
+                        "target_status": participant_resolution["fact_result"].get("status"),
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+            CheckResult(
+                "cross conversation candidate exists",
+                cross_candidate_ok,
+                json.dumps(cross_candidate or participant_resolution["candidates"][:2], ensure_ascii=False),
+            ),
+            CheckResult(
+                "cross candidate exposes source and target across conversations",
+                candidate_structure_ok,
+                json.dumps(cross_candidate or {}, ensure_ascii=False),
+            ),
+            CheckResult(
+                "cross candidate exposes provenance without internal keys",
+                candidate_provenance_ok,
+                json.dumps(cross_candidate or {}, ensure_ascii=False),
+            ),
+            CheckResult("resolve endpoint succeeded", isinstance(participant_resolution["resolve_result"], dict) and participant_resolution["resolve_result"].get("status") == "success", json.dumps(participant_resolution["resolve_result"] or {}, ensure_ascii=False)),
+            CheckResult(
+                "resolve payload includes source and target graph provenance",
+                resolve_payload_ok,
+                json.dumps(resolve_payload or {}, ensure_ascii=False),
+            ),
+            CheckResult(
+                "participant mentions persist graph provenance",
+                persisted_provenance_ok,
+                json.dumps(matched_mentions or participant_resolution["mentions"][:2], ensure_ascii=False),
+            ),
+            CheckResult(
+                "dossier graph keeps raw nodes and exposes participant mappings",
+                raw_graph_ok and graph_overlay_ok,
+                graph_overlay_reason,
+            ),
+            CheckResult(
+                "generic candidate guardrail remains enabled",
                 generic_candidate_ok,
                 json.dumps(generic_candidate or {}, ensure_ascii=False),
             ),
-            CheckResult(
-                "dossier graph exposes participant mappings",
-                len(participant_resolution["dossier_graph"].get("participant_mappings", []) or []) >= 1,
-                f"participant_mappings={len(participant_resolution['dossier_graph'].get('participant_mappings', []) or [])}",
-            ),
-            CheckResult(
-                "dossier graph nodes can show resolved display_label",
-                any(str(node.get("display_label") or "") == participant_resolution["resolved_label"] for node in participant_resolution["graph_nodes"] if isinstance(node, dict)),
-                f"resolved_label={participant_resolution['resolved_label']}",
-            ),
+            CheckResult("confirmed participant is persisted", len(participant_resolution["participants"]) >= 1, f"participants={len(participant_resolution['participants'])}"),
         ],
     )
 
