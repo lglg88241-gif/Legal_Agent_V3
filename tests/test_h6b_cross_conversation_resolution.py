@@ -48,6 +48,7 @@ def test_cross_conversation_exact_label_generates_high_confidence_candidate() ->
     )
 
     assert cross_candidate["confidence"] == "high"
+    assert cross_candidate["can_create_new"] is True
     assert cross_candidate["source_node"]["conversation_id"] != cross_candidate["target_node"]["conversation_id"]
     assert cross_candidate["source_node"]["graph_node_id"] == "conv1-a"
     assert cross_candidate["target_node"]["graph_node_id"] == "conv2-a"
@@ -135,6 +136,44 @@ def test_cross_conversation_candidates_are_not_generated_within_same_conversatio
                 "nodes": [
                     {"id": "same-1", "label": "A公司", "type": "organization", "conversation_id": 11},
                     {"id": "same-2", "label": "公司", "type": "organization", "conversation_id": 11},
+                ]
+            }
+        },
+        participants=[],
+        confirmed_mentions=[],
+        participant_aliases={},
+    )
+
+    assert _find_cross_candidates(candidates) == []
+    _assert_no_internal_node_reference_keys(candidates)
+
+
+def test_cross_conversation_event_nodes_do_not_generate_participant_candidates() -> None:
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "event-1", "label": "解除通知", "type": "event", "conversation_id": 11},
+                    {"id": "event-2", "label": "解除通知", "type": "event", "conversation_id": 12},
+                ]
+            }
+        },
+        participants=[],
+        confirmed_mentions=[],
+        participant_aliases={},
+    )
+
+    assert _find_cross_candidates(candidates) == []
+    _assert_no_internal_node_reference_keys(candidates)
+
+
+def test_cross_conversation_generic_nodes_do_not_generate_user_confirmation_candidates() -> None:
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "generic-1", "label": "公司", "type": "organization", "conversation_id": 11},
+                    {"id": "generic-2", "label": "用人单位", "type": "organization", "conversation_id": 12},
                 ]
             }
         },

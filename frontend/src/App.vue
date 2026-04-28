@@ -960,6 +960,12 @@
       这些卡片代表案卷内待确认的主体线索。系统优先展示跨会话主体同一性候选，不会自动合并。
     </div>
     <div
+      v-if="selectedDossierRawLabelCandidates.length"
+      class="dossier-participants-hint"
+    >
+      {{ `另外 ${selectedDossierRawLabelCandidates.length} 条 raw-label 线索已降级到高级/调试详情，不作为普通用户主确认任务。` }}
+    </div>
+    <div
       v-if="selectedDossierParticipantCandidates.length"
       class="dossier-participant-task-list"
     >
@@ -1027,6 +1033,12 @@
             class="dossier-participant-task-meta"
           >
             {{ `系统建议归入：${candidateRecommendedParticipantLabel(candidate)}` }}
+          </div>
+          <div
+            v-if="candidateActionBlockedReason(candidate)"
+            class="dossier-participant-task-meta"
+          >
+            {{ `当前不能直接确认：${candidateActionBlockedReason(candidate)}` }}
           </div>
 
           <el-select
@@ -1132,7 +1144,7 @@
               size="small"
               type="primary"
               plain
-              :disabled="!crossCandidateExistingParticipantId(candidate)"
+              :disabled="!crossCandidateExistingParticipantId(candidate) && !canCreateParticipantFromCandidate(candidate)"
               :loading="dossierParticipantActionLoading"
               @click="handleResolveCrossConversationCandidate(candidate)"
             >
@@ -1298,7 +1310,11 @@
         </div>
       </div>
     <div v-else class="dossier-graph-empty">
-      当前没有待确认的主体线索。
+      {{
+        selectedDossierRawLabelCandidates.length
+          ? '当前没有待确认的跨会话主体关系。其他 raw-label 线索已放入高级/调试详情。'
+          : '当前没有待确认的主体线索。'
+      }}
     </div>
 
     <template #footer>
@@ -1657,7 +1673,7 @@ const selectedDossierParticipantMentions = computed(() =>
     ? dossierParticipantRegistryState.mentions
     : []
 )
-const selectedDossierParticipantCandidates = computed(() =>
+const selectedDossierAllParticipantCandidates = computed(() =>
   Array.isArray(dossierParticipantRegistryState.candidates)
     ? sortParticipantCandidates(
         dossierParticipantRegistryState.candidates.filter(
@@ -1666,22 +1682,25 @@ const selectedDossierParticipantCandidates = computed(() =>
       )
     : []
 )
+const selectedDossierParticipantCandidates = computed(() =>
+  selectedDossierAllParticipantCandidates.value.filter((candidate) => isCrossConversationCandidate(candidate))
+)
 const selectedDossierPendingParticipantCount = computed(
   () => selectedDossierParticipantCandidates.value.length
 )
 const selectedDossierCrossConversationCandidates = computed(() =>
-  selectedDossierParticipantCandidates.value.filter((candidate) => isCrossConversationCandidate(candidate))
+  selectedDossierParticipantCandidates.value
 )
 const selectedDossierRawLabelCandidates = computed(() =>
-  selectedDossierParticipantCandidates.value.filter((candidate) => !isCrossConversationCandidate(candidate))
+  selectedDossierAllParticipantCandidates.value.filter((candidate) => !isCrossConversationCandidate(candidate))
 )
 const selectedDossierSpecificParticipantCandidates = computed(() =>
-  selectedDossierParticipantCandidates.value.filter(
+  selectedDossierAllParticipantCandidates.value.filter(
     (candidate) => String(candidate?.label_kind || '').trim().toLowerCase() === 'specific'
   )
 )
 const selectedDossierGenericParticipantCandidates = computed(() =>
-  selectedDossierParticipantCandidates.value.filter(
+  selectedDossierAllParticipantCandidates.value.filter(
     (candidate) => String(candidate?.label_kind || '').trim().toLowerCase() === 'generic'
   )
 )
@@ -1971,6 +1990,11 @@ function toggleDossierParticipantSection(sectionName) {
 
 function openParticipantCandidateDialog() {
   if (!selectedDossierPendingParticipantCount.value) {
+    if (selectedDossierRawLabelCandidates.value.length) {
+      openParticipantAdvancedPanel('participants')
+      ElMessage.info('当前没有待确认的跨会话主体关系，其他 raw-label 线索已放入高级/调试详情')
+      return
+    }
     ElMessage.info('当前没有待确认的主体线索')
     return
   }
@@ -2731,11 +2755,15 @@ async function handleResolveSpecificCandidateToExisting(candidate) {
 
 async function handleResolveCrossConversationCandidate(candidate) {
   const participantId = crossCandidateExistingParticipantId(candidate)
-  if (participantId <= 0) {
-    ElMessage.warning('请先选择一个已有主体，或改为新建独立主体')
+  if (participantId > 0) {
+    await handleResolveParticipantCandidate(candidate, { participantId })
     return
   }
-  await handleResolveParticipantCandidate(candidate, { participantId })
+  if (canCreateParticipantFromCandidate(candidate)) {
+    await handleResolveParticipantCandidate(candidate)
+    return
+  }
+  ElMessage.warning(candidateActionBlockedReason(candidate) || '当前线索还不能直接确认，请查看原因说明')
 }
 
 async function handleResolveParticipantCandidateCreate(candidate) {
@@ -3604,9 +3632,25 @@ function candidateResolutionMentions(candidate) {
 
 function canCreateParticipantFromCandidate(candidate) {
   if (isCrossConversationCandidate(candidate)) {
-    return Boolean(String(candidate?.suggested_label || candidateRawLabel(candidate)).trim())
+    return Boolean(candidate?.can_create_new)
   }
   return Boolean(candidate?.can_create_new)
+}
+
+function candidateActionBlockedReason(candidate) {
+  if (!isCrossConversationCandidate(candidate)) return ''
+  const mentions = candidateResolutionMentions(candidate)
+  if (mentions.length < 2) return '缺少图谱节点来源'
+  if (candidateLabelKind(candidate) === 'generic') {
+    return '该称呼过于泛化，需要先选择已有主体'
+  }
+  if (crossCandidateExistingParticipantId(candidate) > 0 || canCreateParticipantFromCandidate(candidate)) {
+    return ''
+  }
+  if (!candidate?.can_link_existing && !candidate?.can_create_new) {
+    return '该节点不是可确认主体'
+  }
+  return '该线索暂时不能确认，请先选择已有主体或等待更多跨会话证据'
 }
 
 function candidateIntroText(candidate) {

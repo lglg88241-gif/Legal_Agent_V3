@@ -32,6 +32,59 @@ DEFAULT_PARTICIPANT_ALIASES: dict[str, dict[str, Any]] = {}
 VALID_PARTY_SIDES = {"claimant", "opponent", "neutral", "unknown"}
 VALID_ENTITY_TYPES = {"person", "organization", "authority", "unknown"}
 VALID_PARTICIPANT_MENTION_SOURCES = {"graph", "graph_node", "conversation", "user"}
+PARTICIPANT_RESOLVABLE_ENTITY_TYPES = {
+    "person",
+    "organization",
+    "authority",
+}
+PARTICIPANT_RESOLVABLE_UNKNOWN_GRAPH_NODE_TYPES = {
+    "person",
+    "organization",
+    "company",
+    "employer",
+    "authority",
+    "vehicle",
+    "自然人",
+    "组织",
+    "公司",
+    "用人单位",
+    "机构",
+    "车辆",
+}
+PARTICIPANT_NON_RESOLVABLE_GRAPH_NODE_TYPES = {
+    "event",
+    "fact",
+    "evidence",
+    "document",
+    "amount",
+    "money",
+    "time",
+    "date",
+    "law",
+    "statute",
+    "claim",
+    "procedure",
+    "relationship_event",
+    "action",
+    "issue",
+    "事件",
+    "事实",
+    "证据",
+    "文书",
+    "金额",
+    "金钱",
+    "时间",
+    "日期",
+    "法条",
+    "法规",
+    "法律",
+    "诉求",
+    "程序",
+    "关系事件",
+    "行为",
+    "争议",
+    "问题",
+}
 RUNTIME_INDEX_SPECS = {
     "dossiers": (
         ("ix_dossiers_user_id", ("user_id",)),
@@ -1832,6 +1885,37 @@ def _node_type_pair_is_compatible(left: dict[str, Any], right: dict[str, Any]) -
     return left_type == right_type
 
 
+def _normalized_resolution_graph_node_type(node_record: dict[str, Any]) -> str:
+    return " ".join(str(node_record.get("graph_node_type") or "").strip().split()).lower()
+
+
+def _is_non_resolvable_cross_conversation_node(node_record: dict[str, Any]) -> bool:
+    graph_node_type = _normalized_resolution_graph_node_type(node_record)
+    return graph_node_type in PARTICIPANT_NON_RESOLVABLE_GRAPH_NODE_TYPES
+
+
+def _is_participant_resolvable_cross_conversation_node(
+    node_record: dict[str, Any],
+    *,
+    participant_ids: set[int],
+) -> bool:
+    if _is_non_resolvable_cross_conversation_node(node_record):
+        return False
+
+    entity_type = str(node_record.get("entity_type") or "unknown").strip() or "unknown"
+    if entity_type in PARTICIPANT_RESOLVABLE_ENTITY_TYPES:
+        return True
+
+    graph_node_type = _normalized_resolution_graph_node_type(node_record)
+    if graph_node_type in PARTICIPANT_RESOLVABLE_UNKNOWN_GRAPH_NODE_TYPES:
+        return True
+
+    if entity_type == "unknown":
+        return bool(participant_ids)
+
+    return False
+
+
 def _ordered_cross_resolution_nodes(
     left: dict[str, Any],
     right: dict[str, Any],
@@ -2030,6 +2114,14 @@ def _build_cross_conversation_entity_candidate(
         )
         label_kind = source_kind if source_kind == target_kind else "mixed"
 
+    can_create_new = (
+        recommended_participant_id is None
+        and confidence == "high"
+        and source_kind == "specific"
+        and target_kind == "specific"
+        and bool(suggested_label)
+    )
+
     candidate_key = _cross_resolution_pair_key(source_node, target_node)
     reason = _build_cross_resolution_reason(
         source_node=source_node,
@@ -2071,7 +2163,7 @@ def _build_cross_conversation_entity_candidate(
             recommended_participant.label if recommended_participant is not None else ""
         ),
         "can_link_existing": bool(participants),
-        "can_create_new": False,
+        "can_create_new": can_create_new,
         "can_mark_non_entity": False,
         "can_mark_not_same": True,
         "can_skip": True,
@@ -2111,11 +2203,20 @@ def _build_cross_conversation_entity_candidates(
         for right in graph_node_records[index + 1 :]:
             if int(left.get("conversation_id") or 0) == int(right.get("conversation_id") or 0):
                 continue
-            if not _node_type_pair_is_compatible(left, right):
-                continue
-
             right_self_key = _cross_resolution_pair_key(right, right)
             right_participant_ids = node_participant_ids.get(right_self_key, set())
+            if not _is_participant_resolvable_cross_conversation_node(
+                left,
+                participant_ids=left_participant_ids,
+            ):
+                continue
+            if not _is_participant_resolvable_cross_conversation_node(
+                right,
+                participant_ids=right_participant_ids,
+            ):
+                continue
+            if not _node_type_pair_is_compatible(left, right):
+                continue
             if left_participant_ids and right_participant_ids:
                 continue
 
