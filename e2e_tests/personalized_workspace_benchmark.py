@@ -122,7 +122,7 @@ WORKSPACE_CASE_PLANS = [
     WorkspaceCasePlan("E", "E_dossier_created_conversation", "E dossier-bound conversation defaults to tracked", 0, 4),
     WorkspaceCasePlan("F", "F_memory_query", "F dossier memory query answers from dossier context", 1, 3),
     WorkspaceCasePlan("G", "G_explicit_law_query", "G explicit law query in dossier conversation still behaves like legal QA", 1, 5),
-    WorkspaceCasePlan("H", "H_participant_resolution", "H cross-conversation participant resolution and dossier mapping overlay", 2, 13),
+    WorkspaceCasePlan("H", "H_participant_resolution", "H cross-conversation participant resolution and dossier mapping overlay", 2, 14),
     WorkspaceCasePlan("I", "I_archive_semantics", "I archive dossier keeps historical data accessible", 0, 4),
     WorkspaceCasePlan("J", "J_hard_delete", "J hard delete dossier removes registry data and detaches conversations", 0, 6),
 ]
@@ -1129,6 +1129,21 @@ def _summarize_display_node(node: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _summarize_display_edge(edge: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(edge, dict):
+        return {}
+    conversation_ids = edge.get("conversation_ids") if isinstance(edge.get("conversation_ids"), list) else []
+    return {
+        "id": edge.get("id"),
+        "source": edge.get("source"),
+        "target": edge.get("target"),
+        "label": edge.get("label"),
+        "source_raw_id": edge.get("source_raw_id"),
+        "target_raw_id": edge.get("target_raw_id"),
+        "conversation_ids": conversation_ids[:4],
+    }
+
+
 def _cross_candidate_score(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
     confidence = str(candidate.get("confidence") or "").strip().lower()
     confidence_score = {"high": 3, "medium": 2, "low": 1}.get(confidence, 0)
@@ -1968,6 +1983,13 @@ def run_case_h(
         if isinstance(participant_resolution.get("post_display_nodes"), list)
         else []
     )
+    post_display_edges = (
+        participant_resolution.get("post_display_graph", {}).get("display_graph", {}).get("edges", [])
+        if isinstance(participant_resolution.get("post_display_graph"), dict)
+        and isinstance(participant_resolution.get("post_display_graph", {}).get("display_graph"), dict)
+        and isinstance(participant_resolution.get("post_display_graph", {}).get("display_graph", {}).get("edges"), list)
+        else []
+    )
     expected_labels = _candidate_evidence_labels(cross_candidate)
     relevant_conversation_ids = {
         int(cross_candidate_source.get("conversation_id") or 0),
@@ -2065,6 +2087,37 @@ def run_case_h(
         and len(merged_display_raw_node_ids) >= 2
         and bool(set(str(item or "").strip() for item in merged_display_raw_labels if str(item or "").strip()) & expected_labels)
     )
+    merged_display_node_id = (
+        str(merged_display_node.get("id") or "").strip()
+        if isinstance(merged_display_node, dict)
+        else ""
+    )
+    connected_display_edges = [
+        edge
+        for edge in post_display_edges
+        if isinstance(edge, dict)
+        and merged_display_node_id
+        and (
+            str(edge.get("source") or "").strip() == merged_display_node_id
+            or str(edge.get("target") or "").strip() == merged_display_node_id
+        )
+    ]
+    connected_edge_raw_ids = {
+        str(raw_id or "").strip()
+        for edge in connected_display_edges
+        for raw_id in (edge.get("source_raw_id"), edge.get("target_raw_id"))
+        if str(raw_id or "").strip()
+    }
+    merged_display_connectivity_ok = (
+        isinstance(merged_display_node, dict)
+        and len(connected_display_edges) >= 2
+        and {
+            str(cross_candidate_source.get("graph_node_id") or "").strip(),
+            str(cross_candidate_target.get("graph_node_id") or "").strip(),
+        }
+        .difference({""})
+        .issubset(connected_edge_raw_ids)
+    )
     pre_display_reason = json.dumps(
         {
             "expected_labels": sorted(expected_labels),
@@ -2088,6 +2141,10 @@ def run_case_h(
             "matching_nodes_preview": [
                 _summarize_display_node(node)
                 for node in post_matching_display_nodes[:3]
+            ],
+            "connected_edges_preview": [
+                _summarize_display_edge(edge)
+                for edge in connected_display_edges[:4]
             ],
         },
         ensure_ascii=False,
@@ -2180,6 +2237,11 @@ def run_case_h(
             CheckResult(
                 "display graph merged participant keeps multi-conversation raw evidence",
                 post_display_evidence_ok,
+                post_display_reason,
+            ),
+            CheckResult(
+                "display graph connects multiple conversation subgraphs through merged participant",
+                merged_display_connectivity_ok,
                 post_display_reason,
             ),
             CheckResult(

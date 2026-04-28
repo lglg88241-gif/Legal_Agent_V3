@@ -228,6 +228,100 @@ def test_edge_endpoints_are_remapped_to_participant_display_nodes() -> None:
     assert edge["conversation_ids"] == [674]
 
 
+def test_confirmed_participant_connects_multi_conversation_display_subgraphs() -> None:
+    raw_graph = {
+        "nodes": [
+            {"id": "c1_self", "label": "当事人", "type": "person", "conversation_id": 101},
+            {"id": "c1_company", "label": "A公司", "type": "organization", "conversation_id": 101},
+            {"id": "c1_manager", "label": "王经理", "type": "person", "conversation_id": 101},
+            {"id": "c2_company", "label": "A公司", "type": "organization", "conversation_id": 102},
+            {"id": "c2_agreement", "label": "补签协议", "type": "document", "conversation_id": 102},
+        ],
+        "edges": [
+            {
+                "id": "edge-c1-contract",
+                "source": "c1_self",
+                "target": "c1_company",
+                "label": "签订劳动合同",
+            },
+            {
+                "id": "edge-c1-notify",
+                "source": "c1_manager",
+                "target": "c1_self",
+                "label": "通知解除",
+            },
+            {
+                "id": "edge-c2-renew",
+                "source": "c2_company",
+                "target": "c2_agreement",
+                "label": "要求补签",
+            },
+        ],
+    }
+    original = deepcopy(raw_graph)
+    confirmed_participants = [
+        {"id": 100, "label": "A公司", "entity_type": "organization", "party_side": "opponent"},
+    ]
+    participant_mappings = [
+        {
+            "participant_id": 100,
+            "participant_label": "A公司",
+            "participant_entity_type": "organization",
+            "conversation_id": 101,
+            "raw_label": "A公司",
+            "graph_node_id": "c1_company",
+            "graph_node_label": "A公司",
+            "graph_node_type": "organization",
+        },
+        {
+            "participant_id": 100,
+            "participant_label": "A公司",
+            "participant_entity_type": "organization",
+            "conversation_id": 102,
+            "raw_label": "A公司",
+            "graph_node_id": "c2_company",
+            "graph_node_label": "A公司",
+            "graph_node_type": "organization",
+        },
+    ]
+
+    result = build_dossier_display_graph(raw_graph, confirmed_participants, participant_mappings)
+
+    participant_nodes = _find_nodes_by_kind(result, DISPLAY_PARTICIPANT_KIND)
+    assert len(participant_nodes) == 1
+    participant_node = participant_nodes[0]
+    assert participant_node["id"] == "participant:100"
+    assert participant_node["source_conversation_ids"] == [101, 102]
+    assert participant_node["raw_node_ids"] == ["c1_company", "c2_company"]
+    assert participant_node["raw_labels"] == ["A公司"]
+
+    connected_edges = [
+        edge
+        for edge in result["edges"]
+        if edge["source"] == "participant:100" or edge["target"] == "participant:100"
+    ]
+    assert len(connected_edges) >= 2
+    assert any(
+        edge["label"] == "要求补签"
+        and edge["source"] == "participant:100"
+        and edge["target"] == "raw:c2_agreement"
+        and edge["source_raw_id"] == "c2_company"
+        and edge["target_raw_id"] == "c2_agreement"
+        for edge in connected_edges
+    )
+    connected_raw_ids = {
+        raw_id
+        for edge in connected_edges
+        for raw_id in (edge.get("source_raw_id"), edge.get("target_raw_id"))
+        if isinstance(raw_id, str)
+    }
+    assert {"c1_company", "c2_company"}.issubset(connected_raw_ids)
+
+    assert all(node["id"] != "raw:c1_company" for node in result["nodes"])
+    assert all(node["id"] != "raw:c2_company" for node in result["nodes"])
+    assert raw_graph == original
+
+
 def test_self_anchor_display_label_uses_confirmed_participant_label() -> None:
     raw_graph = {
         "nodes": [
