@@ -33,6 +33,7 @@ from app.services.conversation_store import (
     update_dossier_participant_aliases,
     update_dossier_participant_record,
 )
+from app.services.dossier_display_graph import build_dossier_display_graph
 from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.dossier_summary import generate_dossier_auto_summary
 
@@ -143,6 +144,32 @@ async def _load_dossier_graph_scope(
         participants,
         mentions,
         participant_lookup,
+    )
+
+
+async def _build_raw_dossier_graph_payload(
+    *,
+    current_user: AuthenticatedUser,
+    dossier,
+    conversation_ids: list[int],
+    participant_aliases: dict,
+    participants: list,
+    mentions: list,
+    participant_lookup: dict,
+) -> dict:
+    return await get_dossier_graph_payload(
+        user_id=current_user.user_id,
+        dossier_id=dossier.id,
+        conversation_ids=conversation_ids,
+        participant_aliases=participant_aliases,
+        confirmed_participants=[
+            serialize_dossier_participant(participant)
+            for participant in participants
+        ],
+        participant_mappings=[
+            serialize_dossier_participant_mention(mention, participant_lookup)
+            for mention in mentions
+        ],
     )
 
 
@@ -419,19 +446,14 @@ async def get_dossier_participant_candidates(
         user_id=current_user.user_id,
         dossier=dossier,
     )
-    graph_payload = await get_dossier_graph_payload(
-        user_id=current_user.user_id,
-        dossier_id=dossier.id,
+    graph_payload = await _build_raw_dossier_graph_payload(
+        current_user=current_user,
+        dossier=dossier,
         conversation_ids=conversation_ids,
         participant_aliases=participant_aliases,
-        confirmed_participants=[
-            serialize_dossier_participant(participant)
-            for participant in participants
-        ],
-        participant_mappings=[
-            serialize_dossier_participant_mention(mention, participant_lookup)
-            for mention in mentions
-        ],
+        participants=participants,
+        mentions=mentions,
+        participant_lookup=participant_lookup,
     )
     candidates = build_dossier_participant_candidates(
         graph_payload=graph_payload,
@@ -470,20 +492,61 @@ async def get_dossier_graph(
         user_id=current_user.user_id,
         dossier=dossier,
     )
-    return await get_dossier_graph_payload(
-        user_id=current_user.user_id,
-        dossier_id=dossier.id,
+    return await _build_raw_dossier_graph_payload(
+        current_user=current_user,
+        dossier=dossier,
         conversation_ids=conversation_ids,
         participant_aliases=participant_aliases,
-        confirmed_participants=[
-            serialize_dossier_participant(participant)
-            for participant in participants
-        ],
-        participant_mappings=[
-            serialize_dossier_participant_mention(mention, participant_lookup)
-            for mention in mentions
-        ],
+        participants=participants,
+        mentions=mentions,
+        participant_lookup=participant_lookup,
     )
+
+
+@router.get("/{dossier_id}/display-graph")
+async def get_dossier_display_graph(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+
+    (
+        _conversations,
+        conversation_ids,
+        participant_aliases,
+        participants,
+        mentions,
+        participant_lookup,
+    ) = await _load_dossier_graph_scope(
+        db,
+        user_id=current_user.user_id,
+        dossier=dossier,
+    )
+    raw_graph_payload = await _build_raw_dossier_graph_payload(
+        current_user=current_user,
+        dossier=dossier,
+        conversation_ids=conversation_ids,
+        participant_aliases=participant_aliases,
+        participants=participants,
+        mentions=mentions,
+        participant_lookup=participant_lookup,
+    )
+    display_graph = build_dossier_display_graph(
+        raw_graph=raw_graph_payload.get("graph"),
+        confirmed_participants=raw_graph_payload.get("confirmed_participants"),
+        participant_mappings=raw_graph_payload.get("participant_mappings"),
+    )
+    return {
+        "status": "success",
+        "dossier_id": dossier.id,
+        "view": "display",
+        "display_graph": display_graph,
+        "generated_at": raw_graph_payload.get("generated_at"),
+    }
 
 
 @router.patch("/{dossier_id}")
