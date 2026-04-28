@@ -174,11 +174,6 @@ def _display_entity_type(raw_type: str) -> str:
     return _DISPLAY_ENTITY_TYPE_OVERRIDES.get(normalized, normalized)
 
 
-def _is_participant_blocked_node_type(raw_type: str) -> bool:
-    normalized = _normalize_key(raw_type)
-    return normalized in _RAW_EVENT_NODE_TYPES or normalized in _RAW_OTHER_NODE_TYPES
-
-
 def _raw_node_kind(node: dict[str, Any]) -> str:
     normalized = _normalized_node_type(node)
     if normalized in _RAW_EVENT_NODE_TYPES:
@@ -186,13 +181,6 @@ def _raw_node_kind(node: dict[str, Any]) -> str:
     if normalized in _RAW_OTHER_NODE_TYPES:
         return DISPLAY_RAW_OTHER_KIND
     return DISPLAY_RAW_ENTITY_KIND
-
-
-def _is_participant_mergeable_node(node: dict[str, Any]) -> bool:
-    normalized = _normalized_node_type(node)
-    if _is_participant_blocked_node_type(normalized):
-        return False
-    return normalized in _PARTICIPANT_LIKE_NODE_TYPES or normalized == "unknown"
 
 
 def _mapping_legacy_key(mapping: dict[str, Any]) -> tuple[int, str] | None:
@@ -226,7 +214,7 @@ def _build_confirmed_participant_lookup(
 def _build_mapping_lookups(
     participant_mappings: list[dict[str, Any]] | None,
 ) -> tuple[dict[str, dict[str, Any]], dict[tuple[int, str], dict[str, Any]]]:
-    graph_node_lookup: dict[str, dict[str, Any]] = {}
+    node_reference_lookup: dict[str, dict[str, Any]] = {}
     legacy_lookup: dict[tuple[int, str], dict[str, Any]] = {}
 
     for mapping in participant_mappings or []:
@@ -239,15 +227,22 @@ def _build_mapping_lookups(
         if participant_id <= 0:
             continue
 
-        graph_node_id = _normalize_text(mapping.get("graph_node_id"))
-        if graph_node_id and graph_node_id not in graph_node_lookup:
-            graph_node_lookup[graph_node_id] = mapping
+        node_reference_candidates = (
+            mapping.get("graph_node_id"),
+            mapping.get("raw_node_id"),
+            mapping.get("node_id"),
+            mapping.get("id"),
+        )
+        for reference in node_reference_candidates:
+            normalized_reference = _normalize_text(reference)
+            if normalized_reference and normalized_reference not in node_reference_lookup:
+                node_reference_lookup[normalized_reference] = mapping
 
         legacy_key = _mapping_legacy_key(mapping)
         if legacy_key is not None and legacy_key not in legacy_lookup:
             legacy_lookup[legacy_key] = mapping
 
-    return graph_node_lookup, legacy_lookup
+    return node_reference_lookup, legacy_lookup
 
 
 def _find_mapping_for_node(
@@ -256,10 +251,18 @@ def _find_mapping_for_node(
     graph_node_lookup: dict[str, dict[str, Any]],
     legacy_lookup: dict[tuple[int, str], dict[str, Any]],
 ) -> dict[str, Any] | None:
-    graph_node_id = _node_id(node)
-    mapping = graph_node_lookup.get(graph_node_id)
-    if mapping is not None:
-        return mapping
+    node_reference_candidates = (
+        node.get("id"),
+        node.get("graph_node_id"),
+        _node_id(node),
+    )
+    for reference in node_reference_candidates:
+        normalized_reference = _normalize_text(reference)
+        if not normalized_reference:
+            continue
+        mapping = graph_node_lookup.get(normalized_reference)
+        if mapping is not None:
+            return mapping
 
     legacy_key = (_node_conversation_id(node), _normalize_key(_node_label(node)))
     if legacy_key[0] <= 0 or not legacy_key[1]:
@@ -379,7 +382,7 @@ def build_dossier_display_graph(
         )
 
         participant_snapshot = None
-        if mapping is not None and _is_participant_mergeable_node(node):
+        if mapping is not None:
             participant_snapshot = _participant_snapshot(
                 mapping,
                 confirmed_participant_lookup=confirmed_participant_lookup,
@@ -506,4 +509,3 @@ def build_dossier_display_graph_from_payload(payload: dict[str, Any] | None) -> 
         confirmed_participants=normalized_payload.get("confirmed_participants"),
         participant_mappings=normalized_payload.get("participant_mappings"),
     )
-

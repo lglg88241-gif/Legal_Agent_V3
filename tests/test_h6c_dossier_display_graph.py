@@ -98,7 +98,7 @@ def test_unconfirmed_same_label_across_conversations_remains_separate_and_pendin
     assert result["stats"]["pending_confirmation_count"] == 2
 
 
-def test_event_nodes_with_same_label_are_not_merged_into_participant() -> None:
+def test_unmapped_event_nodes_with_same_label_remain_raw_events() -> None:
     raw_graph = {
         "nodes": [
             {"id": "event-674", "label": "解除通知", "type": "event", "conversation_id": 674},
@@ -106,29 +106,8 @@ def test_event_nodes_with_same_label_are_not_merged_into_participant() -> None:
         ],
         "edges": [],
     }
-    confirmed_participants = [
-        {"id": 12, "label": "A公司", "entity_type": "organization"},
-    ]
-    participant_mappings = [
-        {
-            "participant_id": 12,
-            "participant_label": "A公司",
-            "participant_entity_type": "organization",
-            "conversation_id": 674,
-            "raw_label": "解除通知",
-            "graph_node_id": "event-674",
-        },
-        {
-            "participant_id": 12,
-            "participant_label": "A公司",
-            "participant_entity_type": "organization",
-            "conversation_id": 675,
-            "raw_label": "解除通知",
-            "graph_node_id": "event-675",
-        },
-    ]
 
-    result = build_dossier_display_graph(raw_graph, confirmed_participants, participant_mappings)
+    result = build_dossier_display_graph(raw_graph, [], [])
 
     assert _find_nodes_by_kind(result, DISPLAY_PARTICIPANT_KIND) == []
     event_nodes = _find_nodes_by_kind(result, DISPLAY_RAW_EVENT_KIND)
@@ -136,6 +115,58 @@ def test_event_nodes_with_same_label_are_not_merged_into_participant() -> None:
     assert {node["id"] for node in event_nodes} == {"raw:event-674", "raw:event-675"}
     assert all(node["confirmed"] is False for node in event_nodes)
     assert all(node["pending_confirmation"] is False for node in event_nodes)
+
+
+def test_confirmed_mapping_merges_subject_and_object_typed_nodes_into_one_participant() -> None:
+    raw_graph = {
+        "nodes": [
+            {"id": "4:graph:6057", "label": "A公司", "type": "客体", "conversation_id": 679},
+            {"id": "4:graph:3408", "label": "A公司", "type": "主体", "conversation_id": 680},
+        ],
+        "edges": [],
+    }
+    original = deepcopy(raw_graph)
+    confirmed_participants = [
+        {"id": 100, "label": "A公司", "entity_type": "organization", "party_side": "opponent"},
+    ]
+    participant_mappings = [
+        {
+            "participant_id": 100,
+            "participant_label": "A公司",
+            "participant_entity_type": "organization",
+            "conversation_id": 679,
+            "raw_label": "A公司",
+            "graph_node_id": "4:graph:6057",
+            "graph_node_label": "A公司",
+            "graph_node_type": "客体",
+        },
+        {
+            "participant_id": 100,
+            "participant_label": "A公司",
+            "participant_entity_type": "organization",
+            "conversation_id": 680,
+            "raw_label": "A公司",
+            "graph_node_id": "4:graph:3408",
+            "graph_node_label": "A公司",
+            "graph_node_type": "主体",
+        },
+    ]
+
+    result = build_dossier_display_graph(raw_graph, confirmed_participants, participant_mappings)
+
+    participant_nodes = _find_nodes_by_kind(result, DISPLAY_PARTICIPANT_KIND)
+    assert len(participant_nodes) == 1
+    participant_node = participant_nodes[0]
+    assert participant_node["id"] == "participant:100"
+    assert participant_node["display_label"] == "A公司"
+    assert participant_node["confirmed"] is True
+    assert participant_node["pending_confirmation"] is False
+    assert participant_node["source_conversation_ids"] == [679, 680]
+    assert participant_node["raw_node_ids"] == ["4:graph:3408", "4:graph:6057"]
+    assert participant_node["raw_labels"] == ["A公司"]
+    assert all(node["id"] != "raw:4:graph:6057" for node in result["nodes"])
+    assert all(node["id"] != "raw:4:graph:3408" for node in result["nodes"])
+    assert raw_graph == original
 
 
 def test_raw_graph_is_not_mutated() -> None:
