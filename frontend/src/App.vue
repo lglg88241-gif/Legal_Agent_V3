@@ -542,7 +542,7 @@
                   >
                     <template v-if="task?.task_type === 'party_naming'">
                       <div class="dossier-intelligence-task-header">
-                        <strong>确认当事人称呼</strong>
+                        <strong>需要命名的当事人</strong>
                         <span class="dossier-intelligence-task-type">{{ task.task_type }}</span>
                       </div>
                       <div class="dossier-intelligence-task-meta">
@@ -577,9 +577,26 @@
                           }}
                         </span>
                       </div>
+                      <div class="dossier-intelligence-task-input">
+                        <el-input
+                          v-model="dossierPartyNamingDrafts[dossierIntelligenceTaskKey(task)]"
+                          maxlength="50"
+                          clearable
+                          placeholder="请输入该主体在本案中的名称或代称"
+                          :disabled="isPartyNamingSubmitting(task)"
+                        />
+                      </div>
                       <div class="dossier-intelligence-task-actions">
-                        <el-button size="small" disabled>命名确认将在下一步支持</el-button>
-                        <span>后续可在此确认展示名称</span>
+                        <el-button
+                          size="small"
+                          type="primary"
+                          :loading="isPartyNamingSubmitting(task)"
+                          :disabled="!canSubmitPartyNaming(task)"
+                          @click="handleConfirmPartyNaming(task)"
+                        >
+                          确认命名
+                        </el-button>
+                        <span>确认后会写入案卷主体 overlay，并刷新图谱预览。</span>
                       </div>
                     </template>
                     <template v-else>
@@ -1586,6 +1603,7 @@ import {
   attachConversationToDossier,
   batchDeleteConversations,
   clearConversationMessages,
+  confirmDossierPartyNaming,
   createConversation,
   createDossier,
   createDossierParticipant,
@@ -1663,6 +1681,7 @@ const dossierSummaryGenerating = ref(false)
 const dossierGraphLoading = ref(false)
 const dossierGraphLoaded = ref(false)
 const dossierIntelligenceLoading = ref(false)
+const dossierPartyNamingSubmittingKey = ref('')
 const trackedOnboardingVisible = ref(false)
 const trackedOnboardingSubmitting = ref(false)
 const dossierGraphState = reactive({
@@ -1700,6 +1719,7 @@ const dossierIntelligenceState = reactive({
   traceWarnings: [],
   error: '',
 })
+const dossierPartyNamingDrafts = reactive({})
 const dossierForm = reactive({
   title: '',
   case_type: '',
@@ -2373,6 +2393,8 @@ function resetDossierIntelligenceState() {
   dossierIntelligenceState.traceSteps = []
   dossierIntelligenceState.traceWarnings = []
   dossierIntelligenceState.error = ''
+  dossierPartyNamingSubmittingKey.value = ''
+  clearPartyNamingDrafts()
 }
 
 function applyDossierIntelligencePayload(dossierId, payload) {
@@ -2399,6 +2421,99 @@ function applyDossierIntelligencePayload(dossierId, payload) {
   dossierIntelligenceState.traceSteps = Array.isArray(trace.steps) ? trace.steps : []
   dossierIntelligenceState.traceWarnings = Array.isArray(trace.warnings) ? trace.warnings : []
   dossierIntelligenceState.error = ''
+  syncPartyNamingDrafts(dossierIntelligenceState.confirmationTasks)
+}
+
+function dossierIntelligenceTaskKey(task) {
+  const evidence = task?.evidence && typeof task.evidence === 'object' ? task.evidence : {}
+  const rawNodeIds = Array.isArray(evidence.raw_node_ids)
+    ? evidence.raw_node_ids.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  const conversationIds = Array.isArray(evidence.source_conversation_ids)
+    ? evidence.source_conversation_ids
+      .map((item) => Number(item || 0))
+      .filter((item) => Number.isInteger(item) && item > 0)
+    : []
+  const rawLabels = Array.isArray(evidence.raw_labels)
+    ? evidence.raw_labels.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  const base = [
+    String(task?.task_type || '').trim(),
+    String(task?.subject || '').trim(),
+    String(task?.current_label || '').trim(),
+    rawNodeIds.join('|'),
+    conversationIds.join('|'),
+    rawLabels.join('|'),
+  ]
+    .filter(Boolean)
+    .join(':')
+
+  return base || 'intelligence-task:party-naming'
+}
+
+function defaultPartyNamingDraft(task) {
+  const suggestedLabels = Array.isArray(task?.suggested_labels)
+    ? task.suggested_labels.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  if (suggestedLabels.length) {
+    return suggestedLabels[0]
+  }
+  return String(task?.current_label || '').trim()
+}
+
+function clearPartyNamingDrafts() {
+  for (const key of Object.keys(dossierPartyNamingDrafts)) {
+    delete dossierPartyNamingDrafts[key]
+  }
+}
+
+function syncPartyNamingDrafts(tasks) {
+  const nextKeys = new Set()
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    if (task?.task_type !== 'party_naming') continue
+    const key = dossierIntelligenceTaskKey(task)
+    nextKeys.add(key)
+    if (!String(dossierPartyNamingDrafts[key] || '').trim()) {
+      dossierPartyNamingDrafts[key] = defaultPartyNamingDraft(task)
+    }
+  }
+
+  for (const key of Object.keys(dossierPartyNamingDrafts)) {
+    if (!nextKeys.has(key)) {
+      delete dossierPartyNamingDrafts[key]
+    }
+  }
+}
+
+function isPartyNamingSubmitting(task) {
+  return dossierPartyNamingSubmittingKey.value === dossierIntelligenceTaskKey(task)
+}
+
+function canSubmitPartyNaming(task) {
+  return Boolean(String(dossierPartyNamingDrafts[dossierIntelligenceTaskKey(task)] || '').trim())
+}
+
+function buildPartyNamingConfirmPayload(task, displayLabel) {
+  const evidence = task?.evidence && typeof task.evidence === 'object' ? task.evidence : {}
+  return {
+    display_label: String(displayLabel || '').trim(),
+    source_task: {
+      subject: String(task?.subject || 'self_anchor').trim() || 'self_anchor',
+      evidence: {
+        raw_labels: Array.isArray(evidence.raw_labels)
+          ? evidence.raw_labels.map((item) => String(item || '').trim()).filter(Boolean)
+          : [],
+        source_conversation_ids: Array.isArray(evidence.source_conversation_ids)
+          ? evidence.source_conversation_ids
+            .map((item) => Number(item || 0))
+            .filter((item) => Number.isInteger(item) && item > 0)
+          : [],
+        raw_node_ids: Array.isArray(evidence.raw_node_ids)
+          ? evidence.raw_node_ids.map((item) => String(item || '').trim()).filter(Boolean)
+          : [],
+      },
+    },
+  }
 }
 
 function resetDossierGraphState() {
@@ -2848,6 +2963,65 @@ async function handleRefreshDossierGraph() {
 async function handleRefreshDossierIntelligence() {
   if (!selectedDossierId.value) return
   await loadSelectedDossierIntelligence(selectedDossierId.value)
+}
+
+async function refreshSelectedDossierAfterPartyNaming(dossierId) {
+  await Promise.allSettled([
+    loadSelectedDossierIntelligence(dossierId),
+    loadSelectedDossierParticipants(dossierId, { silent: true }),
+    loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
+    loadSelectedDossierGraph(dossierId, { silent: true }),
+  ])
+
+  const refreshErrors = [
+    dossierIntelligenceState.error,
+    dossierParticipantRegistryState.error,
+    dossierGraphState.error,
+  ].filter((value) => String(value || '').trim())
+
+  if (refreshErrors.length) {
+    console.error('Failed to refresh dossier views after party naming confirmation:', refreshErrors)
+  }
+  return refreshErrors.length === 0
+}
+
+async function handleConfirmPartyNaming(task) {
+  const dossierId = Number(selectedDossierId.value || 0)
+  if (dossierId <= 0) {
+    ElMessage.error('当前案卷不可用')
+    return
+  }
+
+  const taskKey = dossierIntelligenceTaskKey(task)
+  const displayLabel = String(dossierPartyNamingDrafts[taskKey] || '').trim()
+  if (!displayLabel) {
+    ElMessage.warning('请输入该主体在本案中的名称或代称')
+    return
+  }
+
+  dossierPartyNamingSubmittingKey.value = taskKey
+  try {
+    await confirmDossierPartyNaming(
+      dossierId,
+      buildPartyNamingConfirmPayload(task, displayLabel),
+    )
+
+    const refreshed = await refreshSelectedDossierAfterPartyNaming(dossierId)
+    if (refreshed) {
+      ElMessage.success('已确认主体名称')
+    } else {
+      ElMessage.warning('已确认主体名称，部分视图刷新失败，请手动刷新')
+    }
+  } catch (error) {
+    console.error('Failed to confirm dossier party naming:', error)
+    const detail =
+      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
+        ? error.response.data.detail
+        : '确认主体名称失败'
+    ElMessage.error(detail)
+  } finally {
+    dossierPartyNamingSubmittingKey.value = ''
+  }
 }
 
 async function openDossierDrawer() {
@@ -5565,6 +5739,12 @@ body,
   font-size: 12px;
   color: #1f2937;
   line-height: 1.7;
+}
+
+.dossier-intelligence-task-input {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .dossier-intelligence-task-actions {
