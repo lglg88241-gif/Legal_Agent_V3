@@ -5096,7 +5096,7 @@ async function sendImpl(textOverride = null, options = {}) {
     const data = initData.task_id ? (await initRes).data : initData
     updatePendingMessage(tempKey, { pending: false })
     currentAnalysis.requestState = 'error'
-    currentAnalysis.requestError = error?.message || '未知错误'
+    currentAnalysis.requestError = ''
     currentAnalysis.updatedAt = new Date().toISOString()
     setGraphSyncState('error', '主请求失败，未完成图谱同步')
 
