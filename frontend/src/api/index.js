@@ -98,6 +98,8 @@ export const resolveDossierParticipants = (dossierId, payload) =>
 export const getDossierParticipantCandidates = (dossierId) =>
   api.get(`/dossiers/${dossierId}/participant-candidates`)
 export const getDossierGraph = (dossierId) => api.get(`/dossiers/${dossierId}/graph`)
+export const getDossierDisplayGraph = (dossierId) =>
+  api.get(`/dossiers/${dossierId}/display-graph`)
 export const createDossier = (payload) => api.post('/dossiers', payload)
 export const updateDossier = (dossierId, payload) =>
   api.patch(`/dossiers/${dossierId}`, payload)

@@ -810,7 +810,7 @@
                         </div>
 
                         <div v-if="dossierGraphState.warning" class="dossier-graph-warning">
-                          图谱服务暂不可用，当前显示为空状态。
+                          {{ dossierGraphState.warning }}
                         </div>
                         <div v-if="selectedDossierPendingParticipantCount" class="dossier-graph-warning dossier-graph-warning-soft">
                           {{ `有 ${selectedDossierPendingParticipantCount} 条主体线索待确认，确认后图谱会更清晰。` }}
@@ -854,17 +854,15 @@
                                   class="dossier-graph-node-chip"
                                   :title="formatGraphPropertiesTitle(node.properties)"
                                 >
-                                  <strong>{{ node.display_label || node.label || `Node ${node.id}` }}</strong>
-                                  <span v-if="node.raw_label && node.raw_label !== (node.display_label || node.label)">
-                                    {{ `原始称呼：${node.raw_label}` }}
+                                  <strong>{{ graphNodePrimaryLabel(node) }}</strong>
+                                  <span>{{ formatGraphPreviewNodeKind(node) }}</span>
+                                  <span v-if="node.confirmed">已确认主体</span>
+                                  <span v-else-if="node.pending_confirmation">待确认</span>
+                                  <span v-if="graphNodeRawLabelsSummary(node)">
+                                    {{ `原始标签：${graphNodeRawLabelsSummary(node)}` }}
                                   </span>
-                                  <span>{{ node.type || '未分类' }}</span>
                                   <span>
-                                    {{
-                                      formatGraphConversationLabel(
-                                        node.conversation_id ?? node.properties?.conversation_id
-                                      )
-                                    }}
+                                    {{ `来源：${formatGraphConversationListLabel(graphNodeConversationIds(node))}` }}
                                   </span>
                                 </div>
                               </div>
@@ -883,7 +881,7 @@
                                   <span class="dossier-graph-edge-relation">{{ edge.relationLabel }}</span>
                                   <span class="dossier-graph-edge-target">{{ edge.targetLabel }}</span>
                                   <span class="dossier-graph-edge-meta">
-                                    {{ formatGraphConversationLabel(edge.conversationId) }}
+                                    {{ formatGraphConversationListLabel(edge.conversationIds) }}
                                   </span>
                                 </div>
                               </div>
@@ -1427,6 +1425,7 @@ import {
   getConversationSummary,
   getConversations,
   getDossierDetail,
+  getDossierDisplayGraph,
   getDossierGraph,
   getDossierParticipantCandidates,
   getDossierParticipants,
@@ -1500,6 +1499,7 @@ const dossierGraphState = reactive({
   edgeCount: 0,
   nodes: [],
   edges: [],
+  view: 'raw',
   generatedAt: '',
   warning: '',
   error: '',
@@ -1777,16 +1777,17 @@ const selectedDossierGraphPreviewEdges = computed(() => {
 
     return {
       ...edge,
-      sourceLabel: sourceNode?.display_label || sourceNode?.label || sourceId || 'Unknown',
-      targetLabel: targetNode?.display_label || targetNode?.label || targetId || 'Unknown',
+      sourceLabel: graphNodePrimaryLabel(sourceNode) || sourceId || 'Unknown',
+      targetLabel: graphNodePrimaryLabel(targetNode) || targetId || 'Unknown',
       relationLabel: String(edge?.label || edge?.type || 'CASE_RELATION').trim() || 'CASE_RELATION',
-      conversationId:
-        properties.conversation_id ??
-        sourceNode?.conversation_id ??
-        sourceNode?.properties?.conversation_id ??
-        targetNode?.conversation_id ??
-        targetNode?.properties?.conversation_id ??
-        null,
+      conversationIds: [
+        ...normalizeGraphConversationIds(edge?.conversation_ids),
+        ...normalizeGraphConversationIds(edge?.source_conversation_ids),
+        ...normalizeGraphConversationIds(edge?.target_conversation_ids),
+        ...normalizeGraphConversationIds(properties.conversation_id),
+        ...graphNodeConversationIds(sourceNode),
+        ...graphNodeConversationIds(targetNode),
+      ].filter((value, index, array) => array.indexOf(value) === index),
     }
   })
 })
@@ -1803,7 +1804,7 @@ const selectedDossierGraphPreviewTruncated = computed(
 const selectedDossierGraphEmptyText = computed(() => {
   if (!selectedDossierGraphIsEmpty.value) return ''
   if (dossierGraphState.warning) {
-    return '图谱服务暂不可用，当前显示为空状态。'
+    return dossierGraphState.warning
   }
   return '当前案卷还没有形成结构化关系。继续在持续跟踪会话中补充案情后，系统会自动整理。'
 })
@@ -2142,6 +2143,7 @@ function resetDossierGraphState() {
   dossierGraphState.edgeCount = 0
   dossierGraphState.nodes = []
   dossierGraphState.edges = []
+  dossierGraphState.view = 'raw'
   dossierGraphState.generatedAt = ''
   dossierGraphState.warning = ''
   dossierGraphState.error = ''
@@ -2149,23 +2151,68 @@ function resetDossierGraphState() {
   dossierGraphLoaded.value = false
 }
 
-function applyDossierGraphPayload(dossierId, payload) {
+function deriveDossierGraphConversationCount(nodes, edges) {
+  const conversationIds = [
+    ...nodes.flatMap((node) => graphNodeConversationIds(node)),
+    ...edges.flatMap((edge) => normalizeGraphConversationIds(edge?.conversation_ids)),
+    ...edges.flatMap((edge) => normalizeGraphConversationIds(edge?.source_conversation_ids)),
+    ...edges.flatMap((edge) => normalizeGraphConversationIds(edge?.target_conversation_ids)),
+  ].filter((value, index, array) => array.indexOf(value) === index)
+
+  if (conversationIds.length) {
+    return conversationIds.length
+  }
+  return Number(selectedDossierConversationCount.value || 0)
+}
+
+function applyDossierGraphPayload(dossierId, payload, options = {}) {
   const stats = payload?.graph?.stats || {}
   const graph = payload?.graph || {}
   const participantAliases = payload?.participant_aliases
   dossierGraphState.dossierId = dossierId
-  dossierGraphState.conversationCount = Number(stats.conversation_count || 0)
+  dossierGraphState.conversationCount =
+    Number(stats.conversation_count || 0) ||
+    deriveDossierGraphConversationCount(
+      Array.isArray(graph.nodes) ? graph.nodes : [],
+      Array.isArray(graph.edges) ? graph.edges : []
+    )
   dossierGraphState.nodeCount = Number(stats.node_count || 0)
   dossierGraphState.edgeCount = Number(stats.edge_count || 0)
   dossierGraphState.nodes = Array.isArray(graph.nodes) ? graph.nodes : []
   dossierGraphState.edges = Array.isArray(graph.edges) ? graph.edges : []
+  dossierGraphState.view = 'raw'
   dossierGraphState.generatedAt = payload?.generated_at || ''
-  dossierGraphState.warning = typeof payload?.warning === 'string' ? payload.warning : ''
+  dossierGraphState.warning =
+    typeof options?.warning === 'string' && options.warning
+      ? options.warning
+      : typeof payload?.warning === 'string'
+        ? payload.warning
+        : ''
   dossierGraphState.error = ''
   dossierGraphState.participantAliases =
     participantAliases && typeof participantAliases === 'object'
       ? participantAliases
       : selectedDossierDetail.value?.participant_aliases || {}
+  dossierGraphLoaded.value = true
+}
+
+function applyDossierDisplayGraphPayload(dossierId, payload) {
+  const displayGraph = payload?.display_graph || {}
+  const stats = displayGraph?.stats || {}
+  const nodes = Array.isArray(displayGraph.nodes) ? displayGraph.nodes : []
+  const edges = Array.isArray(displayGraph.edges) ? displayGraph.edges : []
+
+  dossierGraphState.dossierId = dossierId
+  dossierGraphState.conversationCount = deriveDossierGraphConversationCount(nodes, edges)
+  dossierGraphState.nodeCount = Number(stats.display_node_count || nodes.length || 0)
+  dossierGraphState.edgeCount = Number(stats.display_edge_count || edges.length || 0)
+  dossierGraphState.nodes = nodes
+  dossierGraphState.edges = edges
+  dossierGraphState.view = String(payload?.view || 'display').trim() || 'display'
+  dossierGraphState.generatedAt = payload?.generated_at || ''
+  dossierGraphState.warning = typeof payload?.warning === 'string' ? payload.warning : ''
+  dossierGraphState.error = ''
+  dossierGraphState.participantAliases = selectedDossierDetail.value?.participant_aliases || {}
   dossierGraphLoaded.value = true
 }
 
@@ -2415,9 +2462,20 @@ async function loadSelectedDossierGraph(dossierId, options = {}) {
 
   dossierGraphLoading.value = true
   dossierGraphState.error = ''
+  dossierGraphState.warning = ''
   try {
+    try {
+      const { data } = await getDossierDisplayGraph(dossierId)
+      applyDossierDisplayGraphPayload(dossierId, data)
+      return
+    } catch (displayGraphError) {
+      console.warn('Failed to fetch dossier display graph, falling back to raw graph:', displayGraphError)
+    }
+
     const { data } = await getDossierGraph(dossierId)
-    applyDossierGraphPayload(dossierId, data)
+    applyDossierGraphPayload(dossierId, data, {
+      warning: '展示图谱暂不可用，当前回退为原始案卷图谱。',
+    })
   } catch (error) {
     console.error('Failed to fetch dossier graph:', error)
     dossierGraphState.dossierId = dossierId
@@ -3438,6 +3496,26 @@ function formatGraphConversationLabel(conversationId) {
   return `会话 #${conversationId}`
 }
 
+function normalizeGraphConversationIds(value) {
+  const values = Array.isArray(value) ? value : [value]
+  const conversationIds = []
+  for (const item of values) {
+    const conversationId = Number(item || 0)
+    if (conversationId > 0 && !conversationIds.includes(conversationId)) {
+      conversationIds.push(conversationId)
+    }
+  }
+  return conversationIds
+}
+
+function formatGraphConversationListLabel(conversationIds) {
+  const normalizedConversationIds = normalizeGraphConversationIds(conversationIds)
+  if (!normalizedConversationIds.length) {
+    return '会话未标注'
+  }
+  return normalizedConversationIds.map((conversationId) => formatGraphConversationLabel(conversationId)).join(' / ')
+}
+
 function formatGraphPropertiesTitle(properties) {
   if (!properties || typeof properties !== 'object') return ''
 
@@ -3557,13 +3635,101 @@ function formatGraphNodeType(nodeType) {
   switch (String(nodeType || '').trim().toLowerCase()) {
     case 'organization':
       return '组织'
+    case 'company':
+      return '公司'
+    case 'employer':
+      return '用工主体'
     case 'person':
       return '自然人'
     case 'authority':
       return '机构'
+    case 'vehicle':
+      return '车辆'
+    case 'event':
+      return '事件'
+    case 'fact':
+      return '事实'
+    case 'evidence':
+      return '证据'
+    case 'document':
+      return '文书'
+    case 'amount':
+    case 'money':
+      return '金额'
+    case 'time':
+    case 'date':
+      return '时间'
+    case 'law':
+    case 'statute':
+      return '法条'
+    case 'claim':
+      return '诉求'
+    case 'procedure':
+      return '程序'
+    case 'issue':
+      return '争点'
     default:
       return '未分类'
   }
+}
+
+function graphNodePrimaryLabel(node) {
+  if (!node || typeof node !== 'object') return ''
+  const displayLabel = String(node.display_label || '').trim()
+  if (displayLabel) return displayLabel
+  const label = String(node.label || node.name || '').trim()
+  if (label) return label
+  const graphNodeLabel = String(node.graph_node_label || '').trim()
+  if (graphNodeLabel) return graphNodeLabel
+  const rawLabel = String(node.raw_label || '').trim()
+  if (rawLabel) return rawLabel
+  const nodeId = String(node.id || '').trim()
+  return nodeId ? `Node ${nodeId}` : '未标注节点'
+}
+
+function graphNodeConversationIds(node) {
+  if (!node || typeof node !== 'object') return []
+  return normalizeGraphConversationIds([
+    ...(Array.isArray(node.source_conversation_ids) ? node.source_conversation_ids : []),
+    ...(Array.isArray(node.conversation_ids) ? node.conversation_ids : []),
+    node.conversation_id,
+    node.properties?.conversation_id,
+  ])
+}
+
+function graphNodeRawLabels(node) {
+  if (!node || typeof node !== 'object') return []
+  const labels = [
+    ...(Array.isArray(node.raw_labels) ? node.raw_labels : []),
+    node.raw_label,
+    node.graph_node_label,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+
+  return labels.filter((label, index) => labels.indexOf(label) === index)
+}
+
+function graphNodeRawLabelsSummary(node) {
+  const primaryLabel = graphNodePrimaryLabel(node)
+  const rawLabels = graphNodeRawLabels(node)
+  const extraLabels = rawLabels.filter((label) => label !== primaryLabel)
+  if (extraLabels.length) return extraLabels.join(' / ')
+  return rawLabels.length > 1 ? rawLabels.join(' / ') : ''
+}
+
+function formatGraphPreviewNodeKind(node) {
+  const kind = String(node?.kind || '').trim().toLowerCase()
+  if (kind === 'participant') return '已确认主体'
+  if (kind === 'raw_entity') {
+    const entityType = formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type)
+    return node?.pending_confirmation ? `待确认主体 · ${entityType}` : `原始主体 · ${entityType}`
+  }
+  if (kind === 'raw_event') return '事件节点'
+  if (kind === 'raw_other') {
+    return `其他节点 · ${formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type)}`
+  }
+  return formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type)
 }
 
 function formatGraphNodeLabel(node) {
