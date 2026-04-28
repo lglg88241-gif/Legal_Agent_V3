@@ -13,10 +13,12 @@ from sqlalchemy import create_engine, inspect
 from app.agent.nodes.advisor import _format_dossier_context_block
 from app.core.security import AuthenticatedUser
 from app.models import Conversation, Dossier, DossierParticipant, DossierParticipantMention
-from app.services import dossier_graph
+from app.services import conversation_store as conversation_store_service, dossier_graph
 from app.services.conversation_store import (
     build_dossier_participant_candidates,
     ensure_storage_schema,
+    is_generic_participant_label,
+    is_specific_participant_label,
     resolve_dossier_participant_mentions,
 )
 
@@ -363,6 +365,28 @@ def test_build_dossier_participant_candidates_does_not_auto_confirm() -> None:
     )
 
     assert len(candidates) >= 2
+    company_candidate = next(candidate for candidate in candidates if candidate["raw_label"] == "公司")
+    assert company_candidate["label_kind"] == "generic"
+    assert company_candidate["existing_participant_id"] is None
+    assert company_candidate["can_create_new"] is False
+    return
+
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "1", "label": "公司", "conversation_id": 11, "properties": {}},
+                    {"id": "2", "label": "用人单位", "conversation_id": 12, "properties": {}},
+                    {"id": "3", "label": "老板", "conversation_id": 12, "properties": {}},
+                ]
+            }
+        },
+        participants=[],
+        confirmed_mentions=[],
+        participant_aliases={},
+    )
+
+    assert len(candidates) >= 2
     organization_candidate = next(
         candidate
         for candidate in candidates
@@ -574,3 +598,334 @@ def test_resolve_dossier_participant_mentions_rejects_conversation_outside_dossi
         )
 
     assert "current user's dossier" in str(exc_info.value)
+
+
+def test_generic_participant_label_helpers_distinguish_generic_and_specific() -> None:
+    assert is_generic_participant_label("当事人") is True
+    assert is_generic_participant_label("用人单位") is True
+    assert is_specific_participant_label("A公司") is True
+    assert is_specific_participant_label("王经理") is True
+
+
+def test_update_dossier_participant_aliases_skips_generic_auto_sync_for_opposing_party(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossier = Dossier(
+        id=21,
+        user_id=3,
+        title="案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    existing_participant = DossierParticipant(
+        id=88,
+        dossier_id=21,
+        user_id=3,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        confirmed_by_user=True,
+    )
+    create_calls: list[dict[str, object]] = []
+    update_calls: list[dict[str, object]] = []
+
+    async def fake_list_dossier_participants(db, user_id: int, dossier_id: int):
+        return [existing_participant]
+
+    async def fake_create_dossier_participant_record(db, **kwargs):
+        create_calls.append(kwargs)
+        return existing_participant
+
+    async def fake_update_dossier_participant_record(db, participant, **kwargs):
+        update_calls.append(kwargs)
+        return participant
+
+    async def fake_touch_dossier(db, dossier=None, dossier_id=None):
+        return dossier
+
+    monkeypatch.setattr(
+        conversation_store_service,
+        "list_dossier_participants",
+        fake_list_dossier_participants,
+    )
+    monkeypatch.setattr(
+        conversation_store_service,
+        "create_dossier_participant_record",
+        fake_create_dossier_participant_record,
+    )
+    monkeypatch.setattr(
+        conversation_store_service,
+        "update_dossier_participant_record",
+        fake_update_dossier_participant_record,
+    )
+    monkeypatch.setattr(conversation_store_service, "touch_dossier", fake_touch_dossier)
+
+    result = asyncio.run(
+        conversation_store_service.update_dossier_participant_aliases(
+            DummyDB(),
+            dossier,
+            {
+                "opposing_party": {
+                    "label": "用人单位",
+                    "role": "用人单位",
+                    "party_side": "opponent",
+                }
+            },
+        )
+    )
+
+    assert result is dossier
+    assert create_calls == []
+    assert update_calls == []
+    assert existing_participant.label == "A公司"
+    assert "用人单位" in (dossier.participant_aliases_json or "")
+
+
+def test_update_dossier_participant_aliases_keeps_self_anchor_and_does_not_replace_it_with_generic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossier = Dossier(
+        id=22,
+        user_id=3,
+        title="案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    self_participant = DossierParticipant(
+        id=89,
+        dossier_id=22,
+        user_id=3,
+        label="我",
+        role="劳动者",
+        party_side="claimant",
+        entity_type="person",
+        confirmed_by_user=True,
+    )
+    update_calls: list[dict[str, object]] = []
+
+    async def fake_list_dossier_participants(db, user_id: int, dossier_id: int):
+        return [self_participant]
+
+    async def fake_create_dossier_participant_record(db, **kwargs):
+        raise AssertionError("generic primary alias should not create participant")
+
+    async def fake_update_dossier_participant_record(db, participant, **kwargs):
+        update_calls.append(kwargs)
+        return participant
+
+    async def fake_touch_dossier(db, dossier=None, dossier_id=None):
+        return dossier
+
+    monkeypatch.setattr(
+        conversation_store_service,
+        "list_dossier_participants",
+        fake_list_dossier_participants,
+    )
+    monkeypatch.setattr(
+        conversation_store_service,
+        "create_dossier_participant_record",
+        fake_create_dossier_participant_record,
+    )
+    monkeypatch.setattr(
+        conversation_store_service,
+        "update_dossier_participant_record",
+        fake_update_dossier_participant_record,
+    )
+    monkeypatch.setattr(conversation_store_service, "touch_dossier", fake_touch_dossier)
+
+    asyncio.run(
+        conversation_store_service.update_dossier_participant_aliases(
+            DummyDB(),
+            dossier,
+            {
+                "primary_party": {
+                    "label": "当事人",
+                    "role": "劳动者",
+                    "party_side": "claimant",
+                }
+            },
+        )
+    )
+
+    assert update_calls == []
+    assert self_participant.label == "我"
+
+
+def test_build_dossier_participant_candidates_returns_generic_tasks_without_auto_merge() -> None:
+    existing_participant = DossierParticipant(
+        id=7,
+        dossier_id=5,
+        user_id=9,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        confirmed_by_user=True,
+    )
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "1", "label": "公司", "conversation_id": 11, "properties": {}},
+                    {"id": "2", "label": "用人单位", "conversation_id": 12, "properties": {}},
+                ]
+            }
+        },
+        participants=[existing_participant],
+        confirmed_mentions=[],
+        participant_aliases={},
+    )
+
+    company_candidate = next(candidate for candidate in candidates if candidate["raw_label"] == "公司")
+    assert company_candidate["label_kind"] == "generic"
+    assert company_candidate["existing_participant_id"] is None
+    assert company_candidate["recommended_participant_id"] is None
+    assert company_candidate["can_create_new"] is False
+    assert company_candidate["can_mark_non_entity"] is True
+    assert company_candidate["match_candidates"][0]["participant_id"] == 7
+
+
+def test_build_dossier_participant_candidates_returns_single_occurrence_specific_task() -> None:
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "1", "label": "A公司", "conversation_id": 11, "properties": {}},
+                    {"id": "2", "label": "王经理", "conversation_id": 11, "properties": {}},
+                ]
+            }
+        },
+        participants=[],
+        confirmed_mentions=[],
+        participant_aliases={},
+    )
+
+    company_candidate = next(candidate for candidate in candidates if candidate["raw_label"] == "A公司")
+    manager_candidate = next(candidate for candidate in candidates if candidate["raw_label"] == "王经理")
+    assert company_candidate["label_kind"] == "specific"
+    assert company_candidate["can_create_new"] is True
+    assert company_candidate["existing_participant_id"] is None
+    assert manager_candidate["label_kind"] == "specific"
+    assert manager_candidate["can_create_new"] is True
+
+
+def test_build_dossier_participant_candidates_does_not_use_side_type_unique_match_for_specific_labels() -> None:
+    existing_participant = DossierParticipant(
+        id=7,
+        dossier_id=5,
+        user_id=9,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        confirmed_by_user=True,
+    )
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "1", "label": "B公司", "conversation_id": 11, "properties": {}},
+                ]
+            }
+        },
+        participants=[existing_participant],
+        confirmed_mentions=[],
+        participant_aliases={},
+    )
+
+    company_candidate = next(candidate for candidate in candidates if candidate["raw_label"] == "B公司")
+    assert company_candidate["label_kind"] == "specific"
+    assert company_candidate["existing_participant_id"] is None
+    assert company_candidate["recommended_participant_id"] is None
+    assert company_candidate["match_candidates"] == []
+
+
+def test_build_dossier_participant_candidates_exact_label_match_sets_existing_participant_id() -> None:
+    existing_participant = DossierParticipant(
+        id=7,
+        dossier_id=5,
+        user_id=9,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        confirmed_by_user=True,
+    )
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "1", "label": "A公司", "conversation_id": 11, "properties": {}},
+                ]
+            }
+        },
+        participants=[existing_participant],
+        confirmed_mentions=[],
+        participant_aliases={},
+    )
+
+    company_candidate = candidates[0]
+    assert company_candidate["existing_participant_id"] == 7
+    assert company_candidate["recommended_participant_id"] == 7
+
+
+def test_resolve_dossier_participant_rejects_generic_create_new(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=18,
+        user_id=3,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_create_dossier_participant_record(db, **kwargs):
+        raise AssertionError("generic resolve create should be rejected before creation")
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+    monkeypatch.setattr(
+        dossiers_api,
+        "create_dossier_participant_record",
+        fake_create_dossier_participant_record,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            dossiers_api.resolve_dossier_participants(
+                dossier_id=18,
+                payload=dossiers_api.DossierParticipantResolveRequest(
+                    participant=dossiers_api.DossierParticipantCreateRequest(
+                        label="当事人",
+                        role="劳动者",
+                        party_side="claimant",
+                        entity_type="person",
+                    ),
+                    mentions=[
+                        dossiers_api.DossierParticipantResolveMentionRequest(
+                            conversation_id=77,
+                            raw_label="当事人",
+                            source="graph",
+                            confidence=None,
+                        )
+                    ],
+                ),
+                current_user=AuthenticatedUser(user_id=3, username="owner"),
+                db=DummyDB(),
+            )
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "Generic participant labels" in str(exc_info.value.detail)

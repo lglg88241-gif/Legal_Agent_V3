@@ -17,6 +17,7 @@ from app.services.conversation_store import (
     get_dossier_for_user,
     get_dossier_participant_for_user,
     hard_delete_dossier_record,
+    is_generic_participant_label,
     list_dossier_conversations,
     list_dossier_participant_mentions,
     list_dossier_participants,
@@ -338,6 +339,11 @@ async def resolve_dossier_participants(
         if participant is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
     elif payload.participant is not None:
+        if is_generic_participant_label(payload.participant.label):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Generic participant labels must be linked to an existing participant",
+            )
         try:
             participant = await create_dossier_participant_record(
                 db,

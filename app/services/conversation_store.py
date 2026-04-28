@@ -329,6 +329,64 @@ def _normalize_participant_description(description: str | None) -> str | None:
     return _normalize_optional_text(description)
 
 
+def _normalized_label_key(label: str | None) -> str:
+    return " ".join((label or "").strip().split()).lower()
+
+
+SELF_ANCHOR_PARTICIPANT_LABELS = {"我"}
+GENERIC_PARTICIPANT_LABELS = {
+    "当事人",
+    "双方",
+    "对方",
+    "公司",
+    "单位",
+    "用人单位",
+    "劳动者",
+    "员工",
+    "老板",
+    "领导",
+    "人事",
+    "hr",
+    "法院",
+    "仲裁委",
+}
+GENERIC_PARTICIPANT_HINTS: dict[str, dict[str, str]] = {
+    "当事人": {"role": "当事人", "party_side": "claimant", "entity_type": "person"},
+    "劳动者": {"role": "劳动者", "party_side": "claimant", "entity_type": "person"},
+    "员工": {"role": "员工", "party_side": "claimant", "entity_type": "person"},
+    "对方": {"role": "对方当事人", "party_side": "opponent", "entity_type": "unknown"},
+    "公司": {"role": "用人单位", "party_side": "opponent", "entity_type": "organization"},
+    "单位": {"role": "用人单位", "party_side": "opponent", "entity_type": "organization"},
+    "用人单位": {"role": "用人单位", "party_side": "opponent", "entity_type": "organization"},
+    "老板": {"role": "老板", "party_side": "opponent", "entity_type": "person"},
+    "领导": {"role": "领导", "party_side": "opponent", "entity_type": "person"},
+    "人事": {"role": "人事", "party_side": "opponent", "entity_type": "person"},
+    "hr": {"role": "HR", "party_side": "opponent", "entity_type": "person"},
+    "法院": {"role": "法院", "party_side": "neutral", "entity_type": "authority"},
+    "仲裁委": {"role": "仲裁委", "party_side": "neutral", "entity_type": "authority"},
+}
+ORGANIZATION_LABEL_TOKENS = ("公司", "单位", "集团", "医院", "学校", "银行", "厂")
+PERSON_ROLE_TOKENS: tuple[tuple[str, str], ...] = (
+    ("经理", "经理"),
+    ("总监", "总监"),
+    ("主任", "主任"),
+    ("律师", "律师"),
+)
+
+
+def is_self_anchor_participant_label(label: str | None) -> bool:
+    return _normalized_label_key(label) in SELF_ANCHOR_PARTICIPANT_LABELS
+
+
+def is_generic_participant_label(label: str | None) -> bool:
+    return _normalized_label_key(label) in GENERIC_PARTICIPANT_LABELS
+
+
+def is_specific_participant_label(label: str | None) -> bool:
+    normalized = _normalized_label_key(label)
+    return bool(normalized) and not is_generic_participant_label(normalized)
+
+
 async def create_conversation_record(
     db: AsyncSession,
     user_id: int,
@@ -994,6 +1052,8 @@ async def _sync_aliases_to_confirmed_participants(
         role = str(alias_value.get("role") or "").strip() or None
         if not label:
             continue
+        if is_generic_participant_label(label) and not is_self_anchor_participant_label(label):
+            continue
 
         default_party_side, default_entity_type = _seed_alias_participant_defaults(alias_key)
         target = next(
@@ -1259,58 +1319,323 @@ def _display_label(value: str | None, fallback: str) -> str:
     return cleaned or fallback
 
 
-def _select_existing_candidate_participant(
-    participants: list[DossierParticipant],
+def _infer_candidate_shape(
+    raw_label: str,
     *,
-    raw_labels: list[str],
-    party_side: str,
-    entity_type: str,
-) -> DossierParticipant | None:
-    normalized_raw_labels = {_normalized_label_key(label) for label in raw_labels if label}
-    for participant in participants:
-        if _normalized_label_key(participant.label) in normalized_raw_labels:
-            return participant
+    participant_aliases: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    normalized_label = _normalized_label_key(raw_label)
+    normalized_aliases = _normalize_participant_aliases(
+        participant_aliases if isinstance(participant_aliases, dict) else None
+    )
+    primary_role = str(normalized_aliases.get("primary_party", {}).get("role") or "").strip()
+    opposing_role = str(normalized_aliases.get("opposing_party", {}).get("role") or "").strip()
 
-    side_matches = [
+    if is_self_anchor_participant_label(raw_label):
+        return {
+            "label_kind": "specific",
+            "suggested_label": raw_label,
+            "role": primary_role or "本人",
+            "party_side": "claimant",
+            "entity_type": "person",
+        }
+
+    generic_hint = GENERIC_PARTICIPANT_HINTS.get(normalized_label)
+    if generic_hint is not None:
+        role = str(generic_hint.get("role") or "").strip()
+        if normalized_label in {"当事人", "劳动者", "员工"} and primary_role:
+            role = primary_role
+        elif normalized_label in {"公司", "单位", "用人单位"} and opposing_role:
+            role = opposing_role
+        return {
+            "label_kind": "generic",
+            "suggested_label": raw_label,
+            "role": role,
+            "party_side": str(generic_hint.get("party_side") or "unknown"),
+            "entity_type": str(generic_hint.get("entity_type") or "unknown"),
+        }
+
+    if any(token in raw_label for token in ORGANIZATION_LABEL_TOKENS):
+        return {
+            "label_kind": "specific",
+            "suggested_label": raw_label,
+            "role": opposing_role or "",
+            "party_side": "opponent",
+            "entity_type": "organization",
+        }
+
+    for token, role in PERSON_ROLE_TOKENS:
+        if token in raw_label:
+            return {
+                "label_kind": "specific",
+                "suggested_label": raw_label,
+                "role": role,
+                "party_side": "opponent",
+                "entity_type": "person",
+            }
+
+    if "法院" in raw_label:
+        return {
+            "label_kind": "specific",
+            "suggested_label": raw_label,
+            "role": "法院",
+            "party_side": "neutral",
+            "entity_type": "authority",
+        }
+    if "仲裁" in raw_label:
+        return {
+            "label_kind": "specific",
+            "suggested_label": raw_label,
+            "role": "仲裁委",
+            "party_side": "neutral",
+            "entity_type": "authority",
+        }
+
+    return {
+        "label_kind": "specific",
+        "suggested_label": raw_label,
+        "role": "",
+        "party_side": "unknown",
+        "entity_type": "unknown",
+    }
+
+
+def _find_exact_label_matches(
+    participants: list[DossierParticipant],
+    raw_label: str,
+) -> list[DossierParticipant]:
+    normalized_label = _normalized_label_key(raw_label)
+    return [
         participant
         for participant in participants
-        if participant.party_side == party_side and participant.entity_type == entity_type
+        if _normalized_label_key(participant.label) == normalized_label
     ]
-    if len(side_matches) == 1:
-        return side_matches[0]
-    return None
+
+
+def _select_exact_candidate_participant(
+    participants: list[DossierParticipant],
+    *,
+    raw_label: str,
+    participant_aliases: dict[str, Any] | None = None,
+) -> tuple[DossierParticipant | None, str | None]:
+    exact_label_matches = _find_exact_label_matches(participants, raw_label)
+    if len(exact_label_matches) == 1:
+        return exact_label_matches[0], "exact_label"
+    if exact_label_matches:
+        return None, None
+
+    normalized_aliases = _normalize_participant_aliases(
+        participant_aliases if isinstance(participant_aliases, dict) else None
+    )
+    normalized_label = _normalized_label_key(raw_label)
+    for alias_key, alias_value in normalized_aliases.items():
+        alias_label = str(alias_value.get("label") or "").strip()
+        if not alias_label or _normalized_label_key(alias_label) != normalized_label:
+            continue
+        if is_generic_participant_label(alias_label) and not is_self_anchor_participant_label(alias_label):
+            return None, None
+        default_party_side, _default_entity_type = _seed_alias_participant_defaults(alias_key)
+        same_side_matches = [
+            participant
+            for participant in participants
+            if participant.party_side == default_party_side
+        ]
+        if len(same_side_matches) == 1:
+            return same_side_matches[0], "exact_alias"
+    return None, None
+
+
+def _build_match_candidate_entry(
+    participant: DossierParticipant,
+    *,
+    match_type: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "participant_id": participant.id,
+        "participant_label": participant.label,
+        "participant_role": participant.role or "",
+        "participant_party_side": normalize_party_side(getattr(participant, "party_side", "unknown")),
+        "participant_entity_type": normalize_entity_type(
+            getattr(participant, "entity_type", "unknown")
+        ),
+        "match_type": match_type,
+        "reason": reason,
+    }
+
+
+def _dedupe_match_candidates(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for item in items:
+        participant_id = int(item.get("participant_id") or 0)
+        if participant_id <= 0 or participant_id in seen_ids:
+            continue
+        seen_ids.add(participant_id)
+        deduped.append(item)
+    return deduped
+
+
+def _build_generic_match_candidates(
+    participants: list[DossierParticipant],
+    *,
+    raw_label: str,
+    party_side: str,
+    entity_type: str,
+) -> list[dict[str, Any]]:
+    normalized_label = _normalized_label_key(raw_label)
+    if normalized_label == "双方":
+        matched_participants = list(participants)
+    elif normalized_label in {"当事人", "劳动者", "员工"}:
+        matched_participants = [
+            participant
+            for participant in participants
+            if participant.party_side == "claimant"
+        ]
+    elif normalized_label == "对方":
+        matched_participants = [
+            participant
+            for participant in participants
+            if participant.party_side == "opponent"
+        ]
+    elif normalized_label in {"公司", "单位", "用人单位"}:
+        matched_participants = [
+            participant
+            for participant in participants
+            if participant.party_side == "opponent"
+            and participant.entity_type == "organization"
+        ]
+    elif normalized_label in {"老板", "领导", "人事", "hr"}:
+        matched_participants = [
+            participant
+            for participant in participants
+            if participant.party_side == "opponent"
+            and participant.entity_type == "person"
+        ]
+    elif normalized_label in {"法院", "仲裁委"}:
+        matched_participants = [
+            participant
+            for participant in participants
+            if participant.entity_type == "authority"
+        ]
+    else:
+        matched_participants = [
+            participant
+            for participant in participants
+            if (party_side == "unknown" or participant.party_side == party_side)
+            and (entity_type == "unknown" or participant.entity_type == entity_type)
+        ]
+
+    return _dedupe_match_candidates(
+        [
+            _build_match_candidate_entry(
+                participant,
+                match_type="generic_hint",
+                reason="这个称呼是泛称，需要用户确认它是否指向该已确认主体。",
+            )
+            for participant in matched_participants
+        ]
+    )
+
+
+def _build_candidate_reason(
+    *,
+    raw_label: str,
+    label_kind: str,
+    exact_match_type: str | None,
+    has_match_candidates: bool,
+) -> str:
+    if exact_match_type == "exact_label":
+        return f"“{raw_label}”与已有主体显示名精确匹配。"
+    if exact_match_type == "exact_alias":
+        return f"“{raw_label}”与案卷内已确认别名精确匹配。"
+    if label_kind == "generic":
+        if has_match_candidates:
+            return f"“{raw_label}”是泛称，系统不能直接确认，需要用户判断它指向哪个已有主体。"
+        return f"“{raw_label}”是泛称，系统不能直接创建为已确认主体。"
+    return f"“{raw_label}”是新的具体称呼，需要确认它是否为独立主体或已有主体别名。"
 
 
 def _build_candidate_payload(
     *,
     candidate_key: str,
-    raw_labels: list[str],
+    raw_label: str,
     mentions: list[dict[str, Any]],
     participants: list[DossierParticipant],
-    suggested_label: str,
-    role: str | None,
-    party_side: str,
-    entity_type: str,
+    participant_aliases: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not mentions:
         return None
 
-    existing_participant = _select_existing_candidate_participant(
-        participants,
-        raw_labels=raw_labels,
-        party_side=party_side,
-        entity_type=entity_type,
+    candidate_shape = _infer_candidate_shape(
+        raw_label,
+        participant_aliases=participant_aliases,
     )
+    exact_label_matches = _find_exact_label_matches(participants, raw_label)
+    existing_participant, exact_match_type = _select_exact_candidate_participant(
+        participants,
+        raw_label=raw_label,
+        participant_aliases=participant_aliases,
+    )
+    if existing_participant is not None:
+        match_candidates = [
+            _build_match_candidate_entry(
+                existing_participant,
+                match_type=str(exact_match_type or "exact_label"),
+                reason=(
+                    "该称呼与已确认主体显示名精确匹配。"
+                    if exact_match_type != "exact_alias"
+                    else "该称呼与案卷内已确认别名精确匹配。"
+                ),
+            )
+        ]
+    elif exact_label_matches:
+        match_candidates = [
+            _build_match_candidate_entry(
+                participant,
+                match_type="duplicate_exact_label",
+                reason="存在多个同名已确认主体，需要用户进一步确认。",
+            )
+            for participant in exact_label_matches
+        ]
+    elif candidate_shape["label_kind"] == "generic":
+        match_candidates = _build_generic_match_candidates(
+            participants,
+            raw_label=raw_label,
+            party_side=candidate_shape["party_side"],
+            entity_type=candidate_shape["entity_type"],
+        )
+    else:
+        match_candidates = []
+
+    raw_labels = list(dict.fromkeys(item["raw_label"] for item in mentions if item.get("raw_label")))
     return {
         "candidate_key": candidate_key,
-        "suggested_label": suggested_label,
-        "suggested_role": role or "",
-        "party_side": party_side,
-        "entity_type": entity_type,
+        "task_key": candidate_key,
+        "raw_label": raw_label,
         "raw_labels": raw_labels,
+        "suggested_label": candidate_shape["suggested_label"],
+        "suggested_role": candidate_shape["role"],
+        "label_kind": candidate_shape["label_kind"],
+        "party_side": candidate_shape["party_side"],
+        "entity_type": candidate_shape["entity_type"],
+        "reason": _build_candidate_reason(
+            raw_label=raw_label,
+            label_kind=candidate_shape["label_kind"],
+            exact_match_type=exact_match_type,
+            has_match_candidates=bool(match_candidates),
+        ),
         "mentions": mentions,
+        "match_candidates": match_candidates,
         "existing_participant_id": existing_participant.id if existing_participant is not None else None,
         "existing_participant_label": existing_participant.label if existing_participant is not None else "",
+        "recommended_participant_id": existing_participant.id if existing_participant is not None else None,
+        "recommended_participant_label": existing_participant.label if existing_participant is not None else "",
+        "can_create_new": candidate_shape["label_kind"] == "specific",
+        "can_link_existing": bool(participants),
+        "can_mark_non_entity": candidate_shape["label_kind"] == "generic",
     }
 
 
@@ -1372,8 +1697,35 @@ def build_dossier_participant_candidates(
     normalized_aliases = _normalize_participant_aliases(
         participant_aliases if isinstance(participant_aliases, dict) else None
     )
-    if normalized_aliases:
-        participants = list(participants)
+
+    task_candidates: list[dict[str, Any]] = []
+    task_mentions_by_label: dict[str, list[dict[str, Any]]] = {}
+    for mention in unresolved_mentions:
+        task_mentions_by_label.setdefault(_normalized_label_key(mention["raw_label"]), []).append(mention)
+
+    for normalized_label, mentions in task_mentions_by_label.items():
+        if not normalized_label or not mentions:
+            continue
+        raw_label = str(mentions[0].get("raw_label") or "").strip()
+        if not raw_label:
+            continue
+        candidate = _build_candidate_payload(
+            candidate_key=f"label:{normalized_label}",
+            raw_label=raw_label,
+            mentions=mentions,
+            participants=participants,
+            participant_aliases=normalized_aliases,
+        )
+        if candidate is not None:
+            task_candidates.append(candidate)
+
+    task_candidates.sort(
+        key=lambda item: (
+            0 if str(item.get("label_kind") or "") == "specific" else 1,
+            str(item.get("raw_label") or ""),
+        )
+    )
+    return task_candidates
 
     mentions_by_label: dict[str, list[dict[str, Any]]] = {}
     for mention in unresolved_mentions:

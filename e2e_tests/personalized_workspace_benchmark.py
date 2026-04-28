@@ -122,7 +122,7 @@ WORKSPACE_CASE_PLANS = [
     WorkspaceCasePlan("E", "E_dossier_created_conversation", "E dossier-bound conversation defaults to tracked", 0, 4),
     WorkspaceCasePlan("F", "F_memory_query", "F dossier memory query answers from dossier context", 1, 3),
     WorkspaceCasePlan("G", "G_explicit_law_query", "G explicit law query in dossier conversation still behaves like legal QA", 1, 5),
-    WorkspaceCasePlan("H", "H_participant_resolution", "H participant candidates and confirmation API flow", 1, 7),
+    WorkspaceCasePlan("H", "H_participant_resolution", "H participant candidates and confirmation API flow", 1, 8),
     WorkspaceCasePlan("I", "I_archive_semantics", "I archive dossier keeps historical data accessible", 0, 4),
     WorkspaceCasePlan("J", "J_hard_delete", "J hard delete dossier removes registry data and detaches conversations", 0, 6),
 ]
@@ -1081,16 +1081,49 @@ def ensure_participant_resolution(
         (
             item
             for item in candidates
-            if isinstance(item, dict) and item.get("entity_type") == "organization"
+            if isinstance(item, dict)
+            and item.get("label_kind") == "specific"
+            and item.get("entity_type") == "organization"
         ),
         candidates[0] if candidates else None,
     )
+    if isinstance(candidate, dict) and candidate.get("label_kind") != "specific":
+        candidate = next(
+            (
+                item
+                for item in candidates
+                if isinstance(item, dict) and item.get("label_kind") == "specific"
+            ),
+            candidate,
+        )
+    generic_candidate = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, dict) and item.get("label_kind") == "generic"
+        ),
+        None,
+    )
     resolve_result: dict[str, Any] | None = None
     if isinstance(candidate, dict):
-        resolve_result = resolve_dossier_participant(
-            context.headers,
-            dossier_setup["dossier"]["id"],
-            {
+        recommended_participant_id = (
+            candidate.get("recommended_participant_id")
+            or candidate.get("existing_participant_id")
+        )
+        if recommended_participant_id:
+            resolve_result = resolve_dossier_participant(
+                context.headers,
+                dossier_setup["dossier"]["id"],
+                {
+                    "participant_id": int(recommended_participant_id),
+                    "mentions": candidate.get("mentions") or [],
+                },
+            )
+        else:
+            resolve_result = resolve_dossier_participant(
+                context.headers,
+                dossier_setup["dossier"]["id"],
+                {
                 "participant": {
                     "label": str(candidate.get("suggested_label") or "A公司"),
                     "role": str(candidate.get("suggested_role") or "用人单位") or None,
@@ -1099,8 +1132,8 @@ def ensure_participant_resolution(
                     "description": "workspace benchmark confirmed participant",
                 },
                 "mentions": candidate.get("mentions") or [],
-            },
-        )
+                },
+            )
     participants_payload = get_dossier_participants(
         context.headers,
         dossier_setup["dossier"]["id"],
@@ -1131,6 +1164,7 @@ def ensure_participant_resolution(
         "fact_result": fact_result,
         "candidates": candidates,
         "candidate": candidate,
+        "generic_candidate": generic_candidate,
         "resolve_result": resolve_result,
         "participants_payload": participants_payload,
         "dossier_graph": dossier_graph,
@@ -1486,6 +1520,15 @@ def run_case_h(
             turn_total=plan.turns,
         ),
     )
+    generic_candidate = participant_resolution.get("generic_candidate")
+    generic_candidate_ok = (
+        not isinstance(generic_candidate, dict)
+        or (
+            generic_candidate.get("existing_participant_id") is None
+            and generic_candidate.get("recommended_participant_id") is None
+            and generic_candidate.get("can_create_new") is False
+        )
+    )
     return BenchmarkCase(
         code="H",
         name="participant candidates and confirmation API flow",
@@ -1500,6 +1543,11 @@ def run_case_h(
             CheckResult("resolve endpoint succeeded", isinstance(participant_resolution["resolve_result"], dict) and participant_resolution["resolve_result"].get("status") == "success", json.dumps(participant_resolution["resolve_result"] or {}, ensure_ascii=False)),
             CheckResult("confirmed participant is persisted", len(participant_resolution["participants"]) >= 1, f"participants={len(participant_resolution['participants'])}"),
             CheckResult("participant mentions are persisted", len(participant_resolution["mentions"]) >= 1, f"mentions={len(participant_resolution['mentions'])}"),
+            CheckResult(
+                "generic candidate is not auto merged",
+                generic_candidate_ok,
+                json.dumps(generic_candidate or {}, ensure_ascii=False),
+            ),
             CheckResult(
                 "dossier graph exposes participant mappings",
                 len(participant_resolution["dossier_graph"].get("participant_mappings", []) or []) >= 1,
