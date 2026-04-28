@@ -494,16 +494,7 @@
                 刷新实体连接
               </el-button>
             </div>
-            <div v-if="dossierCoordinationGraphLoading" class="dossier-list-status">
-              正在加载案卷实体连接...
-            </div>
-            <div
-              v-else-if="dossierCoordinationGraphState.error"
-              class="dossier-graph-warning dossier-graph-warning-soft"
-            >
-              {{ dossierCoordinationGraphState.error }}
-            </div>
-            <div v-else class="dossier-coordination-body">
+            <div class="dossier-coordination-body">
               <div class="dossier-coordination-summary">
                 <span class="dossier-coordination-chip">
                   已连接 {{ selectedDossierCoordinationStats.connectedEntities }}
@@ -519,11 +510,34 @@
                 </span>
               </div>
 
-              <div v-if="selectedDossierCoordinationIsEmpty" class="dossier-coordination-empty">
-                当前案卷还没有形成可连接的主体线索。绑定更多会话或补充案情后，系统会自动检查。
+              <div
+                v-if="selectedDossierCoordinationHasSingleSourceHint"
+                class="dossier-coordination-hint"
+              >
+                当前仅有一个来源会话，跨会话连接将在绑定更多会话后出现。
               </div>
 
-              <template v-else>
+              <div class="dossier-coordination-graph-shell">
+                <KnowledgeGraphPanel
+                  :graph="selectedDossierCoordinationGraphPreview"
+                  @node-action="handleOpenCoordinationGraphNodeConversation"
+                />
+              </div>
+
+              <el-collapse
+                v-if="selectedDossierCoordinationHasAuxiliaryPanels"
+                v-model="dossierCoordinationSections"
+                class="dossier-coordination-collapse"
+              >
+                <el-collapse-item name="lists">
+                  <template #title>
+                    <div class="dossier-collapse-title">
+                      <strong>辅助清单与待处理事项</strong>
+                      <span>图谱作为主视图，下面保留实体卡片和确认任务，便于逐项处理。</span>
+                    </div>
+                  </template>
+
+                  <div class="dossier-coordination-list-body">
                 <div
                   v-if="selectedDossierCoordinationConfirmedEntities.length"
                   class="dossier-coordination-group"
@@ -541,7 +555,7 @@
                           <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
                         </div>
                         <div class="dossier-coordination-entity-meta">
-                          <span>{{ `最佳会话：${coordinationEntityBestConversationLabel(entity)}` }}</span>
+                          <span>{{ `详细对话：${coordinationEntityDetailConversationLabel(entity)}` }}</span>
                           <span v-if="entity.best_conversation_reason">{{ entity.best_conversation_reason }}</span>
                         </div>
                       </div>
@@ -550,10 +564,10 @@
                           size="small"
                           type="primary"
                           text
-                          :disabled="!coordinationEntityHasBestConversation(entity)"
+                          :disabled="!coordinationEntityHasDetailConversation(entity)"
                           @click="handleOpenCoordinationEntityConversation(entity)"
                         >
-                          查看最佳会话
+                          查看详细对话
                         </el-button>
                       </div>
                     </div>
@@ -735,7 +749,7 @@
                           <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
                         </div>
                         <div class="dossier-coordination-entity-meta">
-                          <span>{{ `来源会话：${coordinationEntityBestConversationLabel(entity)}` }}</span>
+                          <span>{{ `详细对话：${coordinationEntityDetailConversationLabel(entity)}` }}</span>
                           <span>该会话暂未与其他会话形成确认连接</span>
                         </div>
                       </div>
@@ -744,10 +758,10 @@
                           size="small"
                           type="primary"
                           text
-                          :disabled="!coordinationEntityHasBestConversation(entity)"
+                          :disabled="!coordinationEntityHasDetailConversation(entity)"
                           @click="handleOpenCoordinationEntityConversation(entity)"
                         >
-                          查看来源会话
+                          查看详细对话
                         </el-button>
                       </div>
                     </div>
@@ -847,7 +861,9 @@
                   </div>
                   <div v-else class="dossier-coordination-empty">暂无待处理命名任务</div>
                 </div>
-              </template>
+                  </div>
+                </el-collapse-item>
+              </el-collapse>
             </div>
           </div>
 
@@ -1783,6 +1799,7 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
+import KnowledgeGraphPanel from './components/KnowledgeGraphPanel.vue'
 import SessionList from './components/SessionList.vue'
 import {
   archiveDossier,
@@ -1853,6 +1870,8 @@ const dossierSaving = ref(false)
 const dossierBindingId = ref(null)
 const DOSSIER_GRAPH_PREVIEW_NODE_LIMIT = 12
 const DOSSIER_GRAPH_PREVIEW_EDGE_LIMIT = 20
+const DOSSIER_COORDINATION_GRAPH_EDGE_LIMIT = 28
+const DOSSIER_COORDINATION_GRAPH_EXTRA_NODE_LIMIT = 10
 const selectedDossierId = ref(null)
 const selectedDossierDetail = ref(null)
 const dossierDetailLoading = ref(false)
@@ -1869,6 +1888,7 @@ const dossierSummaryGenerating = ref(false)
 const dossierGraphLoading = ref(false)
 const dossierGraphLoaded = ref(false)
 const dossierCoordinationGraphLoading = ref(false)
+const dossierCoordinationSections = ref([])
 const dossierIntelligenceLoading = ref(false)
 const dossierPartyNamingSubmittingKey = ref('')
 const dossierCoordinationNamingRef = ref(null)
@@ -2219,6 +2239,24 @@ const selectedDossierCoordinationIsolatedAnchorEntities = computed(() =>
 const selectedDossierCoordinationIsEmpty = computed(
   () => selectedDossierCoordinationEntities.value.length === 0
 )
+const selectedDossierCoordinationHasSingleSourceHint = computed(
+  () =>
+    !dossierCoordinationGraphLoading.value &&
+    !dossierCoordinationGraphState.error &&
+    selectedDossierCoordinationGraphConversationCount.value === 1 &&
+    selectedDossierCoordinationGraphPreview.value.nodes.length > 0
+)
+const selectedDossierCoordinationHasAuxiliaryPanels = computed(
+  () =>
+    selectedDossierCoordinationConfirmedEntities.value.length > 0 ||
+    selectedDossierCoordinationPendingIdentityEntities.value.length > 0 ||
+    selectedDossierCoordinationPendingNamingEntities.value.length > 0 ||
+    selectedDossierCoordinationIsolatedAnchorEntities.value.length > 0 ||
+    selectedDossierSelfAnchorIdentityTasks.value.length > 0 ||
+    selectedDossierCoordinationPartyNamingTasks.value.length > 0 ||
+    dossierIntelligenceLoading.value ||
+    Boolean(dossierIntelligenceState.error)
+)
 const selectedDossierCoordinationIdentityTaskLookup = computed(() => {
   const lookup = {}
   for (const task of selectedDossierCoordinationTasks.value) {
@@ -2236,6 +2274,28 @@ const selectedDossierCoordinationPartyNamingTasks = computed(() =>
   selectedDossierIntelligenceConfirmationTasks.value.filter(
     (task) => String(task?.task_type || '').trim() === 'party_naming'
   )
+)
+const selectedDossierCoordinationGraphConversationCount = computed(() => {
+  const statsCount = Number(selectedDossierCoordinationStats.value.boundConversations || 0)
+  if (statsCount > 0) return statsCount
+  const conversationIds = new Set()
+  for (const entity of selectedDossierCoordinationEntities.value) {
+    for (const conversationId of normalizeGraphConversationIds(entity?.source_conversation_ids)) {
+      conversationIds.add(conversationId)
+    }
+  }
+  if (conversationIds.size) return conversationIds.size
+  return Number(selectedDossierConversationCount.value || 0)
+})
+const selectedDossierCoordinationGraphPreview = computed(() =>
+  buildDossierCoordinationGraphPreview({
+    entities: selectedDossierCoordinationEntities.value,
+    edges: Array.isArray(dossierCoordinationGraphState.edges) ? dossierCoordinationGraphState.edges : [],
+    displayNodes: Array.isArray(dossierGraphState.nodes) ? dossierGraphState.nodes : [],
+    displayEdges: Array.isArray(dossierGraphState.edges) ? dossierGraphState.edges : [],
+    loading: dossierCoordinationGraphLoading.value,
+    error: dossierCoordinationGraphState.error,
+  })
 )
 const selectedDossierSelfAnchorIdentityTasks = computed(() =>
   selectedDossierIntelligenceConfirmationTasks.value.filter(
@@ -2353,6 +2413,7 @@ watch(dossierDrawerVisible, (visible) => {
   if (!visible) {
     dossierParticipantCandidateDialogVisible.value = false
     dossierAdvancedSections.value = []
+    dossierCoordinationSections.value = []
     resetParticipantCandidateCreateDraft()
   }
 })
@@ -3635,8 +3696,35 @@ function coordinationEntitySourceLabelText(entity) {
   return labels.length ? labels.join(' / ') : '暂无来源称呼'
 }
 
-function coordinationEntityBestConversationLabel(entity) {
-  const conversationId = Number(entity?.best_conversation_id || 0)
+function coordinationEntityStatusLabel(status) {
+  switch (String(status || '').trim()) {
+    case 'confirmed':
+      return '已连接主体'
+    case 'pending_identity':
+      return '待确认连接'
+    case 'pending_naming':
+      return '待命名主体'
+    case 'isolated_anchor':
+      return '未连接主体锚点'
+    default:
+      return '其他节点'
+  }
+}
+
+function coordinationEntityRawNodeIds(entity) {
+  return Array.isArray(entity?.raw_node_ids)
+    ? entity.raw_node_ids.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+}
+
+function coordinationEntityDetailConversationId(entity) {
+  const bestConversationId = Number(entity?.best_conversation_id || 0)
+  if (bestConversationId > 0) return bestConversationId
+  return normalizeGraphConversationIds(entity?.source_conversation_ids)[0] || 0
+}
+
+function coordinationEntityDetailConversationLabel(entity) {
+  const conversationId = coordinationEntityDetailConversationId(entity)
   return conversationId > 0 ? formatGraphConversationLabel(conversationId) : '暂无可跳转会话'
 }
 
@@ -3645,8 +3733,8 @@ function coordinationEntityIdentityReason(entity) {
   return String(task?.reason || '').trim()
 }
 
-function coordinationEntityHasBestConversation(entity) {
-  return Number(entity?.best_conversation_id || 0) > 0
+function coordinationEntityHasDetailConversation(entity) {
+  return coordinationEntityDetailConversationId(entity) > 0
 }
 
 function selfAnchorIdentityTaskPrompt(task) {
@@ -3661,7 +3749,16 @@ function selfAnchorIdentityTaskPrompt(task) {
 }
 
 async function handleOpenCoordinationEntityConversation(entity) {
-  const conversationId = Number(entity?.best_conversation_id || 0)
+  const conversationId = coordinationEntityDetailConversationId(entity)
+  if (conversationId <= 0) {
+    ElMessage.info('暂无可跳转会话')
+    return
+  }
+  await switchConversation(conversationId)
+}
+
+async function handleOpenCoordinationGraphNodeConversation(node) {
+  const conversationId = Number(node?.actionConversationId || 0)
   if (conversationId <= 0) {
     ElMessage.info('暂无可跳转会话')
     return
@@ -3694,6 +3791,308 @@ async function handleOpenCoordinationNaming() {
     return
   }
   ElMessage.info('请在下方命名确认区处理')
+}
+
+function graphNodeRawNodeIds(node) {
+  if (!node || typeof node !== 'object') return []
+  const rawNodeIds = [
+    ...(Array.isArray(node.raw_node_ids) ? node.raw_node_ids : []),
+    node.properties?.raw_node_id,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+
+  const nodeId = String(node.id || '').trim()
+  if (nodeId.toLowerCase().startsWith('raw:')) {
+    rawNodeIds.push(nodeId)
+  }
+
+  return rawNodeIds.filter((value, index) => rawNodeIds.indexOf(value) === index)
+}
+
+function isConversationGraphNode(node) {
+  const nodeId = String(node?.id || '').trim().toLowerCase()
+  const nodeType = String(node?.entity_type || node?.type || node?.graph_node_type || '').trim().toLowerCase()
+  return nodeId.startsWith('conversation:') || nodeType === 'conversation'
+}
+
+function coordinationSupplementCategory(node) {
+  const nodeType = String(node?.entity_type || node?.type || node?.graph_node_type || '').trim().toLowerCase()
+  switch (nodeType) {
+    case 'event':
+    case 'fact':
+      return { category: 'event', label: nodeType === 'fact' ? '事实节点' : '事件节点' }
+    case 'evidence':
+      return { category: 'evidence', label: '证据节点' }
+    case 'document':
+      return { category: 'document', label: '文书节点' }
+    case 'amount':
+    case 'money':
+      return { category: 'amount', label: '金额节点' }
+    case 'time':
+    case 'date':
+      return { category: 'time', label: '时间节点' }
+    default:
+      return { category: 'other', label: formatGraphNodeType(nodeType) }
+  }
+}
+
+function coordinationSupplementStatusLabel(node) {
+  const { label } = coordinationSupplementCategory(node)
+  return `关联${label}`
+}
+
+function buildCoordinationEntityGraphNode(entity) {
+  const sourceConversationIds = normalizeGraphConversationIds(entity?.source_conversation_ids)
+  const sourceLabels = coordinationEntitySourceLabels(entity)
+  const rawNodeIds = coordinationEntityRawNodeIds(entity)
+  const participantId = Number(entity?.participant_id || 0)
+  const detailConversationId = coordinationEntityDetailConversationId(entity)
+  const status = String(entity?.status || '').trim()
+  const reason =
+    coordinationEntityIdentityReason(entity) ||
+    String(entity?.best_conversation_reason || '').trim() ||
+    (status === 'isolated_anchor' ? '该会话暂未与其他会话形成确认连接' : '')
+
+  return {
+    id: String(entity?.id || '').trim(),
+    label: String(entity?.label || '').trim() || sourceLabels[0] || '未命名主体',
+    category: status || 'other',
+    categoryLabel: coordinationEntityStatusLabel(status),
+    labels: sourceLabels,
+    properties: {
+      entity_type: entity?.entity_type,
+      participant_id: participantId || undefined,
+      best_conversation_id: detailConversationId || undefined,
+    },
+    detailRows: [
+      { key: '类型', value: formatGraphNodeType(entity?.entity_type) },
+      { key: '状态', value: coordinationEntityStatusLabel(status) },
+      {
+        key: '来源会话',
+        value: sourceConversationIds.length
+          ? formatGraphConversationListLabel(sourceConversationIds)
+          : '会话未标注',
+      },
+      ...(sourceLabels.length ? [{ key: '原始标签', value: sourceLabels.join(' / ') }] : []),
+      ...(rawNodeIds.length ? [{ key: 'raw_node_ids', value: rawNodeIds.join(' / ') }] : []),
+      ...(participantId > 0 ? [{ key: 'participant_id', value: String(participantId) }] : []),
+      ...(detailConversationId > 0
+        ? [{ key: '详细对话', value: formatGraphConversationLabel(detailConversationId) }]
+        : []),
+      ...(reason ? [{ key: '说明', value: reason }] : []),
+    ],
+    actionLabel: detailConversationId > 0 ? '查看详细对话' : '',
+    actionDisabled: detailConversationId <= 0,
+    actionConversationId: detailConversationId,
+  }
+}
+
+function buildCoordinationSupplementGraphNode(node) {
+  const sourceConversationIds = graphNodeConversationIds(node)
+  const rawLabels = graphNodeRawLabels(node)
+  const rawNodeIds = graphNodeRawNodeIds(node)
+  const participantId = Number(node?.participant_id || node?.properties?.participant_id || 0)
+  const detailConversationId = sourceConversationIds[0] || 0
+  const category = coordinationSupplementCategory(node)
+
+  return {
+    id: `display:${String(node?.id || '').trim()}`,
+    label: graphNodePrimaryLabel(node),
+    category: category.category,
+    categoryLabel: category.label,
+    labels: rawLabels,
+    properties: node?.properties && typeof node.properties === 'object' ? node.properties : {},
+    detailRows: [
+      { key: '类型', value: formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type) },
+      { key: '状态', value: coordinationSupplementStatusLabel(node) },
+      {
+        key: '来源会话',
+        value: sourceConversationIds.length
+          ? formatGraphConversationListLabel(sourceConversationIds)
+          : '会话未标注',
+      },
+      ...(rawLabels.length ? [{ key: '原始标签', value: rawLabels.join(' / ') }] : []),
+      ...(rawNodeIds.length ? [{ key: 'raw_node_ids', value: rawNodeIds.join(' / ') }] : []),
+      ...(participantId > 0 ? [{ key: 'participant_id', value: String(participantId) }] : []),
+      ...(detailConversationId > 0
+        ? [{ key: '详细对话', value: formatGraphConversationLabel(detailConversationId) }]
+        : []),
+    ],
+    actionLabel: detailConversationId > 0 ? '查看详细对话' : '',
+    actionDisabled: detailConversationId <= 0,
+    actionConversationId: detailConversationId,
+  }
+}
+
+function matchCoordinationEntityIdForDisplayNode(node, participantLookup, rawNodeLookup) {
+  if (!node || typeof node !== 'object' || isConversationGraphNode(node)) return ''
+  const participantId = Number(node?.participant_id || node?.properties?.participant_id || 0)
+  if (participantId > 0 && participantLookup.has(participantId)) {
+    return participantLookup.get(participantId)
+  }
+  for (const rawNodeId of graphNodeRawNodeIds(node)) {
+    if (rawNodeLookup.has(rawNodeId)) {
+      return rawNodeLookup.get(rawNodeId)
+    }
+  }
+  return ''
+}
+
+function buildCoordinationGraphLegendItems(nodes) {
+  const baseItems = [
+    { category: 'confirmed', label: '已连接主体', color: '#2563eb' },
+    { category: 'pending_identity', label: '待确认主体', color: '#f59e0b' },
+    { category: 'pending_naming', label: '待命名主体', color: '#7c3aed' },
+    { category: 'isolated_anchor', label: '未连接主体锚点', color: '#64748b' },
+    { category: 'event', label: '事件节点', color: '#dc2626' },
+    { category: 'evidence', label: '证据节点', color: '#16a34a' },
+    { category: 'document', label: '文书节点', color: '#92400e' },
+    { category: 'amount', label: '金额节点', color: '#4338ca' },
+    { category: 'time', label: '时间节点', color: '#0f766e' },
+    { category: 'other', label: '其他节点', color: '#475569' },
+  ]
+  const usedCategories = new Set(
+    nodes.map((node) => String(node?.category || '').trim()).filter(Boolean)
+  )
+  return baseItems.filter((item) => usedCategories.has(item.category))
+}
+
+function buildCoordinationDisplayEdge(edge, sourceId, targetId, sourceNode, targetNode) {
+  const edgeConversationIds = [
+    ...normalizeGraphConversationIds(edge?.conversation_ids),
+    ...normalizeGraphConversationIds(edge?.source_conversation_ids),
+    ...normalizeGraphConversationIds(edge?.target_conversation_ids),
+    ...normalizeGraphConversationIds(edge?.properties?.conversation_id),
+    ...graphNodeConversationIds(sourceNode),
+    ...graphNodeConversationIds(targetNode),
+  ].filter((value, index, array) => array.indexOf(value) === index)
+
+  return {
+    id: `display:${String(edge?.id || `${sourceId}-${targetId}-${edge?.label || edge?.type || 'relation'}`)}`,
+    source: sourceId,
+    target: targetId,
+    label: String(edge?.label || edge?.type || '关联').trim() || '关联',
+    properties: edge?.properties && typeof edge.properties === 'object' ? edge.properties : {},
+    conversationIds: edgeConversationIds,
+  }
+}
+
+function buildDossierCoordinationGraphPreview(payload = {}) {
+  const entities = Array.isArray(payload.entities) ? payload.entities : []
+  const coordinationEdges = Array.isArray(payload.edges) ? payload.edges : []
+  const displayNodes = Array.isArray(payload.displayNodes) ? payload.displayNodes : []
+  const displayEdges = Array.isArray(payload.displayEdges) ? payload.displayEdges : []
+  const graphNodes = []
+  const graphEdges = []
+  const nodeLookup = new Map()
+  const participantLookup = new Map()
+  const rawNodeLookup = new Map()
+
+  for (const entity of entities) {
+    const graphNode = buildCoordinationEntityGraphNode(entity)
+    if (!graphNode.id) continue
+    graphNodes.push(graphNode)
+    nodeLookup.set(graphNode.id, graphNode)
+
+    const participantId = Number(entity?.participant_id || 0)
+    if (participantId > 0) {
+      participantLookup.set(participantId, graphNode.id)
+    }
+    for (const rawNodeId of coordinationEntityRawNodeIds(entity)) {
+      rawNodeLookup.set(rawNodeId, graphNode.id)
+    }
+  }
+
+  const displayNodeLookup = new Map()
+  const displayNodeAlias = new Map()
+  for (const node of displayNodes) {
+    const nodeId = String(node?.id || '').trim()
+    if (!nodeId || isConversationGraphNode(node)) continue
+    displayNodeLookup.set(nodeId, node)
+    const matchedEntityId = matchCoordinationEntityIdForDisplayNode(node, participantLookup, rawNodeLookup)
+    if (matchedEntityId) {
+      displayNodeAlias.set(nodeId, matchedEntityId)
+    }
+  }
+
+  let extraNodeCount = 0
+  function ensureDisplayGraphNode(node) {
+    if (!node || typeof node !== 'object' || isConversationGraphNode(node)) return ''
+    const rawNodeId = String(node?.id || '').trim()
+    if (!rawNodeId) return ''
+    const existingAlias = displayNodeAlias.get(rawNodeId)
+    if (existingAlias) return existingAlias
+    if (extraNodeCount >= DOSSIER_COORDINATION_GRAPH_EXTRA_NODE_LIMIT) return ''
+
+    const graphNode = buildCoordinationSupplementGraphNode(node)
+    if (!graphNode.id || nodeLookup.has(graphNode.id)) {
+      return graphNode.id
+    }
+    extraNodeCount += 1
+    graphNodes.push(graphNode)
+    nodeLookup.set(graphNode.id, graphNode)
+    displayNodeAlias.set(rawNodeId, graphNode.id)
+    return graphNode.id
+  }
+
+  const edgeKeys = new Set()
+  for (const edge of displayEdges) {
+    if (graphEdges.length >= DOSSIER_COORDINATION_GRAPH_EDGE_LIMIT) break
+    const sourceNodeId = String(edge?.source || '').trim()
+    const targetNodeId = String(edge?.target || '').trim()
+    if (!sourceNodeId || !targetNodeId) continue
+
+    const sourceNode = displayNodeLookup.get(sourceNodeId)
+    const targetNode = displayNodeLookup.get(targetNodeId)
+    let sourceGraphNodeId = displayNodeAlias.get(sourceNodeId) || ''
+    let targetGraphNodeId = displayNodeAlias.get(targetNodeId) || ''
+
+    if (!sourceGraphNodeId && !targetGraphNodeId) continue
+    if (!sourceGraphNodeId) sourceGraphNodeId = ensureDisplayGraphNode(sourceNode)
+    if (!targetGraphNodeId) targetGraphNodeId = ensureDisplayGraphNode(targetNode)
+    if (!sourceGraphNodeId || !targetGraphNodeId || sourceGraphNodeId === targetGraphNodeId) continue
+
+    const edgeKey = [sourceGraphNodeId, targetGraphNodeId, String(edge?.label || edge?.type || '关联').trim()]
+      .join('::')
+    if (edgeKeys.has(edgeKey)) continue
+    edgeKeys.add(edgeKey)
+    graphEdges.push(
+      buildCoordinationDisplayEdge(edge, sourceGraphNodeId, targetGraphNodeId, sourceNode, targetNode)
+    )
+  }
+
+  if (!graphEdges.length) {
+    for (const edge of coordinationEdges) {
+      if (graphEdges.length >= DOSSIER_COORDINATION_GRAPH_EDGE_LIMIT) break
+      const sourceId = String(edge?.source || '').trim()
+      const targetId = String(edge?.target || '').trim()
+      if (!sourceId || !targetId || !nodeLookup.has(sourceId) || !nodeLookup.has(targetId)) continue
+      const edgeKey = [sourceId, targetId, String(edge?.kind || edge?.label || 'related_in_dossier').trim()].join('::')
+      if (edgeKeys.has(edgeKey)) continue
+      edgeKeys.add(edgeKey)
+      graphEdges.push({
+        id: String(edge?.id || edgeKey),
+        source: sourceId,
+        target: targetId,
+        label: String(edge?.kind || edge?.label || 'related_in_dossier').trim() || 'related_in_dossier',
+      })
+    }
+  }
+
+  return {
+    metaLabel: '案卷实体连接图谱',
+    query: '按案卷内可连接主体聚合展示，关系边优先复用已加载的展示图谱。',
+    nodes: graphNodes,
+    edges: graphEdges,
+    loading: Boolean(payload.loading),
+    error: String(payload.error || '').trim(),
+    loadingText: '正在加载案卷实体连接图谱...',
+    emptyText:
+      '暂无案卷实体连接图谱。绑定并生成多个会话图谱后，将在这里展示可连接主体。',
+    ariaLabel: '案卷实体连接图谱',
+    legendItems: buildCoordinationGraphLegendItems(graphNodes),
+  }
 }
 
 async function openDossierDrawer() {
@@ -6276,6 +6675,34 @@ body,
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.dossier-coordination-hint {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px dashed #bfdbfe;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.dossier-coordination-graph-shell {
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #dbeafe;
+}
+
+.dossier-coordination-collapse {
+  border: none;
+  background: transparent;
+}
+
+.dossier-coordination-list-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .dossier-coordination-chip {

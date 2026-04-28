@@ -2,18 +2,18 @@
   <div class="graph-panel">
     <div class="graph-meta">
       <div class="meta-block">
-        <span class="meta-label">案情图谱</span>
+        <span class="meta-label">{{ graph.metaLabel || '案情图谱' }}</span>
         <span class="meta-value">{{ graph.query || '等待会话触发图谱生成' }}</span>
       </div>
       <div class="meta-block compact">
-        <span class="meta-pill">{{ graph.nodes?.length || 0 }} 节点</span>
-        <span class="meta-pill">{{ graph.edges?.length || 0 }} 关系</span>
+        <span class="meta-pill">{{ graphNodes.length }} 节点</span>
+        <span class="meta-pill">{{ graphEdges.length }} 关系</span>
       </div>
     </div>
 
-    <div class="legend">
-      <span v-for="item in legendItems" :key="item.category" class="legend-item">
-        <span class="legend-dot" :style="{ background: item.color }"></span>
+    <div v-if="resolvedLegendItems.length" class="legend">
+      <span v-for="item in resolvedLegendItems" :key="item.category" class="legend-item">
+        <span class="legend-dot" :style="{ background: colorForCategory(item.category) }"></span>
         {{ item.label }}
       </span>
     </div>
@@ -21,7 +21,7 @@
     <div class="graph-canvas">
       <div v-if="graph.loading" class="graph-overlay">
         <el-icon class="rotating"><Loading /></el-icon>
-        <span>正在加载当前会话的案情图谱...</span>
+        <span>{{ graph.loadingText || '正在加载当前会话的案情图谱...' }}</span>
       </div>
       <div v-else-if="graph.error" class="graph-overlay error">
         <el-icon><Warning /></el-icon>
@@ -29,7 +29,7 @@
       </div>
       <div v-else-if="!layout.nodes.length" class="graph-overlay empty">
         <el-icon><Share /></el-icon>
-        <span>当前会话尚未形成可视化案情图谱</span>
+        <span>{{ graph.emptyText || '当前会话尚未形成可视化案情图谱' }}</span>
       </div>
 
       <svg
@@ -37,7 +37,7 @@
         class="graph-svg"
         :viewBox="`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`"
         role="img"
-        aria-label="动态案情图谱"
+        :aria-label="graph.ariaLabel || '动态案情图谱'"
       >
         <g v-for="edge in layout.edges" :key="edge.id">
           <line
@@ -76,20 +76,37 @@
       <div class="detail-head">
         <span class="detail-title">{{ selectedNode.label }}</span>
         <el-tag size="small" effect="plain">
-          {{ selectedNode.category || '未分类' }}
+          {{ selectedNode.categoryLabel || categoryLabelFor(selectedNode.category) }}
         </el-tag>
       </div>
-      <div class="detail-row">
+      <div v-if="selectedNodeLabels.length" class="detail-row">
         <span class="detail-key">标签</span>
-        <span class="detail-value">{{ (selectedNode.labels || []).join(', ') || '-' }}</span>
+        <span class="detail-value">{{ selectedNodeLabels.join(' / ') }}</span>
       </div>
       <div
-        v-for="entry in selectedProperties"
+        v-for="entry in selectedDetailRows"
         :key="entry.key"
         class="detail-row"
       >
         <span class="detail-key">{{ entry.key }}</span>
         <span class="detail-value">{{ entry.value }}</span>
+      </div>
+      <div v-if="selectedNode.detailNote" class="detail-note">
+        {{ selectedNode.detailNote }}
+      </div>
+      <div v-if="selectedNode.actionLabel" class="node-detail-actions">
+        <el-button
+          size="small"
+          type="primary"
+          plain
+          :disabled="Boolean(selectedNode.actionDisabled)"
+          @click="$emit('node-action', selectedNode)"
+        >
+          {{ selectedNode.actionLabel }}
+        </el-button>
+        <span v-if="selectedNode.actionHint" class="node-detail-action-hint">
+          {{ selectedNode.actionHint }}
+        </span>
       </div>
     </div>
   </div>
@@ -100,13 +117,14 @@ import { computed, ref, watch } from 'vue'
 
 const VIEW_WIDTH = 520
 const VIEW_HEIGHT = 440
-const CATEGORY_ANCHORS = {
-  主体: { x: 140, y: 120 },
-  客体: { x: 380, y: 120 },
-  事件: { x: 140, y: 320 },
-  后果: { x: 380, y: 320 },
-  未分类: { x: VIEW_WIDTH / 2, y: VIEW_HEIGHT / 2 },
-}
+const DEFAULT_CATEGORY = '未分类'
+const DEFAULT_LEGEND_ITEMS = [
+  { category: '主体', label: '主体', color: '#2563eb' },
+  { category: '客体', label: '客体', color: '#f59e0b' },
+  { category: '事件', label: '事件', color: '#dc2626' },
+  { category: '后果', label: '后果', color: '#16a34a' },
+]
+const FALLBACK_COLORS = ['#2563eb', '#f59e0b', '#7c3aed', '#64748b', '#16a34a', '#dc2626', '#0891b2']
 
 const props = defineProps({
   graph: {
@@ -121,22 +139,65 @@ const props = defineProps({
   },
 })
 
+defineEmits(['node-action'])
+
 const selectedNodeId = ref('')
 
-const legendItems = [
-  { category: '主体', label: '主体', color: '#2563eb' },
-  { category: '客体', label: '客体', color: '#f59e0b' },
-  { category: '事件', label: '事件', color: '#dc2626' },
-  { category: '后果', label: '后果', color: '#16a34a' },
-]
-
-const layout = computed(() => buildForceLayout(props.graph.nodes || [], props.graph.edges || []))
+const graphNodes = computed(() => (Array.isArray(props.graph.nodes) ? props.graph.nodes : []))
+const graphEdges = computed(() => (Array.isArray(props.graph.edges) ? props.graph.edges : []))
+const resolvedLegendItems = computed(() => {
+  const items = Array.isArray(props.graph.legendItems) ? props.graph.legendItems : []
+  return items.length ? items : DEFAULT_LEGEND_ITEMS
+})
+const legendLookup = computed(() => {
+  const lookup = {}
+  for (const item of resolvedLegendItems.value) {
+    const category = normalizeCategory(item?.category)
+    lookup[category] = {
+      label: String(item?.label || category).trim() || category,
+      color: String(item?.color || '').trim(),
+    }
+  }
+  return lookup
+})
+const layoutCategories = computed(() => {
+  const categories = [
+    ...resolvedLegendItems.value.map((item) => normalizeCategory(item?.category)),
+    ...graphNodes.value.map((node) => normalizeCategory(node?.category || node?.type)),
+  ].filter(Boolean)
+  return categories.filter((category, index) => categories.indexOf(category) === index)
+})
+const layout = computed(() =>
+  buildForceLayout(
+    graphNodes.value,
+    graphEdges.value,
+    buildCategoryAnchors(layoutCategories.value)
+  )
+)
 
 const selectedNode = computed(() =>
   layout.value.nodes.find((node) => node.id === selectedNodeId.value) || layout.value.nodes[0] || null
 )
 
-const selectedProperties = computed(() => {
+const selectedNodeLabels = computed(() => {
+  const labels = Array.isArray(selectedNode.value?.labels)
+    ? selectedNode.value.labels.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  return labels.filter((label, index) => labels.indexOf(label) === index)
+})
+
+const selectedDetailRows = computed(() => {
+  const detailRows = Array.isArray(selectedNode.value?.detailRows)
+    ? selectedNode.value.detailRows
+        .map((entry) => ({
+          key: String(entry?.key || '').trim(),
+          value: String(entry?.value || '').trim(),
+        }))
+        .filter((entry) => entry.key && entry.value)
+    : []
+  if (detailRows.length) {
+    return detailRows.slice(0, 10)
+  }
   if (!selectedNode.value?.properties) return []
   return Object.entries(selectedNode.value.properties)
     .filter(([, value]) => value !== null && value !== undefined && `${value}`.trim() !== '')
@@ -148,9 +209,11 @@ const selectedProperties = computed(() => {
 })
 
 watch(
-  () => props.graph.nodes,
+  () => graphNodes.value,
   (nodes) => {
-    selectedNodeId.value = nodes?.[0]?.id || ''
+    const currentNodeId = String(selectedNodeId.value || '').trim()
+    const hasCurrent = nodes.some((node) => String(node?.id || '').trim() === currentNodeId)
+    selectedNodeId.value = hasCurrent ? currentNodeId : nodes?.[0]?.id || ''
   },
   { immediate: true }
 )
@@ -161,29 +224,62 @@ function shortLabel(value) {
 }
 
 function normalizeCategory(value) {
-  if (typeof value !== 'string') return '未分类'
-  return CATEGORY_ANCHORS[value] ? value : '未分类'
+  const normalized = String(value || '').trim()
+  return normalized || DEFAULT_CATEGORY
+}
+
+function buildCategoryAnchors(categories) {
+  const normalizedCategories = categories.length
+    ? categories.map((item) => normalizeCategory(item))
+    : [DEFAULT_CATEGORY]
+  const columnCount = Math.min(Math.max(2, Math.ceil(Math.sqrt(normalizedCategories.length))), 3)
+  const rowCount = Math.max(1, Math.ceil(normalizedCategories.length / columnCount))
+  const anchors = {}
+
+  normalizedCategories.forEach((category, index) => {
+    const columnIndex = index % columnCount
+    const rowIndex = Math.floor(index / columnCount)
+    anchors[category] = {
+      x: ((columnIndex + 1) / (columnCount + 1)) * VIEW_WIDTH,
+      y: ((rowIndex + 1) / (rowCount + 1)) * VIEW_HEIGHT,
+    }
+  })
+
+  anchors[DEFAULT_CATEGORY] ||= {
+    x: VIEW_WIDTH / 2,
+    y: VIEW_HEIGHT / 2,
+  }
+
+  return anchors
+}
+
+function categoryLabelFor(category) {
+  const normalized = normalizeCategory(category)
+  return legendLookup.value[normalized]?.label || normalized || DEFAULT_CATEGORY
+}
+
+function autoColorForCategory(category) {
+  const normalized = normalizeCategory(category)
+  let hash = 0
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash = (hash * 31 + normalized.charCodeAt(index)) >>> 0
+  }
+  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length]
 }
 
 function colorForCategory(category) {
-  const palette = {
-    主体: '#2563eb',
-    客体: '#f59e0b',
-    事件: '#dc2626',
-    后果: '#16a34a',
-    未分类: '#7c3aed',
-  }
-  return palette[normalizeCategory(category)] || palette.未分类
+  const normalized = normalizeCategory(category)
+  return legendLookup.value[normalized]?.color || autoColorForCategory(normalized)
 }
 
-function buildForceLayout(nodes, edges) {
+function buildForceLayout(nodes, edges, categoryAnchors) {
   if (!nodes.length) {
     return { nodes: [], edges: [] }
   }
 
   const state = nodes.map((node, index) => {
     const category = normalizeCategory(node.category || node.type)
-    const anchor = CATEGORY_ANCHORS[category]
+    const anchor = categoryAnchors[category] || categoryAnchors[DEFAULT_CATEGORY]
     const angle = (Math.PI * 2 * index) / Math.max(nodes.length, 1)
     const radius = 40 + (index % 3) * 18
 
@@ -366,6 +462,8 @@ function buildForceLayout(nodes, edges) {
   color: #475569;
   background: rgba(248, 250, 252, 0.92);
   z-index: 2;
+  text-align: center;
+  padding: 0 20px;
 }
 
 .graph-overlay.error {
@@ -433,7 +531,7 @@ function buildForceLayout(nodes, edges) {
 
 .detail-row {
   display: grid;
-  grid-template-columns: 52px 1fr;
+  grid-template-columns: 68px 1fr;
   gap: 8px;
   padding: 4px 0;
 }
@@ -447,6 +545,27 @@ function buildForceLayout(nodes, edges) {
   font-size: 12px;
   color: #374151;
   word-break: break-word;
+  line-height: 1.6;
+}
+
+.detail-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.6;
+}
+
+.node-detail-actions {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.node-detail-action-hint {
+  font-size: 11px;
+  color: #6b7280;
 }
 
 .rotating {
