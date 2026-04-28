@@ -35,6 +35,7 @@ from app.services.conversation_store import (
 )
 from app.services.dossier_display_graph import build_dossier_display_graph
 from app.services.dossier_graph import get_dossier_graph_payload
+from app.services.dossier_intelligence import build_dossier_intelligence
 from app.services.dossier_summary import generate_dossier_auto_summary
 
 router = APIRouter(prefix="/dossiers", tags=["dossiers"])
@@ -547,6 +548,30 @@ async def get_dossier_display_graph(
         "display_graph": display_graph,
         "generated_at": raw_graph_payload.get("generated_at"),
     }
+
+
+@router.get("/{dossier_id}/intelligence")
+async def get_dossier_intelligence(
+    dossier_id: int,
+    conversation_id: int | None = None,
+    include_display_graph: bool = True,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    try:
+        return await build_dossier_intelligence(
+            db,
+            current_user=current_user,
+            dossier_id=dossier_id,
+            conversation_id=conversation_id,
+            include_display_graph=include_display_graph,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if detail == "Dossier not found":
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail) from exc
 
 
 @router.patch("/{dossier_id}")
