@@ -656,8 +656,63 @@
                           }}
                         </span>
                       </div>
+                      <div
+                        v-if="selfIdentityTaskIsDifferentMode(task)"
+                        class="dossier-intelligence-task-input"
+                      >
+                        <el-input
+                          v-model="selfIdentityTaskState(task).differentDraft"
+                          maxlength="50"
+                          clearable
+                          placeholder="请输入另一个当事人的名称，例如：李四"
+                          :disabled="selfIdentityTaskIsSubmitting(task)"
+                        />
+                      </div>
+                      <div
+                        v-if="selfIdentityTaskError(task)"
+                        class="dossier-graph-warning dossier-graph-warning-soft"
+                      >
+                        {{ selfIdentityTaskError(task) }}
+                      </div>
                       <div class="dossier-intelligence-task-actions">
-                        <span>确认操作将在下一步支持</span>
+                        <div class="dossier-inline-actions">
+                          <el-button
+                            size="small"
+                            type="primary"
+                            :loading="selfIdentityTaskIsSubmittingAction(task, 'confirm_same')"
+                            :disabled="selfIdentityTaskIsSubmitting(task)"
+                            @click="handleConfirmSelfIdentitySame(task)"
+                          >
+                            是，同一个人
+                          </el-button>
+                          <el-button
+                            size="small"
+                            :disabled="selfIdentityTaskIsSubmitting(task)"
+                            @click="handleOpenSelfIdentityDifferent(task)"
+                          >
+                            不是，另一个人
+                          </el-button>
+                          <el-button
+                            v-if="selfIdentityTaskIsDifferentMode(task)"
+                            size="small"
+                            type="primary"
+                            plain
+                            :loading="selfIdentityTaskIsSubmittingAction(task, 'confirm_different')"
+                            :disabled="selfIdentityTaskIsSubmitting(task)"
+                            @click="handleConfirmSelfIdentityDifferent(task)"
+                          >
+                            确认创建
+                          </el-button>
+                          <el-button
+                            size="small"
+                            text
+                            :disabled="selfIdentityTaskIsSubmitting(task)"
+                            @click="handleDismissSelfIdentityTask(task)"
+                          >
+                            暂不处理
+                          </el-button>
+                        </div>
+                        <span>确认后会刷新案卷智能概览、图谱预览和主体映射。</span>
                       </div>
                     </div>
                   </div>
@@ -1735,6 +1790,7 @@ import {
   batchDeleteConversations,
   clearConversationMessages,
   confirmDossierPartyNaming,
+  confirmDossierSelfIdentity,
   createConversation,
   createDossier,
   createDossierParticipant,
@@ -1816,6 +1872,7 @@ const dossierCoordinationGraphLoading = ref(false)
 const dossierIntelligenceLoading = ref(false)
 const dossierPartyNamingSubmittingKey = ref('')
 const dossierCoordinationNamingRef = ref(null)
+const dossierSelfIdentityTaskStates = reactive({})
 const trackedOnboardingVisible = ref(false)
 const trackedOnboardingSubmitting = ref(false)
 const dossierGraphState = reactive({
@@ -2184,7 +2241,8 @@ const selectedDossierSelfAnchorIdentityTasks = computed(() =>
   selectedDossierIntelligenceConfirmationTasks.value.filter(
     (task) =>
       String(task?.task_type || '').trim() === 'entity_identity' &&
-      String(task?.subject || '').trim() === 'self_anchor'
+      String(task?.subject || '').trim() === 'self_anchor' &&
+      !selfIdentityTaskIsDismissed(task)
   )
 )
 const selectedDossierSelfAnchorParticipants = computed(() =>
@@ -2607,6 +2665,7 @@ function resetDossierIntelligenceState() {
   dossierIntelligenceState.error = ''
   dossierPartyNamingSubmittingKey.value = ''
   clearPartyNamingDrafts()
+  clearSelfIdentityTaskStates()
 }
 
 function applyDossierIntelligencePayload(dossierId, payload) {
@@ -2634,9 +2693,17 @@ function applyDossierIntelligencePayload(dossierId, payload) {
   dossierIntelligenceState.traceWarnings = Array.isArray(trace.warnings) ? trace.warnings : []
   dossierIntelligenceState.error = ''
   syncPartyNamingDrafts(dossierIntelligenceState.confirmationTasks)
+  syncSelfIdentityTaskStates(dossierIntelligenceState.confirmationTasks)
 }
 
 function dossierIntelligenceTaskKey(task) {
+  if (
+    String(task?.task_type || '').trim() === 'entity_identity' &&
+    String(task?.subject || '').trim() === 'self_anchor'
+  ) {
+    return dossierSelfIdentityTaskKey(task)
+  }
+
   const evidence = task?.evidence && typeof task.evidence === 'object' ? task.evidence : {}
   const rawNodeIds = Array.isArray(evidence.raw_node_ids)
     ? evidence.raw_node_ids.map((item) => String(item || '').trim()).filter(Boolean)
@@ -2663,6 +2730,28 @@ function dossierIntelligenceTaskKey(task) {
   return base || 'intelligence-task:party-naming'
 }
 
+function dossierSelfIdentityTaskKey(task) {
+  const sourceNode = task?.source_node && typeof task.source_node === 'object' ? task.source_node : {}
+  const targetParticipant =
+    task?.target_participant && typeof task.target_participant === 'object'
+      ? task.target_participant
+      : {}
+  const base = [
+    'entity_identity',
+    'self_anchor',
+    String(sourceNode.graph_node_id || '').trim(),
+    Number(sourceNode.conversation_id || 0) > 0 ? String(Number(sourceNode.conversation_id)) : '',
+    String(sourceNode.raw_label || '').trim(),
+    Number(targetParticipant.participant_id || 0) > 0
+      ? String(Number(targetParticipant.participant_id))
+      : '',
+  ]
+    .filter(Boolean)
+    .join(':')
+
+  return base || 'intelligence-task:self-identity'
+}
+
 function defaultPartyNamingDraft(task) {
   const suggestedLabels = Array.isArray(task?.suggested_labels)
     ? task.suggested_labels.map((item) => String(item || '').trim()).filter(Boolean)
@@ -2676,6 +2765,12 @@ function defaultPartyNamingDraft(task) {
 function clearPartyNamingDrafts() {
   for (const key of Object.keys(dossierPartyNamingDrafts)) {
     delete dossierPartyNamingDrafts[key]
+  }
+}
+
+function clearSelfIdentityTaskStates() {
+  for (const key of Object.keys(dossierSelfIdentityTaskStates)) {
+    delete dossierSelfIdentityTaskStates[key]
   }
 }
 
@@ -2695,6 +2790,65 @@ function syncPartyNamingDrafts(tasks) {
       delete dossierPartyNamingDrafts[key]
     }
   }
+}
+
+function ensureSelfIdentityTaskState(task) {
+  const key = dossierSelfIdentityTaskKey(task)
+  if (!dossierSelfIdentityTaskStates[key]) {
+    dossierSelfIdentityTaskStates[key] = {
+      differentMode: false,
+      differentDraft: '',
+      submittingAction: '',
+      error: '',
+      dismissed: false,
+    }
+  }
+  return dossierSelfIdentityTaskStates[key]
+}
+
+function syncSelfIdentityTaskStates(tasks) {
+  const nextKeys = new Set()
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    if (
+      String(task?.task_type || '').trim() !== 'entity_identity' ||
+      String(task?.subject || '').trim() !== 'self_anchor'
+    ) {
+      continue
+    }
+    const key = dossierSelfIdentityTaskKey(task)
+    nextKeys.add(key)
+    ensureSelfIdentityTaskState(task)
+  }
+
+  for (const key of Object.keys(dossierSelfIdentityTaskStates)) {
+    if (!nextKeys.has(key)) {
+      delete dossierSelfIdentityTaskStates[key]
+    }
+  }
+}
+
+function selfIdentityTaskState(task) {
+  return ensureSelfIdentityTaskState(task)
+}
+
+function selfIdentityTaskIsDismissed(task) {
+  return Boolean(selfIdentityTaskState(task).dismissed)
+}
+
+function selfIdentityTaskIsDifferentMode(task) {
+  return Boolean(selfIdentityTaskState(task).differentMode)
+}
+
+function selfIdentityTaskError(task) {
+  return String(selfIdentityTaskState(task).error || '').trim()
+}
+
+function selfIdentityTaskIsSubmitting(task) {
+  return Boolean(String(selfIdentityTaskState(task).submittingAction || '').trim())
+}
+
+function selfIdentityTaskIsSubmittingAction(task, action) {
+  return String(selfIdentityTaskState(task).submittingAction || '').trim() === String(action || '').trim()
 }
 
 function isPartyNamingSubmitting(task) {
@@ -3287,6 +3441,65 @@ async function refreshSelectedDossierAfterPartyNaming(dossierId) {
   return refreshErrors.length === 0
 }
 
+async function refreshSelectedDossierAfterSelfIdentity(dossierId) {
+  await Promise.allSettled([
+    loadSelectedDossierCoordinationGraph(dossierId, { silent: true }),
+    loadSelectedDossierIntelligence(dossierId),
+    loadSelectedDossierParticipants(dossierId, { silent: true }),
+    loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
+    loadSelectedDossierGraph(dossierId, { silent: true }),
+  ])
+
+  const refreshErrors = [
+    dossierCoordinationGraphState.error,
+    dossierIntelligenceState.error,
+    dossierParticipantRegistryState.error,
+    dossierGraphState.error,
+  ].filter((value) => String(value || '').trim())
+
+  if (refreshErrors.length) {
+    console.error('Failed to refresh dossier views after self identity confirmation:', refreshErrors)
+  }
+  return refreshErrors.length === 0
+}
+
+function buildSelfIdentityConfirmSamePayload(task) {
+  const sourceNode = task?.source_node && typeof task.source_node === 'object' ? task.source_node : {}
+  const targetParticipant =
+    task?.target_participant && typeof task.target_participant === 'object'
+      ? task.target_participant
+      : {}
+  return {
+    action: 'confirm_same',
+    source_node: {
+      conversation_id: Number(sourceNode.conversation_id || 0),
+      raw_label: String(sourceNode.raw_label || '').trim(),
+      graph_node_id: String(sourceNode.graph_node_id || '').trim(),
+      graph_node_label: String(
+        sourceNode.graph_node_label || sourceNode.raw_label || ''
+      ).trim(),
+      graph_node_type: String(sourceNode.graph_node_type || 'person').trim() || 'person',
+    },
+    target_participant_id: Number(targetParticipant.participant_id || 0),
+  }
+}
+
+function buildSelfIdentityConfirmDifferentPayload(task, newDisplayLabel) {
+  return {
+    ...buildSelfIdentityConfirmSamePayload(task),
+    action: 'confirm_different',
+    new_display_label: String(newDisplayLabel || '').trim(),
+  }
+}
+
+function selfIdentityTaskErrorMessage(error, fallback = '确认失败') {
+  return (
+    error?.response?.data?.detail ||
+    error?.message ||
+    fallback
+  )
+}
+
 async function handleConfirmPartyNaming(task) {
   const dossierId = Number(selectedDossierId.value || 0)
   if (dossierId <= 0) {
@@ -3323,6 +3536,88 @@ async function handleConfirmPartyNaming(task) {
     ElMessage.error(detail)
   } finally {
     dossierPartyNamingSubmittingKey.value = ''
+  }
+}
+
+function handleDismissSelfIdentityTask(task) {
+  const state = ensureSelfIdentityTaskState(task)
+  state.dismissed = true
+  state.differentMode = false
+  state.error = ''
+}
+
+function handleOpenSelfIdentityDifferent(task) {
+  const state = ensureSelfIdentityTaskState(task)
+  state.dismissed = false
+  state.differentMode = true
+  state.error = ''
+}
+
+async function handleConfirmSelfIdentitySame(task) {
+  const dossierId = Number(selectedDossierId.value || 0)
+  if (dossierId <= 0) {
+    return
+  }
+
+  const state = ensureSelfIdentityTaskState(task)
+  state.error = ''
+  state.dismissed = false
+  state.submittingAction = 'confirm_same'
+
+  try {
+    await confirmDossierSelfIdentity(
+      dossierId,
+      buildSelfIdentityConfirmSamePayload(task),
+    )
+
+    const refreshed = await refreshSelectedDossierAfterSelfIdentity(dossierId)
+    if (refreshed) {
+      ElMessage.success('已确认是同一当事人')
+    } else {
+      ElMessage.warning('已确认是同一当事人，但部分视图刷新失败，请手动刷新')
+    }
+  } catch (error) {
+    console.error('Failed to confirm dossier self identity as same participant:', error)
+    state.error = selfIdentityTaskErrorMessage(error, '确认失败')
+  } finally {
+    state.submittingAction = ''
+  }
+}
+
+async function handleConfirmSelfIdentityDifferent(task) {
+  const dossierId = Number(selectedDossierId.value || 0)
+  if (dossierId <= 0) {
+    return
+  }
+
+  const state = ensureSelfIdentityTaskState(task)
+  const newDisplayLabel = String(state.differentDraft || '').trim()
+  if (!newDisplayLabel) {
+    state.error = '请输入用于区分的新名称'
+    return
+  }
+
+  state.error = ''
+  state.dismissed = false
+  state.submittingAction = 'confirm_different'
+
+  try {
+    await confirmDossierSelfIdentity(
+      dossierId,
+      buildSelfIdentityConfirmDifferentPayload(task, newDisplayLabel),
+    )
+
+    const refreshed = await refreshSelectedDossierAfterSelfIdentity(dossierId)
+    if (refreshed) {
+      ElMessage.success(`已创建新的当事人：${newDisplayLabel}`)
+    } else {
+      ElMessage.warning(`已创建新的当事人：${newDisplayLabel}，但部分视图刷新失败，请手动刷新`)
+    }
+  } catch (error) {
+    console.error('Failed to confirm dossier self identity as different participant:', error)
+    state.error = selfIdentityTaskErrorMessage(error, '确认失败')
+  } finally {
+    state.submittingAction = ''
   }
 }
 

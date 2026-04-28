@@ -92,6 +92,8 @@ export const getDossierIntelligence = (dossierId, params = {}) =>
   api.get(`/dossiers/${dossierId}/intelligence`, { params })
 export const confirmDossierPartyNaming = (dossierId, payload) =>
   api.post(`/dossiers/${dossierId}/intelligence/tasks/party-naming/confirm`, payload)
+export const confirmDossierSelfIdentity = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/intelligence/tasks/self-identity/confirm`, payload)
 export const getDossierParticipants = (dossierId) => api.get(`/dossiers/${dossierId}/participants`)
 export const createDossierParticipant = (dossierId, payload) =>
   api.post(`/dossiers/${dossierId}/participants`, payload)
