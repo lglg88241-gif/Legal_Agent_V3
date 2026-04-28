@@ -2,16 +2,7 @@
 Prompt constants for the graph extractor pipeline (graph_extractor.py).
 
 This module is the single source of truth for all graph extraction
-prompts. It eliminates the triple-definition problem in the original
-graph_extractor.py where each prompt was defined 3 times at different
-positions in the file, with the last definition silently shadowing
-the earlier ones.
-
-The canonical version here is the final (most evolved) version from
-each prompt — i.e., the text that was actually in effect at runtime.
-
-WARNING: Do NOT edit prompt text during the refactoring phase.
-         These strings must be byte-identical to the originals.
+prompts used by the conversation-level case graph pipeline.
 """
 
 # ======================================================================
@@ -20,13 +11,17 @@ WARNING: Do NOT edit prompt text during the refactoring phase.
 
 GRAPH_EXTRACTION_PROMPT = """
 你是一个法律案件动态图谱抽取器。
-请从输入文本中提取已经明确出现的事实三元组，并做实体对齐。
+请从输入文本中提取已经明确出现的事实三元组，并谨慎处理实体命名。
 
 规则：
 1. 只提取已经明确表达的事实，禁止臆测。
-2. 同一事物必须统一命名，例如\u201c我/本人/用户\u201d统一为\u201c当事人\u201d。
-3. 每个实体都必须给出 category，且只能是：主体、客体、事件、后果。
-4. 只返回 JSON 数组，不要输出任何解释。
+2. 明确出现的公司名、人名、机构名必须优先保留原名，例如“A公司”“B公司”“王经理”“HR李某”不能改写成“用人单位”“公司”“领导”“HR”。
+3. “我/本人/自己/用户”这类自指称呼可以统一成稳定自指实体，例如“当事人”。
+4. “公司/单位/对方/领导/HR/用工单位”这类泛称，只有在文本里没有更明确实体名时，才允许作为临时节点名。
+5. 如果同一句中同时出现明确实体名和泛称，主节点名仍应使用明确实体名；泛称只能理解为别名或角色提示，不能覆盖主节点名。
+6. 多个组织或主体必须分别保留，例如“A公司负责签约、B公司发工资、C公司缴社保”必须保留为三个主体，不能合并成一个“用人单位”。
+7. 每个实体都必须给出 category，且只能是：主体、客体、事件、后果。
+8. 只返回 JSON 数组，不要输出任何解释。
 
 返回格式：
 [
@@ -52,9 +47,13 @@ INCREMENTAL_EXTRACTION_PROMPT = """
 要求：
 1. 只输出本轮新增事实，不要重复改写旧事实。
 2. 绝对不要输出 UPDATE 或 DELETE。
-3. 实体要做命名对齐，例如"我/本人/用户"统一为"当事人"。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要解释。
+3. 明确出现的公司名、人名、机构名必须保留原名，不要替换成“用人单位”“公司”“领导”等泛称。
+4. “我/本人/自己/用户”可以统一成稳定自指实体，例如“当事人”。
+5. 只有在没有明确实体名时，才允许把“公司/单位/对方/领导/HR”等泛称作为临时节点名。
+6. 如果文本里同时出现“A公司”和“公司”，主节点名应保留为“A公司”，不要把它改写成“用人单位”。
+7. 多个组织或主体必须分别保留，不能因为都属于“公司”就合并。
+8. category 只能是：主体、客体、事件、后果。
+9. 只能输出合法 JSON，不要解释。
 
 输出格式：
 {{
@@ -115,9 +114,11 @@ BELIEF_REVISION_PROMPT = """
 1. 如果是新增事实，输出 ADD。
 2. 如果是修正已有事实，输出 UPDATE，并明确 old_target 与 new_target。
 3. 如果是推翻错误事实，输出 DELETE。
-4. 实体要做命名对齐，例如"我/本人/用户"统一为"当事人"。
-5. category 只能是：主体、客体、事件、后果。
-6. 只能输出 JSON，不要输出解释文字。
+4. 明确出现的公司名、人名、机构名必须保留原名，不要替换成“用人单位”“公司”“领导”等泛称。
+5. “我/本人/自己/用户”可以统一成稳定自指实体，例如“当事人”。
+6. 只有在没有明确实体名时，才允许使用“公司/单位/对方/领导/HR”等泛称作为节点名。
+7. category 只能是：主体、客体、事件、后果。
+8. 只能输出 JSON，不要输出解释文字。
 
 输出格式：
 {{
@@ -160,23 +161,25 @@ BELIEF_REVISION_PROMPT_V2 = """
 【用户最新输入】：{user_input}
 
 危险提醒：
-不要把"否认""要求删除""记错了""改成""不是 A 而是 B"这类元指令写进图谱。
+不要把“否认”“要求删除”“记错了”“不是 A 而是 B”这类元指令写进图谱。
 遇到这类输入，应直接输出 DELETE 或 UPDATE。
 
 规则：
 1. 只要新输入推翻、纠正或覆盖了旧事实，就不能只输出 ADD。
 2. 输出 DELETE 或 UPDATE 时，若涉及已有节点，节点名必须逐字复制自 existing_nodes。
-3. 实体要做命名对齐，例如"我/本人/用户"统一为"当事人"。
-4. category 只能是：主体、客体、事件、后果。
-5. 只能输出合法 JSON，不要解释。
+3. 明确出现的公司名、人名、机构名必须保留原名，不要替换成“用人单位”“公司”“领导”等泛称。
+4. “我/本人/自己/用户”可以统一成稳定自指实体，例如“当事人”。
+5. 只有在没有明确实体名时，才允许使用“公司/单位/对方/领导/HR”等泛称作为节点名。
+6. category 只能是：主体、客体、事件、后果。
+7. 只能输出合法 JSON，不要解释。
 
 正确示例 1：
-现有图谱包含：[当事人]-(砸伤)->[车间机器]。用户说："我没在车间被砸，是路上被车撞了。"
+现有图谱包含：[当事人]-(砸伤)->[车间机器]。用户说：“我没在车间被砸，是路上被车撞了。”
 输出：
 {{"actions": [{{"action": "DELETE", "target_name": "车间机器"}}, {{"action": "DELETE", "target_name": "砸伤"}}, {{"action": "ADD", "source": "当事人", "source_category": "主体", "relation": "撞伤", "target": "肇事车辆", "target_category": "客体"}}]}}
 
 正确示例 2：
-现有图谱包含：[机器]。用户说："把跟机器相关的事情删掉。"
+现有图谱包含：[机器]。用户说：“把跟机器相关的事情删掉。”
 输出：
 {{"actions": [{{"action": "DELETE", "target_name": "机器"}}]}}
 

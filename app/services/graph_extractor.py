@@ -128,9 +128,6 @@ ENTITY_ALIAS_MAP = {
     "对面车辆": "肇事车辆",
     "对方的车": "肇事车辆",
     "肇事车": "肇事车辆",
-    "公司": "用人单位",
-    "单位": "用人单位",
-    "用工单位": "用人单位",
 }
 
 
@@ -159,6 +156,8 @@ def _canonicalize_entity(name: str) -> str:
     cleaned = " ".join((name or "").strip().split())
     if not cleaned:
         return ""
+    # Keep explicit organization/person names intact. Only collapse a small
+    # set of stable self/pronoun aliases and a few object aliases.
     return ENTITY_ALIAS_MAP.get(cleaned, cleaned)
 
 
