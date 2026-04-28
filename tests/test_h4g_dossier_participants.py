@@ -89,12 +89,20 @@ def test_runtime_schema_creates_dossier_participant_tables() -> None:
         engine = FakeAsyncEngine()
         try:
             await ensure_storage_schema(bind_engine=engine)
+            await ensure_storage_schema(bind_engine=engine)
 
             with sync_engine.begin() as sync_conn:
                 inspector = inspect(sync_conn)
                 tables = set(inspector.get_table_names())
                 assert "dossier_participants" in tables
                 assert "dossier_participant_mentions" in tables
+                mention_columns = {
+                    column["name"]
+                    for column in inspector.get_columns("dossier_participant_mentions")
+                }
+                assert "graph_node_id" in mention_columns
+                assert "graph_node_label" in mention_columns
+                assert "graph_node_type" in mention_columns
         finally:
             sync_engine.dispose()
 
@@ -206,7 +214,10 @@ def test_resolve_dossier_participant_refreshes_mentions_before_serialization(
         conversation_id=77,
         participant_id=31,
         raw_label="用人单位",
-        source="graph",
+        graph_node_id="4:abc",
+        graph_node_label="A公司",
+        graph_node_type="organization",
+        source="graph_node",
         confidence=None,
         confirmed_by_user=True,
     )
@@ -251,8 +262,11 @@ def test_resolve_dossier_participant_refreshes_mentions_before_serialization(
                     dossiers_api.DossierParticipantResolveMentionRequest(
                         conversation_id=77,
                         raw_label="用人单位",
-                        source="graph",
+                        source="graph_node",
                         confidence=None,
+                        graph_node_id="4:abc",
+                        graph_node_label="A公司",
+                        graph_node_type="organization",
                     )
                 ],
             ),
@@ -264,9 +278,90 @@ def test_resolve_dossier_participant_refreshes_mentions_before_serialization(
     assert result["status"] == "success"
     assert result["participant"]["id"] == 31
     assert result["mentions"][0]["id"] == 41
+    assert result["mentions"][0]["source"] == "graph_node"
+    assert result["mentions"][0]["graph_node_id"] == "4:abc"
+    assert result["mentions"][0]["graph_node_label"] == "A公司"
+    assert result["mentions"][0]["graph_node_type"] == "organization"
     assert result["mentions"][0]["created_at"] == "2026-01-01T00:00:00"
     assert db.refreshed_objects[0] is participant
     assert db.refreshed_objects[1] is mention
+
+
+def test_get_dossier_participants_serializes_mention_graph_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=19,
+        user_id=3,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    participant = DossierParticipant(
+        id=31,
+        dossier_id=19,
+        user_id=3,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        confirmed_by_user=True,
+    )
+    mention = DossierParticipantMention(
+        id=51,
+        dossier_id=19,
+        conversation_id=88,
+        participant_id=31,
+        raw_label="公司",
+        graph_node_id="4:def",
+        graph_node_label="公司",
+        graph_node_type="organization",
+        source="graph_node",
+        confidence=0.95,
+        confirmed_by_user=True,
+    )
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_list_dossier_participants(db, user_id: int, dossier_id: int):
+        return [participant]
+
+    async def fake_list_dossier_participant_mentions(db, user_id: int, dossier_id: int):
+        return [mention]
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+    monkeypatch.setattr(
+        dossiers_api,
+        "list_dossier_participants",
+        fake_list_dossier_participants,
+    )
+    monkeypatch.setattr(
+        dossiers_api,
+        "list_dossier_participant_mentions",
+        fake_list_dossier_participant_mentions,
+    )
+
+    result = asyncio.run(
+        dossiers_api.get_dossier_participants(
+            dossier_id=19,
+            current_user=AuthenticatedUser(user_id=3, username="owner"),
+            db=DummyDB(),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["mentions"][0]["raw_label"] == "公司"
+    assert result["mentions"][0]["graph_node_id"] == "4:def"
+    assert result["mentions"][0]["graph_node_label"] == "公司"
+    assert result["mentions"][0]["graph_node_type"] == "organization"
+    assert result["mentions"][0]["participant_label"] == "A公司"
 
 
 def test_create_dossier_participant_archived_dossier_returns_conflict(
@@ -440,6 +535,9 @@ def test_get_dossier_graph_payload_applies_confirmed_participant_mappings(
                     "participant_entity_type": "organization",
                     "conversation_id": 101,
                     "raw_label": "公司",
+                    "graph_node_id": "n1",
+                    "graph_node_label": "公司",
+                    "graph_node_type": "主体",
                     "source": "graph",
                 }
             ],
@@ -447,6 +545,7 @@ def test_get_dossier_graph_payload_applies_confirmed_participant_mappings(
     )
 
     assert result["participant_mappings"][0]["participant_label"] == "A公司"
+    assert result["participant_mappings"][0]["graph_node_label"] == "公司"
     assert result["graph"]["nodes"][0]["display_label"] == "A公司"
     assert result["graph"]["nodes"][0]["raw_label"] == "公司"
 
@@ -598,6 +697,170 @@ def test_resolve_dossier_participant_mentions_rejects_conversation_outside_dossi
         )
 
     assert "current user's dossier" in str(exc_info.value)
+
+
+def test_resolve_dossier_participant_mentions_persists_graph_provenance_when_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossier = Dossier(
+        id=16,
+        user_id=7,
+        title="案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    participant = DossierParticipant(
+        id=101,
+        dossier_id=16,
+        user_id=7,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        confirmed_by_user=True,
+    )
+
+    async def fake_list_user_conversations_by_ids(db, user_id: int, conversation_ids: list[int]):
+        return [
+            Conversation(
+                id=conversation_ids[0],
+                user_id=user_id,
+                dossier_id=16,
+                session_id="session-x",
+                title="当前案卷会话",
+                conversation_mode="TRACKED_CASE",
+                persistence_consent="tracked",
+            )
+        ]
+
+    async def fake_list_dossier_participant_mentions(db, user_id: int, dossier_id: int):
+        return []
+
+    async def fake_touch_dossier(db, dossier=None, dossier_id=None):
+        return dossier
+
+    monkeypatch.setattr(
+        "app.services.conversation_store.list_user_conversations_by_ids",
+        fake_list_user_conversations_by_ids,
+    )
+    monkeypatch.setattr(
+        "app.services.conversation_store.list_dossier_participant_mentions",
+        fake_list_dossier_participant_mentions,
+    )
+    monkeypatch.setattr("app.services.conversation_store.touch_dossier", fake_touch_dossier)
+
+    mentions = asyncio.run(
+        resolve_dossier_participant_mentions(
+            DummyDB(),
+            dossier=dossier,
+            user_id=7,
+            participant=participant,
+            mentions=[
+                {
+                    "conversation_id": 55,
+                    "raw_label": "A公司",
+                    "source": "graph_node",
+                    "confidence": 0.92,
+                    "graph_node_id": "4:abc",
+                    "graph_node_label": "A公司",
+                    "graph_node_type": "organization",
+                }
+            ],
+        )
+    )
+
+    payload = conversation_store_service.serialize_dossier_participant_mention(
+        mentions[0],
+        {participant.id: participant},
+    )
+    assert mentions[0].graph_node_id == "4:abc"
+    assert mentions[0].graph_node_label == "A公司"
+    assert mentions[0].graph_node_type == "organization"
+    assert payload["source"] == "graph_node"
+    assert payload["graph_node_id"] == "4:abc"
+    assert payload["graph_node_label"] == "A公司"
+    assert payload["graph_node_type"] == "organization"
+
+
+def test_resolve_dossier_participant_mentions_keeps_legacy_requests_compatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossier = Dossier(
+        id=17,
+        user_id=7,
+        title="案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    participant = DossierParticipant(
+        id=102,
+        dossier_id=17,
+        user_id=7,
+        label="A公司",
+        role="用人单位",
+        party_side="opponent",
+        entity_type="organization",
+        confirmed_by_user=True,
+    )
+
+    async def fake_list_user_conversations_by_ids(db, user_id: int, conversation_ids: list[int]):
+        return [
+            Conversation(
+                id=conversation_ids[0],
+                user_id=user_id,
+                dossier_id=17,
+                session_id="session-y",
+                title="当前案卷会话",
+                conversation_mode="TRACKED_CASE",
+                persistence_consent="tracked",
+            )
+        ]
+
+    async def fake_list_dossier_participant_mentions(db, user_id: int, dossier_id: int):
+        return []
+
+    async def fake_touch_dossier(db, dossier=None, dossier_id=None):
+        return dossier
+
+    monkeypatch.setattr(
+        "app.services.conversation_store.list_user_conversations_by_ids",
+        fake_list_user_conversations_by_ids,
+    )
+    monkeypatch.setattr(
+        "app.services.conversation_store.list_dossier_participant_mentions",
+        fake_list_dossier_participant_mentions,
+    )
+    monkeypatch.setattr("app.services.conversation_store.touch_dossier", fake_touch_dossier)
+
+    mentions = asyncio.run(
+        resolve_dossier_participant_mentions(
+            DummyDB(),
+            dossier=dossier,
+            user_id=7,
+            participant=participant,
+            mentions=[
+                {
+                    "conversation_id": 56,
+                    "raw_label": "公司",
+                    "source": "graph",
+                    "confidence": None,
+                }
+            ],
+        )
+    )
+
+    payload = conversation_store_service.serialize_dossier_participant_mention(
+        mentions[0],
+        {participant.id: participant},
+    )
+    assert mentions[0].graph_node_id is None
+    assert mentions[0].graph_node_label is None
+    assert mentions[0].graph_node_type is None
+    assert payload["graph_node_id"] is None
+    assert payload["graph_node_label"] is None
+    assert payload["graph_node_type"] is None
 
 
 def test_generic_participant_label_helpers_distinguish_generic_and_specific() -> None:
@@ -769,8 +1032,8 @@ def test_build_dossier_participant_candidates_returns_generic_tasks_without_auto
         graph_payload={
             "graph": {
                 "nodes": [
-                    {"id": "1", "label": "公司", "conversation_id": 11, "properties": {}},
-                    {"id": "2", "label": "用人单位", "conversation_id": 12, "properties": {}},
+                    {"id": "1", "label": "公司", "type": "organization", "conversation_id": 11, "properties": {}},
+                    {"id": "2", "label": "用人单位", "type": "organization", "conversation_id": 12, "properties": {}},
                 ]
             }
         },
@@ -786,6 +1049,9 @@ def test_build_dossier_participant_candidates_returns_generic_tasks_without_auto
     assert company_candidate["can_create_new"] is False
     assert company_candidate["can_mark_non_entity"] is True
     assert company_candidate["match_candidates"][0]["participant_id"] == 7
+    assert company_candidate["mentions"][0]["graph_node_id"] == "1"
+    assert company_candidate["mentions"][0]["graph_node_label"] == "公司"
+    assert company_candidate["mentions"][0]["graph_node_type"] == "organization"
 
 
 def test_build_dossier_participant_candidates_returns_single_occurrence_specific_task() -> None:

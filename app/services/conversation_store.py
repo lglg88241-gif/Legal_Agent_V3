@@ -31,7 +31,7 @@ VALID_DOSSIER_STATUSES = {"active", "archived", "closed"}
 DEFAULT_PARTICIPANT_ALIASES: dict[str, dict[str, Any]] = {}
 VALID_PARTY_SIDES = {"claimant", "opponent", "neutral", "unknown"}
 VALID_ENTITY_TYPES = {"person", "organization", "authority", "unknown"}
-VALID_PARTICIPANT_MENTION_SOURCES = {"graph", "conversation", "user"}
+VALID_PARTICIPANT_MENTION_SOURCES = {"graph", "graph_node", "conversation", "user"}
 RUNTIME_INDEX_SPECS = {
     "dossiers": (
         ("ix_dossiers_user_id", ("user_id",)),
@@ -257,6 +257,37 @@ def _ensure_conversation_updated_at(sync_conn) -> None:
     if "participant_aliases_json" not in dossier_columns:
         sync_conn.execute(text("ALTER TABLE dossiers ADD COLUMN participant_aliases_json TEXT"))
 
+    inspector = inspect(sync_conn)
+    tables = set(inspector.get_table_names())
+    if "dossier_participant_mentions" in tables:
+        mention_columns = {
+            column["name"] for column in inspector.get_columns("dossier_participant_mentions")
+        }
+        if "graph_node_id" not in mention_columns:
+            sync_conn.execute(
+                text("ALTER TABLE dossier_participant_mentions ADD COLUMN graph_node_id VARCHAR(255)")
+            )
+        mention_columns = {
+            column["name"] for column in inspector.get_columns("dossier_participant_mentions")
+        }
+        if "graph_node_label" not in mention_columns:
+            sync_conn.execute(
+                text(
+                    "ALTER TABLE dossier_participant_mentions "
+                    "ADD COLUMN graph_node_label VARCHAR(255)"
+                )
+            )
+        mention_columns = {
+            column["name"] for column in inspector.get_columns("dossier_participant_mentions")
+        }
+        if "graph_node_type" not in mention_columns:
+            sync_conn.execute(
+                text(
+                    "ALTER TABLE dossier_participant_mentions "
+                    "ADD COLUMN graph_node_type VARCHAR(100)"
+                )
+            )
+
     _ensure_runtime_indexes(sync_conn)
 
 
@@ -312,6 +343,10 @@ def normalize_participant_mention_source(source: str | None) -> str:
 def _normalize_optional_text(value: str | None) -> str | None:
     cleaned = " ".join((value or "").strip().split())
     return cleaned or None
+
+
+def _normalize_graph_provenance_value(value: str | None) -> str | None:
+    return _normalize_optional_text(value)
 
 
 def _normalize_participant_label(label: str | None) -> str:
@@ -789,6 +824,9 @@ def serialize_dossier_participant_mention(
         "conversation_id": mention.conversation_id,
         "participant_id": mention.participant_id,
         "raw_label": mention.raw_label,
+        "graph_node_id": getattr(mention, "graph_node_id", None),
+        "graph_node_label": getattr(mention, "graph_node_label", None),
+        "graph_node_type": getattr(mention, "graph_node_type", None),
         "source": normalize_participant_mention_source(getattr(mention, "source", "graph")),
         "confidence": mention.confidence,
         "confirmed_by_user": bool(getattr(mention, "confirmed_by_user", False)),
@@ -974,6 +1012,11 @@ async def resolve_dossier_participant_mentions(
             {
                 "conversation_id": conversation_id,
                 "raw_label": raw_label,
+                "graph_node_id": _normalize_graph_provenance_value(item.get("graph_node_id")),
+                "graph_node_label": _normalize_graph_provenance_value(
+                    item.get("graph_node_label")
+                ),
+                "graph_node_type": _normalize_graph_provenance_value(item.get("graph_node_type")),
                 "source": source,
                 "confidence": confidence,
             }
@@ -1010,6 +1053,9 @@ async def resolve_dossier_participant_mentions(
                 conversation_id=mention_payload["conversation_id"],
                 participant_id=participant.id,
                 raw_label=mention_payload["raw_label"],
+                graph_node_id=mention_payload["graph_node_id"],
+                graph_node_label=mention_payload["graph_node_label"],
+                graph_node_type=mention_payload["graph_node_type"],
                 source=mention_payload["source"],
                 confidence=mention_payload["confidence"],
                 confirmed_by_user=True,
@@ -1017,6 +1063,12 @@ async def resolve_dossier_participant_mentions(
             db.add(existing)
         else:
             existing.participant_id = participant.id
+            if mention_payload["graph_node_id"] is not None:
+                existing.graph_node_id = mention_payload["graph_node_id"]
+            if mention_payload["graph_node_label"] is not None:
+                existing.graph_node_label = mention_payload["graph_node_label"]
+            if mention_payload["graph_node_type"] is not None:
+                existing.graph_node_type = mention_payload["graph_node_type"]
             existing.confidence = mention_payload["confidence"]
             existing.confirmed_by_user = True
             db.add(existing)
@@ -1685,6 +1737,10 @@ def build_dossier_participant_candidates(
             {
                 "conversation_id": conversation_id,
                 "raw_label": raw_label,
+                "graph_node_id": str(node.get("id") or "").strip() or None,
+                "graph_node_label": _display_label(node.get("raw_label") or node.get("label"), "")
+                or None,
+                "graph_node_type": str(node.get("type") or "").strip() or None,
                 "source": "graph",
                 "confidence": None,
                 "node_type": str(node.get("type") or "").strip(),

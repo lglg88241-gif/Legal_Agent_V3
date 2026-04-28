@@ -292,6 +292,9 @@ class DossierParticipantMention(Base):
         index=True,
     )
     raw_label: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    graph_node_id: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    graph_node_label: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    graph_node_type: Mapped[str | None] = mapped_column(String(100), nullable=True, default=None)
     source: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
