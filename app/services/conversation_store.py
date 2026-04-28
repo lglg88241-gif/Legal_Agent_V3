@@ -1346,22 +1346,6 @@ async def search_user_cases(
     result = await db.scalars(query)
     return list(result)
 
-
-CLAIMANT_PARTICIPANT_LABELS = {"我", "本人", "劳动者", "员工"}
-OPPONENT_ORGANIZATION_LABELS = {"公司", "用人单位", "单位", "对方公司"}
-KNOWN_SINGLE_PARTICIPANT_HINTS: dict[str, dict[str, str]] = {
-    "老板": {"role": "老板", "party_side": "opponent", "entity_type": "person"},
-    "hr": {"role": "HR", "party_side": "opponent", "entity_type": "person"},
-    "人事": {"role": "人事", "party_side": "opponent", "entity_type": "person"},
-    "主管": {"role": "主管", "party_side": "opponent", "entity_type": "person"},
-    "经理": {"role": "经理", "party_side": "opponent", "entity_type": "person"},
-    "对方": {"role": "对方当事人", "party_side": "opponent", "entity_type": "unknown"},
-    "法院": {"role": "法院", "party_side": "neutral", "entity_type": "authority"},
-    "仲裁委": {"role": "仲裁委", "party_side": "neutral", "entity_type": "authority"},
-    "仲裁委员会": {"role": "仲裁委", "party_side": "neutral", "entity_type": "authority"},
-}
-
-
 def _normalized_label_key(label: str | None) -> str:
     return " ".join((label or "").strip().split()).lower()
 
@@ -1505,6 +1489,7 @@ def _build_match_candidate_entry(
 ) -> dict[str, Any]:
     return {
         "participant_id": participant.id,
+        "display_label": participant.label,
         "participant_label": participant.label,
         "participant_role": participant.role or "",
         "participant_party_side": normalize_party_side(getattr(participant, "party_side", "unknown")),
@@ -1663,9 +1648,11 @@ def _build_candidate_payload(
         match_candidates = []
 
     raw_labels = list(dict.fromkeys(item["raw_label"] for item in mentions if item.get("raw_label")))
+    serialized_mentions = [_serialize_resolution_node_record(item) for item in mentions]
     return {
         "candidate_key": candidate_key,
         "task_key": candidate_key,
+        "task_type": "raw_label_resolution",
         "raw_label": raw_label,
         "raw_labels": raw_labels,
         "suggested_label": candidate_shape["suggested_label"],
@@ -1679,16 +1666,488 @@ def _build_candidate_payload(
             exact_match_type=exact_match_type,
             has_match_candidates=bool(match_candidates),
         ),
-        "mentions": mentions,
+        "mentions": serialized_mentions,
         "match_candidates": match_candidates,
         "existing_participant_id": existing_participant.id if existing_participant is not None else None,
         "existing_participant_label": existing_participant.label if existing_participant is not None else "",
         "recommended_participant_id": existing_participant.id if existing_participant is not None else None,
         "recommended_participant_label": existing_participant.label if existing_participant is not None else "",
+        "confidence": None,
         "can_create_new": candidate_shape["label_kind"] == "specific",
         "can_link_existing": bool(participants),
         "can_mark_non_entity": candidate_shape["label_kind"] == "generic",
+        "can_mark_not_same": False,
+        "can_skip": True,
     }
+
+
+def _resolution_node_legacy_label_key(node_record: dict[str, Any]) -> tuple[int, str] | None:
+    conversation_id = int(node_record.get("conversation_id") or 0)
+    normalized_label = str(
+        node_record.get("normalized_label") or _normalized_label_key(node_record.get("raw_label"))
+    ).strip()
+    if conversation_id <= 0 or not normalized_label:
+        return None
+    return conversation_id, normalized_label
+
+
+def _build_resolution_node_record(
+    node_payload: dict[str, Any],
+    *,
+    participant_aliases: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not isinstance(node_payload, dict):
+        return None
+
+    raw_label = _display_label(node_payload.get("raw_label") or node_payload.get("label"), "")
+    if not raw_label:
+        return None
+
+    conversation_id = node_payload.get("conversation_id")
+    if conversation_id is None and isinstance(node_payload.get("properties"), dict):
+        conversation_id = node_payload["properties"].get("conversation_id")
+    try:
+        normalized_conversation_id = int(conversation_id or 0)
+    except (TypeError, ValueError):
+        normalized_conversation_id = 0
+    if normalized_conversation_id <= 0:
+        return None
+
+    graph_node_label = (
+        _display_label(node_payload.get("graph_node_label") or node_payload.get("label"), "")
+        or raw_label
+    )
+    graph_node_type = str(
+        node_payload.get("graph_node_type")
+        or node_payload.get("node_type")
+        or node_payload.get("type")
+        or ""
+    ).strip() or None
+    inferred_shape = _infer_candidate_shape(raw_label, participant_aliases=participant_aliases)
+    inferred_entity_type = str(inferred_shape.get("entity_type") or "unknown").strip() or "unknown"
+    normalized_entity_type = (
+        graph_node_type
+        if graph_node_type in VALID_ENTITY_TYPES
+        else normalize_entity_type(inferred_entity_type)
+    )
+    label_kind = "generic" if is_generic_participant_label(raw_label) else "specific"
+    graph_node_id = str(node_payload.get("graph_node_id") or node_payload.get("id") or "").strip() or None
+    normalized_label = _normalized_label_key(raw_label)
+
+    return {
+        "conversation_id": normalized_conversation_id,
+        "graph_node_id": graph_node_id,
+        "raw_label": raw_label,
+        "normalized_label": normalized_label,
+        "graph_node_label": graph_node_label,
+        "graph_node_type": graph_node_type,
+        "entity_type": normalized_entity_type,
+        "label_kind": label_kind,
+        "source": str(node_payload.get("source") or "graph").strip() or "graph",
+        "confidence": node_payload.get("confidence"),
+    }
+
+
+def _serialize_resolution_node_record(node_record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "conversation_id": int(node_record.get("conversation_id") or 0),
+        "raw_label": str(node_record.get("raw_label") or "").strip(),
+        "normalized_label": str(
+            node_record.get("normalized_label") or _normalized_label_key(node_record.get("raw_label"))
+        ).strip(),
+        "graph_node_id": str(node_record.get("graph_node_id") or "").strip() or None,
+        "graph_node_label": (
+            _display_label(
+                node_record.get("graph_node_label"),
+                str(node_record.get("raw_label") or "").strip(),
+            )
+            or None
+        ),
+        "graph_node_type": str(node_record.get("graph_node_type") or "").strip() or None,
+        "source": str(node_record.get("source") or "graph").strip() or "graph",
+        "label_kind": str(node_record.get("label_kind") or "").strip() or "specific",
+        "entity_type": normalize_entity_type(str(node_record.get("entity_type") or "unknown")),
+        "confidence": node_record.get("confidence"),
+    }
+
+
+def _build_confirmed_participant_ids_by_graph_node_id(
+    confirmed_mentions: list[DossierParticipantMention],
+) -> dict[str, set[int]]:
+    lookup: dict[str, set[int]] = {}
+    for mention in confirmed_mentions:
+        participant_id = int(getattr(mention, "participant_id", 0) or 0)
+        graph_node_id = str(getattr(mention, "graph_node_id", "") or "").strip()
+        if participant_id <= 0 or not graph_node_id:
+            continue
+        lookup.setdefault(graph_node_id, set()).add(participant_id)
+    return lookup
+
+
+def _build_confirmed_participant_ids_by_legacy_label_key(
+    confirmed_mentions: list[DossierParticipantMention],
+) -> dict[tuple[int, str], set[int]]:
+    lookup: dict[tuple[int, str], set[int]] = {}
+    for mention in confirmed_mentions:
+        participant_id = int(getattr(mention, "participant_id", 0) or 0)
+        if participant_id <= 0:
+            continue
+        if str(getattr(mention, "graph_node_id", "") or "").strip():
+            continue
+        key = _resolution_node_legacy_label_key(
+            {
+                "conversation_id": int(getattr(mention, "conversation_id", 0) or 0),
+                "raw_label": getattr(mention, "raw_label", ""),
+            }
+        )
+        if key is None:
+            continue
+        lookup.setdefault(key, set()).add(participant_id)
+    return lookup
+
+
+def _lookup_participant_ids_for_resolution_node(
+    node_record: dict[str, Any],
+    *,
+    confirmed_participant_ids_by_graph_node_id: dict[str, set[int]],
+    confirmed_participant_ids_by_legacy_label_key: dict[tuple[int, str], set[int]],
+) -> set[int]:
+    graph_node_id = str(node_record.get("graph_node_id") or "").strip()
+    if graph_node_id:
+        participant_ids = set(confirmed_participant_ids_by_graph_node_id.get(graph_node_id, set()))
+        if participant_ids:
+            return participant_ids
+
+    legacy_label_key = _resolution_node_legacy_label_key(node_record)
+    if legacy_label_key is None:
+        return set()
+    return set(confirmed_participant_ids_by_legacy_label_key.get(legacy_label_key, set()))
+
+
+def _node_type_pair_is_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_type = str(left.get("entity_type") or "unknown").strip() or "unknown"
+    right_type = str(right.get("entity_type") or "unknown").strip() or "unknown"
+    if left_type == "unknown" or right_type == "unknown":
+        return True
+    return left_type == right_type
+
+
+def _ordered_cross_resolution_nodes(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    left_participant_ids: set[int],
+    right_participant_ids: set[int],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    left_kind = str(left.get("label_kind") or "specific")
+    right_kind = str(right.get("label_kind") or "specific")
+    left_has_participant = bool(left_participant_ids)
+    right_has_participant = bool(right_participant_ids)
+
+    if left_kind == "specific" and right_kind == "generic":
+        return left, right
+    if left_kind == "generic" and right_kind == "specific":
+        return right, left
+    if left_has_participant and not right_has_participant:
+        return left, right
+    if right_has_participant and not left_has_participant:
+        return right, left
+
+    left_identity = (
+        int(left.get("conversation_id") or 0),
+        str(left.get("graph_node_id") or ""),
+        _normalized_label_key(left.get("raw_label")),
+    )
+    right_identity = (
+        int(right.get("conversation_id") or 0),
+        str(right.get("graph_node_id") or ""),
+        _normalized_label_key(right.get("raw_label")),
+    )
+    if left_identity <= right_identity:
+        return left, right
+    return right, left
+
+
+def _cross_resolution_pair_key(source_node: dict[str, Any], target_node: dict[str, Any]) -> str:
+    source_conversation_id = int(source_node.get("conversation_id") or 0)
+    target_conversation_id = int(target_node.get("conversation_id") or 0)
+    source_node_key = str(source_node.get("graph_node_id") or _normalized_label_key(source_node.get("raw_label")) or "unknown")
+    target_node_key = str(target_node.get("graph_node_id") or _normalized_label_key(target_node.get("raw_label")) or "unknown")
+    return (
+        f"cross-conversation:{source_conversation_id}:{source_node_key}:"
+        f"{target_conversation_id}:{target_node_key}"
+    )
+
+
+def _build_cross_resolution_match_candidates(
+    *,
+    source_node: dict[str, Any],
+    target_node: dict[str, Any],
+    source_participant_ids: set[int],
+    target_participant_ids: set[int],
+    participants: list[DossierParticipant],
+    participant_aliases: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], int | None]:
+    participant_lookup = {participant.id: participant for participant in participants}
+    candidate_entries: list[dict[str, Any]] = []
+
+    participant_ids = set(source_participant_ids) | set(target_participant_ids)
+
+    if not participant_ids:
+        for node in (source_node, target_node):
+            exact_match, exact_match_type = _select_exact_candidate_participant(
+                participants,
+                raw_label=str(node.get("raw_label") or ""),
+                participant_aliases=participant_aliases,
+            )
+            if exact_match is None:
+                continue
+            if exact_match_type == "exact_alias":
+                reason = "该节点在当前案卷中与已确认别名精确匹配。"
+            else:
+                reason = "该节点在当前案卷中与已确认主体显示名精确匹配。"
+            candidate_entries.append(
+                _build_match_candidate_entry(
+                    exact_match,
+                    match_type=str(exact_match_type or "exact_label"),
+                    reason=reason,
+                )
+            )
+    else:
+        for participant_id in sorted(participant_ids):
+            participant = participant_lookup.get(participant_id)
+            if participant is None:
+                continue
+            if participant_id in source_participant_ids and participant_id in target_participant_ids:
+                reason = "该已确认主体已在两个会话节点上出现映射。"
+            elif participant_id in source_participant_ids:
+                reason = (
+                    f"已有主体在其他会话中映射到 {source_node.get('graph_node_label') or source_node.get('raw_label') or '该节点'}。"
+                )
+            else:
+                reason = (
+                    f"已有主体在其他会话中映射到 {target_node.get('graph_node_label') or target_node.get('raw_label') or '该节点'}。"
+                )
+            candidate_entries.append(
+                _build_match_candidate_entry(
+                    participant,
+                    match_type="confirmed_participant_mapping",
+                    reason=reason,
+                )
+            )
+
+    deduped_entries = _dedupe_match_candidates(candidate_entries)
+    unique_participant_ids = {
+        int(item.get("participant_id") or 0) for item in deduped_entries if int(item.get("participant_id") or 0) > 0
+    }
+    recommended_participant_id = next(iter(unique_participant_ids)) if len(unique_participant_ids) == 1 else None
+    return deduped_entries, recommended_participant_id
+
+
+def _build_cross_resolution_reason(
+    *,
+    source_node: dict[str, Any],
+    target_node: dict[str, Any],
+    confidence: str,
+    recommended_participant_id: int | None,
+) -> str:
+    source_label = str(source_node.get("graph_node_label") or source_node.get("raw_label") or "该节点")
+    target_label = str(target_node.get("graph_node_label") or target_node.get("raw_label") or "该节点")
+    source_kind = str(source_node.get("label_kind") or "specific")
+    target_kind = str(target_node.get("label_kind") or "specific")
+
+    if confidence == "high":
+        return f"不同会话中都出现了“{source_label}”，名称精确一致，可能指向同一实体，需要用户确认。"
+    if source_kind != target_kind:
+        return (
+            f"不同会话中出现了“{source_label}”与“{target_label}”，其中一个是泛称、一个是具体节点，"
+            "可能指向同一实体，需要用户确认。"
+        )
+    if recommended_participant_id is not None:
+        return "已有主体在其他会话中已经映射到其中一个节点，当前节点可能与之属于同一实体。"
+    return f"不同会话中的“{source_label}”与“{target_label}”可能是同一实体，需要用户确认。"
+
+
+def _build_cross_conversation_entity_candidate(
+    *,
+    source_node: dict[str, Any],
+    target_node: dict[str, Any],
+    source_participant_ids: set[int],
+    target_participant_ids: set[int],
+    participants: list[DossierParticipant],
+    participant_aliases: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    source_kind = str(source_node.get("label_kind") or "specific")
+    target_kind = str(target_node.get("label_kind") or "specific")
+    source_label = _normalized_label_key(source_node.get("raw_label"))
+    target_label = _normalized_label_key(target_node.get("raw_label"))
+
+    exact_same_label = bool(source_label and source_label == target_label)
+    has_participant_evidence = bool(source_participant_ids or target_participant_ids)
+    one_generic_one_specific = {source_kind, target_kind} == {"generic", "specific"}
+    both_generic = source_kind == "generic" and target_kind == "generic"
+
+    if both_generic:
+        return None
+    if exact_same_label:
+        confidence = "high"
+    elif one_generic_one_specific and has_participant_evidence:
+        confidence = "medium"
+    else:
+        return None
+
+    match_candidates, recommended_participant_id = _build_cross_resolution_match_candidates(
+        source_node=source_node,
+        target_node=target_node,
+        source_participant_ids=source_participant_ids,
+        target_participant_ids=target_participant_ids,
+        participants=participants,
+        participant_aliases=participant_aliases,
+    )
+
+    if one_generic_one_specific and recommended_participant_id is None:
+        return None
+
+    participant_lookup = {participant.id: participant for participant in participants}
+    recommended_participant = participant_lookup.get(recommended_participant_id or 0)
+
+    if one_generic_one_specific:
+        generic_node = source_node if source_kind == "generic" else target_node
+        specific_node = target_node if source_kind == "generic" else source_node
+        raw_label = str(generic_node.get("raw_label") or "").strip()
+        suggested_label = (
+            recommended_participant.label
+            if recommended_participant is not None
+            else str(specific_node.get("graph_node_label") or specific_node.get("raw_label") or "").strip()
+        )
+        label_kind = "mixed"
+    else:
+        raw_label = str(source_node.get("raw_label") or "").strip()
+        suggested_label = (
+            recommended_participant.label
+            if recommended_participant is not None
+            else str(source_node.get("graph_node_label") or source_node.get("raw_label") or "").strip()
+        )
+        label_kind = source_kind if source_kind == target_kind else "mixed"
+
+    candidate_key = _cross_resolution_pair_key(source_node, target_node)
+    reason = _build_cross_resolution_reason(
+        source_node=source_node,
+        target_node=target_node,
+        confidence=confidence,
+        recommended_participant_id=recommended_participant_id,
+    )
+    serialized_source_node = _serialize_resolution_node_record(source_node)
+    serialized_target_node = _serialize_resolution_node_record(target_node)
+    mentions = [serialized_source_node, serialized_target_node]
+
+    return {
+        "candidate_key": candidate_key,
+        "task_key": candidate_key,
+        "task_type": "cross_conversation_entity_resolution",
+        "label_kind": label_kind,
+        "raw_label": raw_label,
+        "raw_labels": list(
+            dict.fromkeys(
+                [
+                    str(source_node.get("raw_label") or "").strip(),
+                    str(target_node.get("raw_label") or "").strip(),
+                ]
+            )
+        ),
+        "suggested_label": suggested_label,
+        "reason": reason,
+        "confidence": confidence,
+        "source_node": serialized_source_node,
+        "target_node": serialized_target_node,
+        "mentions": mentions,
+        "match_candidates": match_candidates,
+        "existing_participant_id": recommended_participant_id,
+        "existing_participant_label": (
+            recommended_participant.label if recommended_participant is not None else ""
+        ),
+        "recommended_participant_id": recommended_participant_id,
+        "recommended_participant_label": (
+            recommended_participant.label if recommended_participant is not None else ""
+        ),
+        "can_link_existing": bool(participants),
+        "can_create_new": False,
+        "can_mark_non_entity": False,
+        "can_mark_not_same": True,
+        "can_skip": True,
+    }
+
+
+def _build_cross_conversation_entity_candidates(
+    *,
+    graph_node_records: list[dict[str, Any]],
+    participants: list[DossierParticipant],
+    confirmed_mentions: list[DossierParticipantMention],
+    participant_aliases: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if len(graph_node_records) < 2:
+        return []
+
+    confirmed_participant_ids_by_graph_node_id = _build_confirmed_participant_ids_by_graph_node_id(
+        confirmed_mentions
+    )
+    confirmed_participant_ids_by_legacy_label_key = (
+        _build_confirmed_participant_ids_by_legacy_label_key(confirmed_mentions)
+    )
+    node_participant_ids: dict[str, set[int]] = {}
+    for node_record in graph_node_records:
+        candidate_key = _cross_resolution_pair_key(node_record, node_record)
+        node_participant_ids[candidate_key] = _lookup_participant_ids_for_resolution_node(
+            node_record,
+            confirmed_participant_ids_by_graph_node_id=confirmed_participant_ids_by_graph_node_id,
+            confirmed_participant_ids_by_legacy_label_key=confirmed_participant_ids_by_legacy_label_key,
+        )
+
+    candidates: list[dict[str, Any]] = []
+    seen_candidate_keys: set[str] = set()
+    for index, left in enumerate(graph_node_records):
+        left_self_key = _cross_resolution_pair_key(left, left)
+        left_participant_ids = node_participant_ids.get(left_self_key, set())
+        for right in graph_node_records[index + 1 :]:
+            if int(left.get("conversation_id") or 0) == int(right.get("conversation_id") or 0):
+                continue
+            if not _node_type_pair_is_compatible(left, right):
+                continue
+
+            right_self_key = _cross_resolution_pair_key(right, right)
+            right_participant_ids = node_participant_ids.get(right_self_key, set())
+            if left_participant_ids and right_participant_ids:
+                continue
+
+            source_node, target_node = _ordered_cross_resolution_nodes(
+                left,
+                right,
+                left_participant_ids=left_participant_ids,
+                right_participant_ids=right_participant_ids,
+            )
+            if source_node is left:
+                source_participant_ids = left_participant_ids
+                target_participant_ids = right_participant_ids
+            else:
+                source_participant_ids = right_participant_ids
+                target_participant_ids = left_participant_ids
+
+            candidate = _build_cross_conversation_entity_candidate(
+                source_node=source_node,
+                target_node=target_node,
+                source_participant_ids=source_participant_ids,
+                target_participant_ids=target_participant_ids,
+                participants=participants,
+                participant_aliases=participant_aliases,
+            )
+            if candidate is None:
+                continue
+            candidate_key = str(candidate.get("candidate_key") or "").strip()
+            if not candidate_key or candidate_key in seen_candidate_keys:
+                continue
+            seen_candidate_keys.add(candidate_key)
+            candidates.append(candidate)
+    return candidates
 
 
 def build_dossier_participant_candidates(
@@ -1703,56 +2162,54 @@ def build_dossier_participant_candidates(
     if not isinstance(nodes, list):
         return []
 
-    confirmed_keys = {
-        _mention_key(
-            conversation_id=mention.conversation_id,
-            raw_label=mention.raw_label,
-            source=mention.source,
-        )
-        for mention in confirmed_mentions
-    }
-
-    unresolved_mentions: list[dict[str, Any]] = []
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        raw_label = _display_label(node.get("raw_label") or node.get("label"), "")
-        conversation_id = node.get("conversation_id")
-        if conversation_id is None and isinstance(node.get("properties"), dict):
-            conversation_id = node["properties"].get("conversation_id")
-        try:
-            conversation_id = int(conversation_id or 0)
-        except (TypeError, ValueError):
-            conversation_id = 0
-        if not raw_label or conversation_id <= 0:
-            continue
-        key = _mention_key(
-            conversation_id=conversation_id,
-            raw_label=raw_label,
-            source="graph",
-        )
-        if key in confirmed_keys:
-            continue
-        unresolved_mentions.append(
-            {
-                "conversation_id": conversation_id,
-                "raw_label": raw_label,
-                "graph_node_id": str(node.get("id") or "").strip() or None,
-                "graph_node_label": _display_label(node.get("raw_label") or node.get("label"), "")
-                or None,
-                "graph_node_type": str(node.get("type") or "").strip() or None,
-                "source": "graph",
-                "confidence": None,
-                "node_type": str(node.get("type") or "").strip(),
-            }
-        )
-
-    if not unresolved_mentions:
-        return []
-
     normalized_aliases = _normalize_participant_aliases(
         participant_aliases if isinstance(participant_aliases, dict) else None
     )
+
+    graph_node_records: list[dict[str, Any]] = []
+    for node in nodes:
+        normalized_node = _build_resolution_node_record(
+            node if isinstance(node, dict) else {},
+            participant_aliases=normalized_aliases,
+        )
+        if normalized_node is None:
+            continue
+        graph_node_records.append(normalized_node)
+
+    confirmed_graph_node_ids = {
+        str(getattr(mention, "graph_node_id", "") or "").strip()
+        for mention in confirmed_mentions
+        if str(getattr(mention, "graph_node_id", "") or "").strip()
+    }
+    confirmed_legacy_label_keys = {
+        (
+            int(getattr(mention, "conversation_id", 0) or 0),
+            _normalized_label_key(getattr(mention, "raw_label", "")),
+        )
+        for mention in confirmed_mentions
+        if not str(getattr(mention, "graph_node_id", "") or "").strip()
+        if int(getattr(mention, "conversation_id", 0) or 0) > 0
+        and _normalized_label_key(getattr(mention, "raw_label", ""))
+    }
+
+    unresolved_mentions: list[dict[str, Any]] = []
+    for node_record in graph_node_records:
+        graph_node_id = str(node_record.get("graph_node_id") or "").strip()
+        conversation_id = int(node_record.get("conversation_id") or 0)
+        raw_label = str(node_record.get("raw_label") or "").strip()
+        if graph_node_id and graph_node_id in confirmed_graph_node_ids:
+            continue
+        if (conversation_id, _normalized_label_key(raw_label)) in confirmed_legacy_label_keys:
+            continue
+        unresolved_mentions.append(node_record)
+
+    if not unresolved_mentions:
+        return _build_cross_conversation_entity_candidates(
+            graph_node_records=graph_node_records,
+            participants=participants,
+            confirmed_mentions=confirmed_mentions,
+            participant_aliases=normalized_aliases,
+        )
 
     task_candidates: list[dict[str, Any]] = []
     task_mentions_by_label: dict[str, list[dict[str, Any]]] = {}
@@ -1775,124 +2232,22 @@ def build_dossier_participant_candidates(
         if candidate is not None:
             task_candidates.append(candidate)
 
-    task_candidates.sort(
+    cross_conversation_candidates = _build_cross_conversation_entity_candidates(
+        graph_node_records=graph_node_records,
+        participants=participants,
+        confirmed_mentions=confirmed_mentions,
+        participant_aliases=normalized_aliases,
+    )
+
+    combined_candidates = cross_conversation_candidates + task_candidates
+    combined_candidates.sort(
         key=lambda item: (
-            0 if str(item.get("label_kind") or "") == "specific" else 1,
+            0 if str(item.get("task_type") or "") == "cross_conversation_entity_resolution" else 1,
+            0 if str(item.get("label_kind") or "") in {"specific", "mixed"} else 1,
             str(item.get("raw_label") or ""),
         )
     )
-    return task_candidates
-
-    mentions_by_label: dict[str, list[dict[str, Any]]] = {}
-    for mention in unresolved_mentions:
-        mentions_by_label.setdefault(_normalized_label_key(mention["raw_label"]), []).append(mention)
-
-    candidates: list[dict[str, Any]] = []
-    consumed_keys: set[tuple[int, str, str]] = set()
-
-    def consume(mentions: list[dict[str, Any]]) -> None:
-        for item in mentions:
-            consumed_keys.add(
-                _mention_key(
-                    conversation_id=item["conversation_id"],
-                    raw_label=item["raw_label"],
-                    source=item["source"],
-                )
-            )
-
-    claimant_mentions = [
-        mention
-        for mention in unresolved_mentions
-        if mention["raw_label"] in CLAIMANT_PARTICIPANT_LABELS
-    ]
-    if claimant_mentions:
-        candidate = _build_candidate_payload(
-            candidate_key="claimant_cluster",
-            raw_labels=list(dict.fromkeys(item["raw_label"] for item in claimant_mentions)),
-            mentions=claimant_mentions,
-            participants=participants,
-            suggested_label=(
-                str(normalized_aliases.get("primary_party", {}).get("label") or "").strip()
-                or "我"
-            ),
-            role=(
-                str(normalized_aliases.get("primary_party", {}).get("role") or "").strip()
-                or "劳动者"
-            ),
-            party_side="claimant",
-            entity_type="person",
-        )
-        if candidate is not None:
-            candidates.append(candidate)
-            consume(claimant_mentions)
-
-    opponent_org_mentions = [
-        mention
-        for mention in unresolved_mentions
-        if mention["raw_label"] in OPPONENT_ORGANIZATION_LABELS
-        and _mention_key(
-            conversation_id=mention["conversation_id"],
-            raw_label=mention["raw_label"],
-            source=mention["source"],
-        )
-        not in consumed_keys
-    ]
-    if opponent_org_mentions:
-        candidate = _build_candidate_payload(
-            candidate_key="opponent_organization_cluster",
-            raw_labels=list(dict.fromkeys(item["raw_label"] for item in opponent_org_mentions)),
-            mentions=opponent_org_mentions,
-            participants=participants,
-            suggested_label=(
-                str(normalized_aliases.get("opposing_party", {}).get("label") or "").strip()
-                or "公司"
-            ),
-            role=(
-                str(normalized_aliases.get("opposing_party", {}).get("role") or "").strip()
-                or "用人单位"
-            ),
-            party_side="opponent",
-            entity_type="organization",
-        )
-        if candidate is not None:
-            candidates.append(candidate)
-            consume(opponent_org_mentions)
-
-    for normalized_label, mentions in mentions_by_label.items():
-        unresolved_group = [
-            mention
-            for mention in mentions
-            if _mention_key(
-                conversation_id=mention["conversation_id"],
-                raw_label=mention["raw_label"],
-                source=mention["source"],
-            )
-            not in consumed_keys
-        ]
-        if not unresolved_group:
-            continue
-
-        raw_labels = list(dict.fromkeys(item["raw_label"] for item in unresolved_group))
-        raw_label = raw_labels[0]
-        hint = KNOWN_SINGLE_PARTICIPANT_HINTS.get(normalized_label)
-        if len(unresolved_group) < 2 and hint is None:
-            continue
-
-        candidate = _build_candidate_payload(
-            candidate_key=f"label:{normalized_label}",
-            raw_labels=raw_labels,
-            mentions=unresolved_group,
-            participants=participants,
-            suggested_label=raw_label,
-            role=hint["role"] if hint else "",
-            party_side=hint["party_side"] if hint else "unknown",
-            entity_type=hint["entity_type"] if hint else "unknown",
-        )
-        if candidate is not None:
-            candidates.append(candidate)
-            consume(unresolved_group)
-
-    return candidates
+    return combined_candidates
 
 
 def serialize_dossier(dossier: Dossier) -> dict[str, Any]:
