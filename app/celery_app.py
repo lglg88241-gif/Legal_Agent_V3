@@ -438,17 +438,19 @@ def ask_agent_task(
         has_dossier_context = bool(raw_dossier_context)
         dossier_followup_question = has_dossier_context and is_dossier_followup_question(question)
         message_is_fact_update = is_case_fact_update_message(question)
-        if route_intent == "CASE_UPDATE" and dossier_followup_question:
+        if route_intent == "CASE_UPDATE" and dossier_followup_question and not message_is_fact_update:
             logger.info(
-                "Structured case persistence skipped because message is dossier follow-up question | conversation_id=%s user_id=%s route_intent=%s",
+                "Structured case persistence skipped because message is dossier follow-up question | conversation_id=%s user_id=%s route_intent=%s message_is_fact_update=%s",
                 conversation_id,
                 user_id,
                 original_route_intent,
+                message_is_fact_update,
             )
             logger.info(
-                "Graph update skipped because message is dossier follow-up question | conversation_id=%s user_id=%s",
+                "Graph update skipped because message is dossier follow-up question | conversation_id=%s user_id=%s message_is_fact_update=%s",
                 conversation_id,
                 user_id,
+                message_is_fact_update,
             )
             route_intent = "GENERAL_CONSULT"
             updated_case_summary = context.get("case_summary") or ""
@@ -562,7 +564,7 @@ def ask_agent_task(
                     conversation_id,
                     user_id,
                 )
-            else:
+            elif dossier_followup_question and not message_is_fact_update:
                 logger.info(
                     "Structured case persistence skipped because message is dossier follow-up question | conversation_id=%s user_id=%s route_intent=%s message_is_fact_update=%s",
                     conversation_id,
@@ -571,9 +573,26 @@ def ask_agent_task(
                     message_is_fact_update,
                 )
                 logger.info(
-                    "Graph update skipped because message is dossier follow-up question | conversation_id=%s user_id=%s",
+                    "Graph update skipped because message is dossier follow-up question | conversation_id=%s user_id=%s message_is_fact_update=%s",
                     conversation_id,
                     user_id,
+                    message_is_fact_update,
+                )
+            else:
+                logger.info(
+                    "Structured case persistence skipped because CASE_UPDATE message was not classified as a persistable factual update | conversation_id=%s user_id=%s route_intent=%s message_is_fact_update=%s dossier_followup_question=%s",
+                    conversation_id,
+                    user_id,
+                    route_intent,
+                    message_is_fact_update,
+                    dossier_followup_question,
+                )
+                logger.info(
+                    "Graph update skipped because CASE_UPDATE message was not classified as a persistable factual update | conversation_id=%s user_id=%s message_is_fact_update=%s dossier_followup_question=%s",
+                    conversation_id,
+                    user_id,
+                    message_is_fact_update,
+                    dossier_followup_question,
                 )
 
         return result

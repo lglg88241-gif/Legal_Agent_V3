@@ -147,11 +147,14 @@ def should_persist_structured_case_message(
     normalized_route = str(route_intent or "").strip().upper()
     normalized_mode = normalize_conversation_mode(conversation_mode)
     message_kind = classify_dossier_graph_query(cleaned)
+    message_is_fact_update = is_case_fact_update_message(cleaned)
 
     if normalized_route == "CASE_UPDATE":
+        if message_is_fact_update:
+            return True
         if not has_dossier_context and normalized_consent != "tracked" and normalized_mode != "TRACKED_CASE":
             return True
-        return message_kind not in {"memory", "advice", "legal"} and is_case_fact_update_message(cleaned)
+        return message_kind not in {"memory", "advice", "legal"} and message_is_fact_update
 
     if normalized_consent != "tracked":
         return False
@@ -159,7 +162,7 @@ def should_persist_structured_case_message(
     if normalized_mode != "TRACKED_CASE" and not has_dossier_context:
         return False
 
-    return message_kind not in {"memory", "advice", "legal"} and is_case_fact_update_message(cleaned)
+    return message_kind not in {"memory", "advice", "legal"} and message_is_fact_update
 
 
 def build_structured_case_summary(

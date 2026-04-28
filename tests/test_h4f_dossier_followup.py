@@ -69,6 +69,12 @@ def test_case_fact_update_message_still_detects_real_fact_supplement() -> None:
     assert is_case_fact_update_message(message) is True
 
 
+def test_case_fact_update_message_detects_dossier_followup_fact_supplement() -> None:
+    message = "后来A公司的人事又通知我补签协议，还说之前解除的事情可以再协商。"
+    assert is_case_fact_update_message(message) is True
+    assert is_dossier_followup_question(message) is False
+
+
 def test_dossier_followup_question_skips_fact_updater_and_reflector_routes() -> None:
     state = {
         "route_intent": "CASE_UPDATE",
