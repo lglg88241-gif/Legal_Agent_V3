@@ -56,6 +56,42 @@ _SELF_NAMING_REASON = (
 )
 _SELF_PARTY_SIDES = {"claimant", "self", "primary"}
 _NON_PERSON_ENTITY_TYPES = {"organization", "company", "employer", "authority"}
+_SELF_IDENTITY_TITLE = "\u786e\u8ba4\u5f53\u4e8b\u4eba\u662f\u5426\u4e3a\u540c\u4e00\u4eba"
+_SELF_IDENTITY_REASON_TEMPLATE = (
+    "\u8be5\u6848\u5377\u5df2\u6709\u5df2\u547d\u540d\u5f53\u4e8b\u4eba\u201c{display_label}\u201d\uff0c"
+    "\u65b0\u4f1a\u8bdd\u4e2d\u4e5f\u51fa\u73b0\u7b2c\u4e00\u4eba\u79f0\u6216\u5f53\u4e8b\u4eba\u4e3b\u4f53\uff0c"
+    "\u9700\u8981\u786e\u8ba4\u662f\u5426\u4e3a\u540c\u4e00\u4eba\u3002"
+)
+_SELF_IDENTITY_SOURCE = "dossier_intelligence_rules"
+_SELF_IDENTITY_CONFIDENCE = "high"
+_SELF_IDENTITY_SUGGESTED_ACTION = "confirm_same_self"
+_SELF_IDENTITY_EXCLUDED_NODE_TYPES = {
+    "event",
+    "fact",
+    "evidence",
+    "document",
+    "amount",
+    "money",
+    "time",
+    "date",
+    "law",
+    "statute",
+    "claim",
+    "procedure",
+    "\u4e8b\u4ef6",
+    "\u4e8b\u5b9e",
+    "\u8bc1\u636e",
+    "\u6587\u4e66",
+    "\u6587\u4ef6",
+    "\u91d1\u989d",
+    "\u91d1\u94b1",
+    "\u65f6\u95f4",
+    "\u65e5\u671f",
+    "\u6cd5\u5f8b",
+    "\u6cd5\u6761",
+    "\u8bc9\u6c42",
+    "\u7a0b\u5e8f",
+}
 
 
 def _normalize_text(value: Any) -> str:
@@ -161,7 +197,11 @@ def _derive_conversation_count(
     raw_graph_payload: dict[str, Any] | None,
 ) -> int:
     raw_graph = raw_graph_payload.get("graph") if isinstance(raw_graph_payload, dict) else {}
-    raw_stats = raw_graph.get("stats") if isinstance(raw_graph, dict) else {}
+    raw_stats = (
+        raw_graph.get("stats")
+        if isinstance(raw_graph, dict) and isinstance(raw_graph.get("stats"), dict)
+        else {}
+    )
     conversation_count = _positive_int(raw_stats.get("conversation_count"))
     if conversation_count > 0:
         return conversation_count
@@ -256,6 +296,31 @@ def _extract_node_raw_ids(node: dict[str, Any]) -> list[str]:
     return _sorted_unique_strings(values)
 
 
+def _extract_node_type(node: dict[str, Any]) -> str:
+    candidates = [
+        node.get("graph_node_type"),
+        node.get("entity_type"),
+        node.get("type"),
+        node.get("kind"),
+    ]
+    properties = node.get("properties")
+    if isinstance(properties, dict):
+        candidates.extend(
+            [
+                properties.get("graph_node_type"),
+                properties.get("entity_type"),
+                properties.get("type"),
+                properties.get("kind"),
+            ]
+        )
+
+    for candidate in candidates:
+        normalized = _normalize_key(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
 def _extract_self_anchor_labels_from_node(node: dict[str, Any]) -> list[str]:
     candidates: list[str] = []
     raw_labels = node.get("raw_labels")
@@ -271,6 +336,17 @@ def _extract_self_anchor_labels_from_node(node: dict[str, Any]) -> list[str]:
         for label in _unique_strings(candidates)
         if _normalize_text(label) in _SELF_ANCHOR_LABELS
     ]
+
+
+def _is_self_identity_eligible_node(node: dict[str, Any]) -> bool:
+    if not isinstance(node, dict):
+        return False
+    if not _extract_self_anchor_labels_from_node(node):
+        return False
+    node_type = _extract_node_type(node)
+    if node_type and node_type in _SELF_IDENTITY_EXCLUDED_NODE_TYPES:
+        return False
+    return True
 
 
 def _is_explicit_self_label(value: Any) -> bool:
@@ -316,21 +392,63 @@ def _participant_has_explicit_self_identity(participant: dict[str, Any]) -> bool
     return False
 
 
+def _participant_self_identity_rank(participant: dict[str, Any]) -> tuple[int, int] | None:
+    if not isinstance(participant, dict):
+        return None
+
+    label = _normalize_text(participant.get("label"))
+    role = _normalize_text(participant.get("role"))
+    party_side = _normalize_key(participant.get("party_side"))
+    entity_type = _normalize_key(participant.get("entity_type"))
+
+    if _is_explicit_self_label(label) or _is_explicit_self_label(role):
+        return (0, 0)
+
+    if (
+        party_side in _SELF_PARTY_SIDES
+        and label
+        and label not in {"\u5f53\u4e8b\u4eba", "\u7528\u6237"}
+        and entity_type not in _NON_PERSON_ENTITY_TYPES
+    ):
+        return (1, 0 if entity_type == "person" else 1)
+
+    if party_side in _SELF_PARTY_SIDES and _is_explicit_self_label(role):
+        return (2, 0)
+
+    return None
+
+
+def _select_confirmed_self_participant(
+    raw_graph_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    payload = raw_graph_payload if isinstance(raw_graph_payload, dict) else {}
+    confirmed_participants = payload.get("confirmed_participants")
+    if not isinstance(confirmed_participants, list):
+        return None
+
+    ranked_matches: list[tuple[tuple[int, int], int, dict[str, Any]]] = []
+    for index, participant in enumerate(confirmed_participants):
+        if not isinstance(participant, dict):
+            continue
+        rank = _participant_self_identity_rank(participant)
+        if rank is None:
+            continue
+        ranked_matches.append((rank, index, participant))
+
+    if not ranked_matches:
+        return None
+
+    ranked_matches.sort(key=lambda item: (item[0], item[1]))
+    return ranked_matches[0][2]
+
+
 def _has_confirmed_self_naming(raw_graph_payload: dict[str, Any] | None) -> bool:
     payload = raw_graph_payload if isinstance(raw_graph_payload, dict) else {}
 
     if _has_explicit_self_alias(payload.get("participant_aliases")):
         return True
 
-    confirmed_participants = payload.get("confirmed_participants")
-    if not isinstance(confirmed_participants, list):
-        return False
-
-    return any(
-        _participant_has_explicit_self_identity(participant)
-        for participant in confirmed_participants
-        if isinstance(participant, dict)
-    )
+    return _select_confirmed_self_participant(payload) is not None
 
 
 def _collect_self_anchor_evidence(
@@ -405,6 +523,126 @@ def _build_party_naming_task(
         "source": "dossier_intelligence_rules",
         "evidence": evidence,
     }
+
+
+def _build_participant_mapping_indexes(
+    raw_graph_payload: dict[str, Any] | None,
+) -> tuple[set[str], set[tuple[int, str]], dict[int, list[int]]]:
+    payload = raw_graph_payload if isinstance(raw_graph_payload, dict) else {}
+    participant_mappings = payload.get("participant_mappings")
+    if not isinstance(participant_mappings, list):
+        return set(), set(), {}
+
+    mapped_graph_node_ids: set[str] = set()
+    mapped_legacy_keys: set[tuple[int, str]] = set()
+    participant_conversation_ids: dict[int, set[int]] = {}
+
+    for mapping in participant_mappings:
+        if not isinstance(mapping, dict):
+            continue
+
+        participant_id = _positive_int(mapping.get("participant_id"))
+        conversation_id = _positive_int(mapping.get("conversation_id"))
+        raw_label = _normalize_text(mapping.get("raw_label"))
+        graph_node_id = _normalize_text(mapping.get("graph_node_id"))
+
+        if graph_node_id:
+            mapped_graph_node_ids.add(graph_node_id)
+        if conversation_id > 0 and raw_label:
+            mapped_legacy_keys.add((conversation_id, _normalize_key(raw_label)))
+        if participant_id > 0 and conversation_id > 0:
+            participant_conversation_ids.setdefault(participant_id, set()).add(conversation_id)
+
+    return (
+        mapped_graph_node_ids,
+        mapped_legacy_keys,
+        {
+            participant_id: sorted(conversation_ids)
+            for participant_id, conversation_ids in participant_conversation_ids.items()
+        },
+    )
+
+
+def _build_self_identity_tasks(
+    raw_graph_payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if _derive_conversation_count(None, raw_graph_payload) <= 1:
+        return []
+
+    self_participant = _select_confirmed_self_participant(raw_graph_payload)
+    participant_id = _positive_int(self_participant.get("id")) if isinstance(self_participant, dict) else 0
+    if participant_id <= 0:
+        return []
+
+    participant_display_label = _normalize_text(self_participant.get("label"))
+    if not participant_display_label:
+        return []
+
+    mapped_graph_node_ids, mapped_legacy_keys, participant_conversation_ids = (
+        _build_participant_mapping_indexes(raw_graph_payload)
+    )
+    target_conversation_ids = participant_conversation_ids.get(participant_id, [])
+    target_conversation_id_set = set(target_conversation_ids)
+
+    raw_graph = raw_graph_payload.get("graph") if isinstance(raw_graph_payload, dict) else {}
+    raw_nodes = raw_graph.get("nodes") if isinstance(raw_graph, dict) else []
+    tasks: list[dict[str, Any]] = []
+    seen_graph_node_ids: set[str] = set()
+
+    for node in raw_nodes if isinstance(raw_nodes, list) else []:
+        if not _is_self_identity_eligible_node(node):
+            continue
+
+        raw_node_ids = _extract_node_raw_ids(node)
+        graph_node_id = raw_node_ids[0] if raw_node_ids else ""
+        if not graph_node_id or graph_node_id in seen_graph_node_ids:
+            continue
+        seen_graph_node_ids.add(graph_node_id)
+
+        conversation_ids = _extract_node_conversation_ids(node)
+        conversation_id = conversation_ids[0] if conversation_ids else 0
+        raw_label = _extract_node_label(node)
+        if conversation_id <= 0 or not raw_label:
+            continue
+        if conversation_id in target_conversation_id_set:
+            continue
+        if graph_node_id in mapped_graph_node_ids:
+            continue
+        if (conversation_id, _normalize_key(raw_label)) in mapped_legacy_keys:
+            continue
+
+        graph_node_type = _extract_node_type(node) or "person"
+        tasks.append(
+            {
+                "task_type": "entity_identity",
+                "subject": "self_anchor",
+                "title": _SELF_IDENTITY_TITLE,
+                "source_node": {
+                    "conversation_id": conversation_id,
+                    "raw_label": raw_label,
+                    "graph_node_id": graph_node_id,
+                    "graph_node_label": _normalize_text(
+                        node.get("graph_node_label") or raw_label
+                    )
+                    or raw_label,
+                    "graph_node_type": graph_node_type,
+                },
+                "target_participant": {
+                    "participant_id": participant_id,
+                    "display_label": participant_display_label,
+                    "source_conversation_ids": list(target_conversation_ids),
+                },
+                "reason": _SELF_IDENTITY_REASON_TEMPLATE.format(
+                    display_label=participant_display_label
+                ),
+                "confidence": _SELF_IDENTITY_CONFIDENCE,
+                "requires_user_confirmation": True,
+                "suggested_action": _SELF_IDENTITY_SUGGESTED_ACTION,
+                "source": _SELF_IDENTITY_SOURCE,
+            }
+        )
+
+    return tasks
 
 
 async def _load_display_graph_context(
@@ -529,6 +767,15 @@ async def build_dossier_intelligence(
             "build_party_naming_tasks",
             "success",
             task_count=1 if party_naming_task is not None else 0,
+        )
+    )
+    self_identity_tasks = _build_self_identity_tasks(raw_graph_payload)
+    confirmation_tasks.extend(self_identity_tasks)
+    steps.append(
+        _step(
+            "build_self_identity_tasks",
+            "success",
+            task_count=len(self_identity_tasks),
         )
     )
     steps.append(

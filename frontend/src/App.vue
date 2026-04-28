@@ -623,6 +623,47 @@
                 </div>
 
                 <div
+                  v-if="selectedDossierSelfAnchorIdentityTasks.length"
+                  class="dossier-coordination-group"
+                >
+                  <div class="dossier-detail-conversations-title">待确认事项</div>
+                  <div class="dossier-intelligence-task-list">
+                    <div
+                      v-for="(task, index) in selectedDossierSelfAnchorIdentityTasks"
+                      :key="`dossier-self-identity-task-${index}`"
+                      class="dossier-intelligence-task-card"
+                    >
+                      <div class="dossier-intelligence-task-header">
+                        <strong>{{ task.title || '确认当事人是否为同一人' }}</strong>
+                        <span class="dossier-intelligence-task-type">{{ task.task_type }}</span>
+                      </div>
+                      <div class="dossier-intelligence-task-reason">
+                        {{ selfAnchorIdentityTaskPrompt(task) }}
+                      </div>
+                      <div class="dossier-intelligence-task-meta">
+                        <span>{{ task.reason || '暂无原因说明' }}</span>
+                        <span v-if="task.confidence">{{ `置信度：${task.confidence}` }}</span>
+                      </div>
+                      <div class="dossier-intelligence-task-evidence">
+                        <span>
+                          {{
+                            `source_node：${task?.source_node?.graph_node_label || task?.source_node?.raw_label || '当事人'} / ${formatGraphConversationLabel(task?.source_node?.conversation_id)}`
+                          }}
+                        </span>
+                        <span>
+                          {{
+                            `target_participant：${task?.target_participant?.display_label || '已命名当事人'}`
+                          }}
+                        </span>
+                      </div>
+                      <div class="dossier-intelligence-task-actions">
+                        <span>确认操作将在下一步支持</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
                   v-if="selectedDossierCoordinationIsolatedAnchorEntities.length"
                   class="dossier-coordination-group"
                 >
@@ -2139,6 +2180,13 @@ const selectedDossierCoordinationPartyNamingTasks = computed(() =>
     (task) => String(task?.task_type || '').trim() === 'party_naming'
   )
 )
+const selectedDossierSelfAnchorIdentityTasks = computed(() =>
+  selectedDossierIntelligenceConfirmationTasks.value.filter(
+    (task) =>
+      String(task?.task_type || '').trim() === 'entity_identity' &&
+      String(task?.subject || '').trim() === 'self_anchor'
+  )
+)
 const selectedDossierSelfAnchorParticipants = computed(() =>
   selectedDossierResolvedParticipants.value.filter(
     (participant) => String(participant?.label || '').trim() === '我'
@@ -3304,6 +3352,17 @@ function coordinationEntityIdentityReason(entity) {
 
 function coordinationEntityHasBestConversation(entity) {
   return Number(entity?.best_conversation_id || 0) > 0
+}
+
+function selfAnchorIdentityTaskPrompt(task) {
+  const conversationId = Number(task?.source_node?.conversation_id || 0)
+  const rawLabel = String(task?.source_node?.raw_label || '当事人').trim() || '当事人'
+  const targetLabel =
+    String(task?.target_participant?.display_label || '已命名当事人').trim() || '已命名当事人'
+  if (conversationId > 0) {
+    return `会话 #${conversationId} 的 ${rawLabel} 是否也是 ${targetLabel}？`
+  }
+  return `${rawLabel} 是否也是 ${targetLabel}？`
 }
 
 async function handleOpenCoordinationEntityConversation(entity) {

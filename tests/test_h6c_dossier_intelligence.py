@@ -56,6 +56,7 @@ def _patch_display_graph_context(
     raw_nodes: list[dict] | None = None,
     display_nodes: list[dict] | None = None,
     confirmed_participants: list[dict] | None = None,
+    participant_mappings: list[dict] | None = None,
     participant_aliases: dict | None = None,
     raw_stats: dict | None = None,
     display_stats: dict | None = None,
@@ -67,6 +68,7 @@ def _patch_display_graph_context(
             {
                 "participant_aliases": participant_aliases or {},
                 "confirmed_participants": confirmed_participants or [],
+                "participant_mappings": participant_mappings or [],
                 "graph": {
                     "stats": raw_stats or {"conversation_count": 1, "node_count": 0, "edge_count": 0},
                     "nodes": raw_nodes or [],
@@ -105,6 +107,15 @@ def _party_naming_tasks(result: dict) -> list[dict]:
         task
         for task in result["confirmation_tasks"]
         if task.get("task_type") == "party_naming"
+    ]
+
+
+def _self_identity_tasks(result: dict) -> list[dict]:
+    return [
+        task
+        for task in result["confirmation_tasks"]
+        if task.get("task_type") == "entity_identity"
+        and task.get("subject") == "self_anchor"
     ]
 
 
@@ -341,6 +352,319 @@ def test_build_dossier_intelligence_dedupes_party_naming_when_confirmed_self_par
     )
 
     assert _party_naming_tasks(result) == []
+
+
+def test_build_dossier_intelligence_generates_self_identity_task_for_new_self_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="\u7cfb\u7edf\u81ea\u52a8\u6458\u8981"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "self-696",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 696,
+            },
+            {
+                "id": "self-697",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 697,
+            },
+        ],
+        display_nodes=[
+            {
+                "id": "participant:123",
+                "kind": "participant",
+                "display_label": "\u5f20\u4e09",
+                "raw_labels": [SELF_ANCHOR_LABEL],
+                "raw_node_ids": ["self-696"],
+                "source_conversation_ids": [696],
+            },
+            {
+                "id": "raw:self-697",
+                "kind": "raw_entity",
+                "display_label": SELF_ANCHOR_LABEL,
+                "raw_labels": [SELF_ANCHOR_LABEL],
+                "raw_node_ids": ["self-697"],
+                "source_conversation_ids": [697],
+            },
+        ],
+        confirmed_participants=[
+            {
+                "id": 123,
+                "label": "\u5f20\u4e09",
+                "role": "",
+                "party_side": "claimant",
+                "entity_type": "person",
+            }
+        ],
+        participant_mappings=[
+            {
+                "participant_id": 123,
+                "conversation_id": 696,
+                "raw_label": SELF_ANCHOR_LABEL,
+                "graph_node_id": "self-696",
+                "graph_node_label": SELF_ANCHOR_LABEL,
+                "graph_node_type": "person",
+            }
+        ],
+        raw_stats={"conversation_count": 2, "node_count": 2, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+        )
+    )
+
+    tasks = _self_identity_tasks(result)
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["title"] == "\u786e\u8ba4\u5f53\u4e8b\u4eba\u662f\u5426\u4e3a\u540c\u4e00\u4eba"
+    assert task["source_node"] == {
+        "conversation_id": 697,
+        "raw_label": SELF_ANCHOR_LABEL,
+        "graph_node_id": "self-697",
+        "graph_node_label": SELF_ANCHOR_LABEL,
+        "graph_node_type": "person",
+    }
+    assert task["target_participant"] == {
+        "participant_id": 123,
+        "display_label": "\u5f20\u4e09",
+        "source_conversation_ids": [696],
+    }
+    assert task["confidence"] == "high"
+    assert task["requires_user_confirmation"] is True
+    assert task["suggested_action"] == "confirm_same_self"
+    assert task["source"] == "dossier_intelligence_rules"
+    assert "\u5f20\u4e09" in task["reason"]
+    assert "build_self_identity_tasks" in _step_names(result)
+    assert _party_naming_tasks(result) == []
+
+
+def test_build_dossier_intelligence_does_not_generate_self_identity_task_for_single_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="\u7cfb\u7edf\u81ea\u52a8\u6458\u8981"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "self-696",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 696,
+            }
+        ],
+        confirmed_participants=[
+            {
+                "id": 123,
+                "label": "\u5f20\u4e09",
+                "role": "",
+                "party_side": "claimant",
+                "entity_type": "person",
+            }
+        ],
+        participant_mappings=[
+            {
+                "participant_id": 123,
+                "conversation_id": 696,
+                "raw_label": SELF_ANCHOR_LABEL,
+                "graph_node_id": "self-696",
+                "graph_node_label": SELF_ANCHOR_LABEL,
+                "graph_node_type": "person",
+            }
+        ],
+        raw_stats={"conversation_count": 1, "node_count": 1, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+        )
+    )
+
+    assert _self_identity_tasks(result) == []
+
+
+def test_build_dossier_intelligence_prefers_party_naming_when_no_named_self_participant_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="\u7cfb\u7edf\u81ea\u52a8\u6458\u8981"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "self-696",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 696,
+            },
+            {
+                "id": "self-697",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 697,
+            },
+        ],
+        display_nodes=[
+            {
+                "id": "raw:self-696",
+                "kind": "raw_entity",
+                "display_label": SELF_ANCHOR_LABEL,
+                "raw_labels": [SELF_ANCHOR_LABEL],
+                "raw_node_ids": ["self-696"],
+                "source_conversation_ids": [696],
+            },
+            {
+                "id": "raw:self-697",
+                "kind": "raw_entity",
+                "display_label": SELF_ANCHOR_LABEL,
+                "raw_labels": [SELF_ANCHOR_LABEL],
+                "raw_node_ids": ["self-697"],
+                "source_conversation_ids": [697],
+            },
+        ],
+        raw_stats={"conversation_count": 2, "node_count": 2, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+        )
+    )
+
+    assert _self_identity_tasks(result) == []
+    assert len(_party_naming_tasks(result)) == 1
+
+
+def test_build_dossier_intelligence_skips_self_identity_task_when_node_is_already_mapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="\u7cfb\u7edf\u81ea\u52a8\u6458\u8981"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "self-696",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 696,
+            },
+            {
+                "id": "self-697",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 697,
+            },
+        ],
+        confirmed_participants=[
+            {
+                "id": 123,
+                "label": "\u5f20\u4e09",
+                "role": "",
+                "party_side": "claimant",
+                "entity_type": "person",
+            }
+        ],
+        participant_mappings=[
+            {
+                "participant_id": 123,
+                "conversation_id": 696,
+                "raw_label": SELF_ANCHOR_LABEL,
+                "graph_node_id": "self-696",
+                "graph_node_label": SELF_ANCHOR_LABEL,
+                "graph_node_type": "person",
+            },
+            {
+                "participant_id": 123,
+                "conversation_id": 697,
+                "raw_label": SELF_ANCHOR_LABEL,
+                "graph_node_id": "self-697",
+                "graph_node_label": SELF_ANCHOR_LABEL,
+                "graph_node_type": "person",
+            },
+        ],
+        raw_stats={"conversation_count": 2, "node_count": 2, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+        )
+    )
+
+    assert _self_identity_tasks(result) == []
+
+
+def test_build_dossier_intelligence_excludes_non_person_nodes_from_self_identity_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="\u7cfb\u7edf\u81ea\u52a8\u6458\u8981"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "self-696",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 696,
+            },
+            {
+                "id": "event-697",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "event",
+                "conversation_id": 697,
+            },
+            {
+                "id": "document-698",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "document",
+                "conversation_id": 698,
+            },
+        ],
+        confirmed_participants=[
+            {
+                "id": 123,
+                "label": "\u5f20\u4e09",
+                "role": "",
+                "party_side": "claimant",
+                "entity_type": "person",
+            }
+        ],
+        participant_mappings=[
+            {
+                "participant_id": 123,
+                "conversation_id": 696,
+                "raw_label": SELF_ANCHOR_LABEL,
+                "graph_node_id": "self-696",
+                "graph_node_label": SELF_ANCHOR_LABEL,
+                "graph_node_type": "person",
+            }
+        ],
+        raw_stats={"conversation_count": 3, "node_count": 3, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+        )
+    )
+
+    assert _self_identity_tasks(result) == []
 
 
 def test_build_dossier_intelligence_rejects_non_owner_access(
