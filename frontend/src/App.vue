@@ -530,6 +530,77 @@
               </div>
 
               <div class="dossier-intelligence-card">
+                <div class="dossier-detail-conversations-title">待确认事项</div>
+                <div
+                  v-if="selectedDossierIntelligenceConfirmationTasks.length"
+                  class="dossier-intelligence-task-list"
+                >
+                  <div
+                    v-for="(task, index) in selectedDossierIntelligenceConfirmationTasks"
+                    :key="`dossier-intelligence-task-${index}`"
+                    class="dossier-intelligence-task-card"
+                  >
+                    <template v-if="task?.task_type === 'party_naming'">
+                      <div class="dossier-intelligence-task-header">
+                        <strong>确认当事人称呼</strong>
+                        <span class="dossier-intelligence-task-type">{{ task.task_type }}</span>
+                      </div>
+                      <div class="dossier-intelligence-task-meta">
+                        <span>{{ `当前称呼：${task.current_label || '未标注'}` }}</span>
+                        <span>
+                          {{
+                            `建议称呼：${Array.isArray(task.suggested_labels) && task.suggested_labels.length
+                              ? task.suggested_labels.join(' / ')
+                              : '暂无建议'}`
+                          }}
+                        </span>
+                      </div>
+                      <div class="dossier-intelligence-task-reason">
+                        {{ task.reason || '暂无原因说明' }}
+                      </div>
+                      <div class="dossier-intelligence-task-evidence">
+                        <span>
+                          {{
+                            `raw_labels：${Array.isArray(task?.evidence?.raw_labels) && task.evidence.raw_labels.length
+                              ? task.evidence.raw_labels.join(' / ')
+                              : '暂无'}`
+                          }}
+                        </span>
+                        <span>
+                          {{
+                            `source_conversation_ids：${formatDossierIntelligenceEvidenceList(task?.evidence?.source_conversation_ids)}`
+                          }}
+                        </span>
+                        <span>
+                          {{
+                            `raw_node_ids：${formatDossierIntelligenceEvidenceList(task?.evidence?.raw_node_ids)}`
+                          }}
+                        </span>
+                      </div>
+                      <div class="dossier-intelligence-task-actions">
+                        <el-button size="small" disabled>命名确认将在下一步支持</el-button>
+                        <span>后续可在此确认展示名称</span>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <div class="dossier-intelligence-task-header">
+                        <strong>{{ task?.task_type || 'unknown_task' }}</strong>
+                        <span class="dossier-intelligence-task-type">通用任务</span>
+                      </div>
+                      <div class="dossier-intelligence-task-meta">
+                        <span>{{ `requires_user_confirmation：${task?.requires_user_confirmation ? '是' : '否'}` }}</span>
+                      </div>
+                      <div class="dossier-intelligence-task-reason">
+                        {{ task?.reason || '暂无原因说明' }}
+                      </div>
+                      <pre class="dossier-intelligence-task-json">{{ formatDossierIntelligenceEvidenceJson(task?.evidence) }}</pre>
+                    </template>
+                  </div>
+                </div>
+                <div v-else class="dossier-intelligence-empty">暂无待确认事项</div>
+              </div>
+
+              <div class="dossier-intelligence-card">
                 <div class="dossier-detail-conversations-title">图谱说明</div>
                 <ul
                   v-if="selectedDossierIntelligenceDisplayGraphNotes.length"
@@ -1620,6 +1691,7 @@ const dossierIntelligenceState = reactive({
     source: '',
     updatedAt: '',
   },
+  confirmationTasks: [],
   displayGraphNotes: [],
   provider: '',
   model: '',
@@ -1853,6 +1925,11 @@ const selectedDossierGraphOpposingAlias = computed(() =>
   formatParticipantAliasSummary(selectedDossierGraphParticipantAliases.value?.opposing_party)
 )
 const selectedDossierIntelligenceSummary = computed(() => dossierIntelligenceState.summary || {})
+const selectedDossierIntelligenceConfirmationTasks = computed(() =>
+  Array.isArray(dossierIntelligenceState.confirmationTasks)
+    ? dossierIntelligenceState.confirmationTasks
+    : []
+)
 const selectedDossierIntelligenceDisplayGraphNotes = computed(() =>
   Array.isArray(dossierIntelligenceState.displayGraphNotes)
     ? dossierIntelligenceState.displayGraphNotes
@@ -2275,6 +2352,7 @@ function resetDossierIntelligenceState() {
     source: '',
     updatedAt: '',
   }
+  dossierIntelligenceState.confirmationTasks = []
   dossierIntelligenceState.displayGraphNotes = []
   dossierIntelligenceState.provider = ''
   dossierIntelligenceState.model = ''
@@ -2294,6 +2372,9 @@ function applyDossierIntelligencePayload(dossierId, payload) {
     source: typeof summary.source === 'string' ? summary.source : '',
     updatedAt: typeof summary.updated_at === 'string' ? summary.updated_at : '',
   }
+  dossierIntelligenceState.confirmationTasks = Array.isArray(payload?.confirmation_tasks)
+    ? payload.confirmation_tasks
+    : []
   dossierIntelligenceState.displayGraphNotes = Array.isArray(payload?.display_graph_notes)
     ? payload.display_graph_notes
     : []
@@ -3693,6 +3774,21 @@ function dossierIntelligenceSummarySourceLabel(source) {
       return '规则兜底'
     default:
       return '未标注来源'
+  }
+}
+
+function formatDossierIntelligenceEvidenceList(value) {
+  if (!Array.isArray(value) || !value.length) {
+    return '暂无'
+  }
+  return value.map((item) => String(item)).join(' / ')
+}
+
+function formatDossierIntelligenceEvidenceJson(value) {
+  try {
+    return JSON.stringify(value ?? {}, null, 2)
+  } catch (error) {
+    return '{}'
   }
 }
 
@@ -5309,6 +5405,83 @@ body,
   font-size: 11px;
   color: #6b7280;
   white-space: nowrap;
+}
+
+.dossier-intelligence-task-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-intelligence-task-card {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #bfdbfe;
+  background: #f8fbff;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dossier-intelligence-task-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dossier-intelligence-task-header strong {
+  font-size: 13px;
+  color: #111827;
+}
+
+.dossier-intelligence-task-type {
+  font-size: 11px;
+  color: #1d4ed8;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  padding: 4px 8px;
+}
+
+.dossier-intelligence-task-meta,
+.dossier-intelligence-task-evidence {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: #4b5563;
+  line-height: 1.6;
+}
+
+.dossier-intelligence-task-reason {
+  font-size: 12px;
+  color: #1f2937;
+  line-height: 1.7;
+}
+
+.dossier-intelligence-task-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.dossier-intelligence-task-json {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #dbeafe;
+  color: #374151;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .dossier-participants-section {
