@@ -12,6 +12,7 @@ from app.database.mysql_db import Base, engine
 from app.models import (
     Conversation,
     Dossier,
+    DossierEntityResolutionDecision,
     DossierParticipant,
     DossierParticipantMention,
     Message,
@@ -37,7 +38,10 @@ VALID_PARTICIPANT_MENTION_SOURCES = {
     "conversation",
     "user",
     "party_naming",
+    "self_identity_confirmation",
 }
+VALID_ENTITY_RESOLUTION_DECISION_TYPES = {"same", "not_same"}
+VALID_ENTITY_RESOLUTION_SUBJECTS = {"self_anchor"}
 PARTICIPANT_RESOLVABLE_ENTITY_TYPES = {
     "person",
     "organization",
@@ -121,6 +125,18 @@ RUNTIME_INDEX_SPECS = {
         (
             "ix_dossier_participant_mentions_dossier_id_conversation_id",
             ("dossier_id", "conversation_id"),
+        ),
+    ),
+    "dossier_entity_resolution_decisions": (
+        ("ix_dossier_entity_resolution_decisions_dossier_id", ("dossier_id",)),
+        ("ix_dossier_entity_resolution_decisions_user_id", ("user_id",)),
+        (
+            "ix_dossier_entity_resolution_decisions_source_graph_node_id",
+            ("source_graph_node_id",),
+        ),
+        (
+            "ix_dossier_entity_resolution_decisions_source_graph_target",
+            ("source_graph_node_id", "target_participant_id"),
         ),
     ),
     "messages": (
@@ -396,6 +412,20 @@ def normalize_participant_mention_source(source: str | None) -> str:
     cleaned = " ".join((source or "").strip().split()).lower()
     if cleaned not in VALID_PARTICIPANT_MENTION_SOURCES:
         raise ValueError(f"Unsupported participant mention source: {source}")
+    return cleaned
+
+
+def normalize_entity_resolution_decision_type(decision_type: str | None) -> str:
+    cleaned = " ".join((decision_type or "").strip().split()).lower()
+    if cleaned not in VALID_ENTITY_RESOLUTION_DECISION_TYPES:
+        raise ValueError(f"Unsupported entity resolution decision_type: {decision_type}")
+    return cleaned
+
+
+def normalize_entity_resolution_subject(subject: str | None) -> str:
+    cleaned = " ".join((subject or "").strip().split()).lower()
+    if cleaned not in VALID_ENTITY_RESOLUTION_SUBJECTS:
+        raise ValueError(f"Unsupported entity resolution subject: {subject}")
     return cleaned
 
 
@@ -903,6 +933,32 @@ def serialize_dossier_participant_mention(
     return payload
 
 
+def serialize_dossier_entity_resolution_decision(
+    decision: DossierEntityResolutionDecision,
+) -> dict[str, Any]:
+    return {
+        "id": decision.id,
+        "dossier_id": decision.dossier_id,
+        "user_id": decision.user_id,
+        "decision_type": normalize_entity_resolution_decision_type(
+            getattr(decision, "decision_type", "same")
+        ),
+        "subject": normalize_entity_resolution_subject(
+            getattr(decision, "subject", "self_anchor")
+        ),
+        "source_conversation_id": int(getattr(decision, "source_conversation_id", 0) or 0),
+        "source_graph_node_id": getattr(decision, "source_graph_node_id", "") or "",
+        "source_raw_label": getattr(decision, "source_raw_label", "") or "",
+        "target_participant_id": int(getattr(decision, "target_participant_id", 0) or 0),
+        "target_display_label": getattr(decision, "target_display_label", None),
+        "new_participant_id": (
+            int(getattr(decision, "new_participant_id", 0) or 0) or None
+        ),
+        "new_display_label": getattr(decision, "new_display_label", None),
+        "created_at": decision.created_at.isoformat() if decision.created_at else None,
+    }
+
+
 async def list_dossier_participants(
     db: AsyncSession,
     user_id: int,
@@ -953,6 +1009,22 @@ async def list_dossier_participant_mentions(
             DossierParticipantMention.conversation_id.asc(),
             DossierParticipantMention.id.asc(),
         )
+    )
+    return list(result)
+
+
+async def list_dossier_entity_resolution_decisions(
+    db: AsyncSession,
+    user_id: int,
+    dossier_id: int,
+) -> list[DossierEntityResolutionDecision]:
+    result = await db.scalars(
+        select(DossierEntityResolutionDecision)
+        .where(
+            DossierEntityResolutionDecision.user_id == user_id,
+            DossierEntityResolutionDecision.dossier_id == dossier_id,
+        )
+        .order_by(DossierEntityResolutionDecision.id.asc())
     )
     return list(result)
 
@@ -1010,6 +1082,52 @@ async def update_dossier_participant_record(
     db.add(participant)
     await db.flush()
     return participant
+
+
+async def create_dossier_entity_resolution_decision(
+    db: AsyncSession,
+    *,
+    dossier: Dossier,
+    user_id: int,
+    decision_type: str,
+    subject: str,
+    source_conversation_id: int,
+    source_graph_node_id: str,
+    source_raw_label: str,
+    target_participant_id: int,
+    target_display_label: str | None = None,
+    new_participant_id: int | None = None,
+    new_display_label: str | None = None,
+) -> DossierEntityResolutionDecision:
+    normalized_source_conversation_id = int(source_conversation_id or 0)
+    if normalized_source_conversation_id <= 0:
+        raise ValueError("Entity resolution source_conversation_id is required")
+
+    normalized_source_graph_node_id = _normalize_optional_text(source_graph_node_id)
+    if not normalized_source_graph_node_id:
+        raise ValueError("Entity resolution source_graph_node_id is required")
+
+    normalized_target_participant_id = int(target_participant_id or 0)
+    if normalized_target_participant_id <= 0:
+        raise ValueError("Entity resolution target_participant_id is required")
+
+    decision = DossierEntityResolutionDecision(
+        dossier_id=dossier.id,
+        user_id=user_id,
+        decision_type=normalize_entity_resolution_decision_type(decision_type),
+        subject=normalize_entity_resolution_subject(subject),
+        source_conversation_id=normalized_source_conversation_id,
+        source_graph_node_id=normalized_source_graph_node_id,
+        source_raw_label=_normalize_participant_label(source_raw_label),
+        target_participant_id=normalized_target_participant_id,
+        target_display_label=_normalize_optional_text(target_display_label),
+        new_participant_id=(int(new_participant_id or 0) or None),
+        new_display_label=_normalize_optional_text(new_display_label),
+    )
+    db.add(decision)
+    await db.flush()
+    await touch_dossier(db, dossier=dossier)
+    return decision
 
 
 def build_dossier_participant_lookup(

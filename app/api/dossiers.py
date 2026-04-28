@@ -13,6 +13,7 @@ from app.services.conversation_store import (
     archive_dossier_record,
     build_dossier_participant_candidates,
     build_dossier_participant_lookup,
+    create_dossier_entity_resolution_decision,
     create_dossier_participant_record,
     create_dossier_record,
     ensure_storage_schema,
@@ -21,12 +22,14 @@ from app.services.conversation_store import (
     hard_delete_dossier_record,
     is_generic_participant_label,
     list_dossier_conversations,
+    list_dossier_entity_resolution_decisions,
     list_dossier_participant_mentions,
     list_dossier_participants,
     list_user_dossiers,
     normalize_dossier_status,
     resolve_dossier_participant_mentions,
     serialize_dossier,
+    serialize_dossier_entity_resolution_decision,
     serialize_dossier_detail,
     serialize_dossier_participant,
     serialize_dossier_participant_mention,
@@ -121,10 +124,30 @@ class PartyNamingConfirmRequest(BaseModel):
     source_task: PartyNamingSourceTaskRequest
 
 
+class SelfIdentitySourceNodeRequest(BaseModel):
+    conversation_id: int = Field(..., gt=0)
+    raw_label: str = Field(..., min_length=1, max_length=100)
+    graph_node_id: str = Field(..., min_length=1, max_length=255)
+    graph_node_label: str | None = Field(default=None, max_length=255)
+    graph_node_type: str | None = Field(default=None, max_length=100)
+
+
+class SelfIdentityConfirmRequest(BaseModel):
+    action: str = Field(..., min_length=1, max_length=32)
+    source_node: SelfIdentitySourceNodeRequest
+    target_participant_id: int = Field(..., gt=0)
+    new_display_label: str | None = Field(default=None, max_length=50)
+
+
 _SELF_ANCHOR_SUBJECT = "self_anchor"
 _PARTY_NAMING_ROLE = "当事人"
 _PARTY_NAMING_MENTION_SOURCE = "party_naming"
 _PARTY_NAMING_GRAPH_NODE_TYPE = "person"
+_SELF_IDENTITY_CONFIRM_MENTION_SOURCE = "self_identity_confirmation"
+_SELF_IDENTITY_CONFIRM_ACTION_SAME = "confirm_same"
+_SELF_IDENTITY_CONFIRM_ACTION_DIFFERENT = "confirm_different"
+_SELF_IDENTITY_DECISION_SAME = "same"
+_SELF_IDENTITY_DECISION_NOT_SAME = "not_same"
 _SELF_ANCHOR_LABELS = {
     "当事人",
     "我",
@@ -162,6 +185,77 @@ def _positive_int(value: Any) -> int:
     return normalized if normalized > 0 else 0
 
 
+def _normalize_self_identity_action(value: Any) -> str:
+    normalized = _normalize_key(value)
+    if normalized not in {
+        _SELF_IDENTITY_CONFIRM_ACTION_SAME,
+        _SELF_IDENTITY_CONFIRM_ACTION_DIFFERENT,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported self identity confirmation action",
+        )
+    return normalized
+
+
+def _normalize_optional_display_label(value: Any) -> str:
+    return _normalize_text(value)
+
+
+def _source_node_matches_mention(
+    mention: Any,
+    *,
+    conversation_id: int,
+    raw_label: str,
+    graph_node_id: str,
+) -> bool:
+    mention_graph_node_id = _normalize_text(getattr(mention, "graph_node_id", ""))
+    if graph_node_id and mention_graph_node_id:
+        return mention_graph_node_id == graph_node_id
+    return (
+        _positive_int(getattr(mention, "conversation_id", 0)) == conversation_id
+        and _normalize_key(getattr(mention, "raw_label", "")) == _normalize_key(raw_label)
+    )
+
+
+def _find_source_node_mention(
+    mentions: list[Any],
+    *,
+    conversation_id: int,
+    raw_label: str,
+    graph_node_id: str,
+) -> Any | None:
+    for mention in mentions:
+        if _source_node_matches_mention(
+            mention,
+            conversation_id=conversation_id,
+            raw_label=raw_label,
+            graph_node_id=graph_node_id,
+        ):
+            return mention
+    return None
+
+
+def _find_self_identity_decision(
+    decisions: list[Any],
+    *,
+    decision_type: str,
+    graph_node_id: str,
+    target_participant_id: int,
+) -> Any | None:
+    for decision in decisions:
+        if _normalize_key(getattr(decision, "subject", "")) != _SELF_ANCHOR_SUBJECT:
+            continue
+        if _normalize_key(getattr(decision, "decision_type", "")) != decision_type:
+            continue
+        if _positive_int(getattr(decision, "target_participant_id", 0)) != target_participant_id:
+            continue
+        if _normalize_text(getattr(decision, "source_graph_node_id", "")) != graph_node_id:
+            continue
+        return decision
+    return None
+
+
 def _find_self_participant(participants: list[Any]) -> Any | None:
     ranked_matches: list[tuple[int, int, Any]] = []
     for index, participant in enumerate(participants):
@@ -190,6 +284,24 @@ def _find_self_participant(participants: list[Any]) -> Any | None:
         return None
     ranked_matches.sort(key=lambda item: (item[0], item[1]))
     return ranked_matches[0][2]
+
+
+def _validate_self_anchor_source_node(source_node: SelfIdentitySourceNodeRequest) -> tuple[int, str, str]:
+    conversation_id = _positive_int(source_node.conversation_id)
+    raw_label = _normalize_text(source_node.raw_label)
+    graph_node_id = _normalize_text(source_node.graph_node_id)
+
+    if conversation_id <= 0 or not raw_label or not graph_node_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="source_node conversation_id, raw_label, and graph_node_id are required",
+        )
+    if raw_label not in _SELF_ANCHOR_LABELS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="self identity confirmation only supports self anchor labels",
+        )
+    return conversation_id, raw_label, graph_node_id
 
 
 def _build_party_naming_mentions_payload(
@@ -828,6 +940,208 @@ async def confirm_dossier_party_naming(
             serialize_dossier_participant_mention(mention, participant_lookup)
             for mention in mentions
         ],
+    }
+
+
+@router.post("/{dossier_id}/intelligence/tasks/self-identity/confirm")
+async def confirm_dossier_self_identity(
+    dossier_id: int,
+    payload: SelfIdentityConfirmRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+    _ensure_dossier_participant_write_allowed(dossier)
+
+    action = _normalize_self_identity_action(payload.action)
+    conversation_id, raw_label, graph_node_id = _validate_self_anchor_source_node(
+        payload.source_node
+    )
+    target_participant = await get_dossier_participant_for_user(
+        db,
+        current_user.user_id,
+        dossier.id,
+        payload.target_participant_id,
+    )
+    if target_participant is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Participant not found")
+
+    target_display_label = _normalize_text(getattr(target_participant, "label", ""))
+    if not target_display_label:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Target participant must have a display label",
+        )
+
+    mentions = await list_dossier_participant_mentions(db, current_user.user_id, dossier.id)
+    existing_source_mention = _find_source_node_mention(
+        mentions,
+        conversation_id=conversation_id,
+        raw_label=raw_label,
+        graph_node_id=graph_node_id,
+    )
+    if existing_source_mention is not None:
+        existing_participant_id = _positive_int(
+            getattr(existing_source_mention, "participant_id", 0)
+        )
+        if action == _SELF_IDENTITY_CONFIRM_ACTION_SAME:
+            if existing_participant_id != target_participant.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Self anchor source node is already linked to another participant",
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Self anchor source node is already linked to another participant",
+            )
+
+    decisions = await list_dossier_entity_resolution_decisions(
+        db,
+        current_user.user_id,
+        dossier.id,
+    )
+    mention_records: list[Any] = []
+    participant = target_participant
+    decision = None
+
+    if action == _SELF_IDENTITY_CONFIRM_ACTION_SAME:
+        if existing_source_mention is None:
+            mention_records = await resolve_dossier_participant_mentions(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                participant=target_participant,
+                mentions=[
+                    {
+                        "conversation_id": conversation_id,
+                        "raw_label": raw_label,
+                        "source": _SELF_IDENTITY_CONFIRM_MENTION_SOURCE,
+                        "confidence": 1.0,
+                        "graph_node_id": graph_node_id,
+                        "graph_node_label": _normalize_text(
+                            payload.source_node.graph_node_label
+                        )
+                        or raw_label,
+                        "graph_node_type": _normalize_text(payload.source_node.graph_node_type)
+                        or "person",
+                    }
+                ],
+            )
+        else:
+            mention_records = [existing_source_mention]
+
+        decision = _find_self_identity_decision(
+            decisions,
+            decision_type=_SELF_IDENTITY_DECISION_SAME,
+            graph_node_id=graph_node_id,
+            target_participant_id=target_participant.id,
+        )
+        if decision is None:
+            try:
+                decision = await create_dossier_entity_resolution_decision(
+                    db,
+                    dossier=dossier,
+                    user_id=current_user.user_id,
+                    decision_type=_SELF_IDENTITY_DECISION_SAME,
+                    subject=_SELF_ANCHOR_SUBJECT,
+                    source_conversation_id=conversation_id,
+                    source_graph_node_id=graph_node_id,
+                    source_raw_label=raw_label,
+                    target_participant_id=target_participant.id,
+                    target_display_label=target_display_label,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    else:
+        new_display_label = _normalize_optional_display_label(payload.new_display_label)
+        if not new_display_label:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="new_display_label is required for confirm_different",
+            )
+        try:
+            participant = await create_dossier_participant_record(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                label=new_display_label,
+                role=_PARTY_NAMING_ROLE,
+                party_side="claimant",
+                entity_type="person",
+                description=None,
+                confirmed_by_user=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        try:
+            mention_records = await resolve_dossier_participant_mentions(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                participant=participant,
+                mentions=[
+                    {
+                        "conversation_id": conversation_id,
+                        "raw_label": raw_label,
+                        "source": _SELF_IDENTITY_CONFIRM_MENTION_SOURCE,
+                        "confidence": 1.0,
+                        "graph_node_id": graph_node_id,
+                        "graph_node_label": _normalize_text(
+                            payload.source_node.graph_node_label
+                        )
+                        or raw_label,
+                        "graph_node_type": _normalize_text(payload.source_node.graph_node_type)
+                        or "person",
+                    }
+                ],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+        try:
+            decision = await create_dossier_entity_resolution_decision(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                decision_type=_SELF_IDENTITY_DECISION_NOT_SAME,
+                subject=_SELF_ANCHOR_SUBJECT,
+                source_conversation_id=conversation_id,
+                source_graph_node_id=graph_node_id,
+                source_raw_label=raw_label,
+                target_participant_id=target_participant.id,
+                target_display_label=target_display_label,
+                new_participant_id=participant.id,
+                new_display_label=participant.label,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await db.commit()
+    await db.refresh(participant)
+    for mention in mention_records:
+        await db.refresh(mention)
+    if decision is not None:
+        await db.refresh(decision)
+
+    participant_lookup = {participant.id: participant}
+    return {
+        "status": "success",
+        "action": action,
+        "participant": serialize_dossier_participant(participant),
+        "mentions": [
+            serialize_dossier_participant_mention(mention, participant_lookup)
+            for mention in mention_records
+        ],
+        "decision": (
+            serialize_dossier_entity_resolution_decision(decision)
+            if decision is not None
+            else None
+        ),
     }
 
 

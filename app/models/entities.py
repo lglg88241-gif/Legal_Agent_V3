@@ -319,6 +319,78 @@ class DossierParticipantMention(Base):
     participant: Mapped[DossierParticipant] = relationship(back_populates="mentions")
 
 
+class DossierEntityResolutionDecision(Base):
+    __tablename__ = "dossier_entity_resolution_decisions"
+    __table_args__ = (
+        Index(
+            "ix_dossier_entity_resolution_decisions_source_graph_node_id",
+            "source_graph_node_id",
+        ),
+        Index(
+            "ix_dossier_entity_resolution_decisions_source_graph_target",
+            "source_graph_node_id",
+            "target_participant_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dossier_id: Mapped[int] = mapped_column(
+        ForeignKey("dossiers.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    decision_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="same",
+        server_default="same",
+    )
+    subject: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="self_anchor",
+        server_default="self_anchor",
+    )
+    source_conversation_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    source_graph_node_id: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        default="",
+    )
+    source_raw_label: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        default="",
+    )
+    target_participant_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    target_display_label: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        default=None,
+    )
+    new_participant_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=None,
+        index=True,
+    )
+    new_display_label: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        default=None,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
 class Message(Base):
     __tablename__ = "messages"
 

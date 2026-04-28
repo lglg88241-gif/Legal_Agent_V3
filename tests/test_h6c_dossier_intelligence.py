@@ -57,6 +57,7 @@ def _patch_display_graph_context(
     display_nodes: list[dict] | None = None,
     confirmed_participants: list[dict] | None = None,
     participant_mappings: list[dict] | None = None,
+    entity_resolution_decisions: list[dict] | None = None,
     participant_aliases: dict | None = None,
     raw_stats: dict | None = None,
     display_stats: dict | None = None,
@@ -69,6 +70,7 @@ def _patch_display_graph_context(
                 "participant_aliases": participant_aliases or {},
                 "confirmed_participants": confirmed_participants or [],
                 "participant_mappings": participant_mappings or [],
+                "entity_resolution_decisions": entity_resolution_decisions or [],
                 "graph": {
                     "stats": raw_stats or {"conversation_count": 1, "node_count": 0, "edge_count": 0},
                     "nodes": raw_nodes or [],
@@ -654,6 +656,72 @@ def test_build_dossier_intelligence_excludes_non_person_nodes_from_self_identity
             }
         ],
         raw_stats={"conversation_count": 3, "node_count": 3, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+        )
+    )
+
+    assert _self_identity_tasks(result) == []
+
+
+def test_build_dossier_intelligence_skips_self_identity_task_after_not_same_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="\u7cfb\u7edf\u81ea\u52a8\u6458\u8981"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "self-696",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 696,
+            },
+            {
+                "id": "self-697",
+                "label": SELF_ANCHOR_LABEL,
+                "type": "person",
+                "conversation_id": 697,
+            },
+        ],
+        confirmed_participants=[
+            {
+                "id": 123,
+                "label": "\u5f20\u4e09",
+                "role": "",
+                "party_side": "claimant",
+                "entity_type": "person",
+            }
+        ],
+        participant_mappings=[
+            {
+                "participant_id": 123,
+                "conversation_id": 696,
+                "raw_label": SELF_ANCHOR_LABEL,
+                "graph_node_id": "self-696",
+                "graph_node_label": SELF_ANCHOR_LABEL,
+                "graph_node_type": "person",
+            }
+        ],
+        entity_resolution_decisions=[
+            {
+                "decision_type": "not_same",
+                "subject": "self_anchor",
+                "source_conversation_id": 697,
+                "source_graph_node_id": "self-697",
+                "source_raw_label": SELF_ANCHOR_LABEL,
+                "target_participant_id": 123,
+                "target_display_label": "\u5f20\u4e09",
+                "new_participant_id": 321,
+                "new_display_label": "\u674e\u56db",
+            }
+        ],
+        raw_stats={"conversation_count": 2, "node_count": 2, "edge_count": 0},
     )
 
     result = asyncio.run(

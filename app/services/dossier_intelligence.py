@@ -9,9 +9,11 @@ from app.services.conversation_store import (
     build_dossier_participant_lookup,
     get_dossier_for_user,
     list_dossier_conversations,
+    list_dossier_entity_resolution_decisions,
     list_dossier_participant_mentions,
     list_dossier_participants,
     serialize_dossier,
+    serialize_dossier_entity_resolution_decision,
     serialize_dossier_participant,
     serialize_dossier_participant_mention,
 )
@@ -563,6 +565,30 @@ def _build_participant_mapping_indexes(
     )
 
 
+def _build_self_identity_not_same_index(
+    raw_graph_payload: dict[str, Any] | None,
+) -> set[tuple[str, int]]:
+    payload = raw_graph_payload if isinstance(raw_graph_payload, dict) else {}
+    decisions = payload.get("entity_resolution_decisions")
+    if not isinstance(decisions, list):
+        return set()
+
+    index: set[tuple[str, int]] = set()
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        if _normalize_key(decision.get("subject")) != "self_anchor":
+            continue
+        if _normalize_key(decision.get("decision_type")) != "not_same":
+            continue
+
+        graph_node_id = _normalize_text(decision.get("source_graph_node_id"))
+        target_participant_id = _positive_int(decision.get("target_participant_id"))
+        if graph_node_id and target_participant_id > 0:
+            index.add((graph_node_id, target_participant_id))
+    return index
+
+
 def _build_self_identity_tasks(
     raw_graph_payload: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -581,6 +607,7 @@ def _build_self_identity_tasks(
     mapped_graph_node_ids, mapped_legacy_keys, participant_conversation_ids = (
         _build_participant_mapping_indexes(raw_graph_payload)
     )
+    not_same_pairs = _build_self_identity_not_same_index(raw_graph_payload)
     target_conversation_ids = participant_conversation_ids.get(participant_id, [])
     target_conversation_id_set = set(target_conversation_ids)
 
@@ -609,6 +636,8 @@ def _build_self_identity_tasks(
         if graph_node_id in mapped_graph_node_ids:
             continue
         if (conversation_id, _normalize_key(raw_label)) in mapped_legacy_keys:
+            continue
+        if (graph_node_id, participant_id) in not_same_pairs:
             continue
 
         graph_node_type = _extract_node_type(node) or "person"
@@ -660,6 +689,7 @@ async def _load_display_graph_context(
     participant_aliases = serialize_dossier(dossier).get("participant_aliases", {})
     participants = await list_dossier_participants(db, user_id, dossier.id)
     mentions = await list_dossier_participant_mentions(db, user_id, dossier.id)
+    decisions = await list_dossier_entity_resolution_decisions(db, user_id, dossier.id)
     participant_lookup = build_dossier_participant_lookup(participants)
     raw_graph_payload = await get_dossier_graph_payload(
         user_id=user_id,
@@ -675,6 +705,10 @@ async def _load_display_graph_context(
             for mention in mentions
         ],
     )
+    raw_graph_payload["entity_resolution_decisions"] = [
+        serialize_dossier_entity_resolution_decision(decision)
+        for decision in decisions
+    ]
     display_graph = build_dossier_display_graph(
         raw_graph=raw_graph_payload.get("graph"),
         confirmed_participants=raw_graph_payload.get("confirmed_participants"),
