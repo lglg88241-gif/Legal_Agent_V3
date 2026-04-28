@@ -1783,7 +1783,20 @@ const systemStatus = reactive({
   },
 })
 
-const currentAnalysis = reactive({ actions: [], sources: [] })
+const currentAnalysis = reactive({
+  actions: [],
+  sources: [],
+  routeIntent: '',
+  latencyMs: null,
+  confidenceScore: null,
+  missingInfo: [],
+  requestState: 'idle',
+  requestError: '',
+  updatedAt: '',
+  graphSyncStatus: 'idle',
+  graphSyncSummary: '',
+  graphSyncUpdatedAt: '',
+})
 const currentGraph = reactive({
   query: '',
   nodes: [],
@@ -2471,6 +2484,16 @@ function applyDossierDisplayGraphPayload(dossierId, payload) {
 function resetAnalysis() {
   currentAnalysis.actions = []
   currentAnalysis.sources = []
+  currentAnalysis.routeIntent = ''
+  currentAnalysis.latencyMs = null
+  currentAnalysis.confidenceScore = null
+  currentAnalysis.missingInfo = []
+  currentAnalysis.requestState = 'idle'
+  currentAnalysis.requestError = ''
+  currentAnalysis.updatedAt = ''
+  currentAnalysis.graphSyncStatus = 'idle'
+  currentAnalysis.graphSyncSummary = ''
+  currentAnalysis.graphSyncUpdatedAt = ''
 }
 
 function resetGraph() {
@@ -2491,7 +2514,29 @@ function clearCurrentConversationState() {
   resetGraph()
 }
 
-function stopGraphRefreshPolling() {
+function setGraphSyncState(status = 'idle', summary = '') {
+  currentAnalysis.graphSyncStatus = String(status || 'idle').trim() || 'idle'
+  currentAnalysis.graphSyncSummary = String(summary || '').trim()
+  currentAnalysis.graphSyncUpdatedAt = new Date().toISOString()
+}
+
+function applyCurrentAnalysisResponse(data = {}) {
+  currentAnalysis.actions = Array.isArray(data.agent_actions) ? data.agent_actions : []
+  currentAnalysis.sources = Array.isArray(data.sources) ? data.sources : []
+  currentAnalysis.routeIntent = String(data.route_intent || '').trim()
+  currentAnalysis.latencyMs = Number.isFinite(Number(data.latency_ms))
+    ? Number(data.latency_ms)
+    : null
+  currentAnalysis.confidenceScore = Number.isFinite(Number(data.confidence_score))
+    ? Number(data.confidence_score)
+    : null
+  currentAnalysis.missingInfo = Array.isArray(data.missing_info) ? data.missing_info : []
+  currentAnalysis.requestState = 'success'
+  currentAnalysis.requestError = ''
+  currentAnalysis.updatedAt = new Date().toISOString()
+}
+
+function stopGraphRefreshPolling(options = {}) {
   if (graphRefreshTimer.value) {
     clearInterval(graphRefreshTimer.value)
     graphRefreshTimer.value = null
@@ -2499,6 +2544,9 @@ function stopGraphRefreshPolling() {
   if (graphRefreshStopTimer.value) {
     clearTimeout(graphRefreshStopTimer.value)
     graphRefreshStopTimer.value = null
+  }
+  if (options?.status) {
+    setGraphSyncState(options.status, options.summary || '')
   }
 }
 
@@ -2510,8 +2558,13 @@ function buildMessageViewModel(message, index = 0) {
     role: message.role === 'assistant' ? 'assistant' : 'user',
     content: message.content || '',
     time: formatTime(message.created_at),
+    createdAt: message.created_at || '',
     sources: metadata.sources || [],
     agentActions: metadata.agent_actions || [],
+    routeIntent: metadata.route_intent || '',
+    latencyMs: metadata.latency_ms ?? null,
+    confidenceScore: metadata.confidence_score ?? null,
+    missingInfo: metadata.missing_info || [],
     pending: false,
   }
 }
@@ -2522,6 +2575,21 @@ function syncCurrentAnalysisFromMessages() {
   if (!latestAssistant) return
   currentAnalysis.actions = latestAssistant.agentActions || []
   currentAnalysis.sources = latestAssistant.sources || []
+  currentAnalysis.routeIntent = String(latestAssistant.routeIntent || '').trim()
+  currentAnalysis.latencyMs = Number.isFinite(Number(latestAssistant.latencyMs))
+    ? Number(latestAssistant.latencyMs)
+    : null
+  currentAnalysis.confidenceScore = Number.isFinite(Number(latestAssistant.confidenceScore))
+    ? Number(latestAssistant.confidenceScore)
+    : null
+  currentAnalysis.missingInfo = Array.isArray(latestAssistant.missingInfo)
+    ? latestAssistant.missingInfo
+    : []
+  currentAnalysis.requestState = 'success'
+  currentAnalysis.updatedAt = latestAssistant.createdAt || ''
+  if (currentGraph.loading) {
+    setGraphSyncState('running', '图谱同步任务仍在刷新中')
+  }
 }
 
 function applyConversationPayload(payload) {
@@ -3634,21 +3702,31 @@ async function ensureConversationTitle(userText) {
 function startGraphRefreshPolling(conversationId, previousNodeCount, query = '') {
   stopGraphRefreshPolling()
   if (!conversationId) return
+  setGraphSyncState('running', '已触发图谱同步检查，等待后端任务完成')
 
   graphRefreshTimer.value = setInterval(async () => {
     try {
       await fetchConversationGraph(conversationId, query, { preserveData: true, silent: true })
       if ((currentGraph.nodes?.length || 0) !== previousNodeCount) {
-        stopGraphRefreshPolling()
+        stopGraphRefreshPolling({
+          status: 'success',
+          summary: '图谱同步已完成，本轮节点变更已刷新到侧栏',
+        })
       }
     } catch (error) {
       console.error('Graph refresh polling failed:', error)
-      stopGraphRefreshPolling()
+      stopGraphRefreshPolling({
+        status: 'warning',
+        summary: '图谱同步检查失败，请稍后手动刷新图谱',
+      })
     }
   }, 3000)
 
   graphRefreshStopTimer.value = setTimeout(() => {
-    stopGraphRefreshPolling()
+    stopGraphRefreshPolling({
+      status: 'warning',
+      summary: '暂未观察到新的图谱变更，可能仍在后台处理或本轮无结构化更新',
+    })
   }, 15000)
 }
 
@@ -4389,6 +4467,10 @@ async function sendImpl(textOverride = null, options = {}) {
   sending.value = true
   graphSidebarCollapsed.value = false
   touchConversationLocal(baseConversationId)
+  resetAnalysis()
+  currentAnalysis.requestState = 'running'
+  currentAnalysis.updatedAt = nowIso
+  setGraphSyncState('pending', '等待主请求完成后检查图谱同步状态')
   currentGraph.loading = true
   currentGraph.error = ''
   currentGraph.query = text
@@ -4408,6 +4490,7 @@ async function sendImpl(textOverride = null, options = {}) {
       const nextAction = await resolveCaseBoundarySuggestion(initData.message)
       sending.value = false
       currentGraph.loading = false
+      resetAnalysis()
 
       if (nextAction === 'new_case') {
         try {
@@ -4449,6 +4532,7 @@ async function sendImpl(textOverride = null, options = {}) {
       const nextAction = await resolveModeConsentSuggestion(initData.consent_prompt)
       sending.value = false
       currentGraph.loading = false
+      resetAnalysis()
 
       if (nextAction === 'cancelled') {
         restoreDraftInput(draftText, '已取消，输入内容已恢复')
@@ -4511,6 +4595,10 @@ async function sendImpl(textOverride = null, options = {}) {
 
     const data = initData.task_id ? (await initRes).data : initData
     updatePendingMessage(tempKey, { pending: false })
+    currentAnalysis.requestState = 'error'
+    currentAnalysis.requestError = error?.message || '未知错误'
+    currentAnalysis.updatedAt = new Date().toISOString()
+    setGraphSyncState('error', '主请求失败，未完成图谱同步')
 
     messages.value.push({
       id: `assistant-${Date.now()}`,
@@ -4518,13 +4606,18 @@ async function sendImpl(textOverride = null, options = {}) {
       role: 'assistant',
       content: data.response || '未返回有效内容。',
       time: formatTime(new Date().toISOString()),
+      createdAt: new Date().toISOString(),
       sources: data.sources || [],
       agentActions: data.agent_actions || [],
+      routeIntent: data.route_intent || '',
+      latencyMs: data.latency_ms ?? null,
+      confidenceScore: data.confidence_score ?? null,
+      missingInfo: data.missing_info || [],
       pending: false,
     })
 
-    currentAnalysis.actions = data.agent_actions || []
-    currentAnalysis.sources = data.sources || []
+    applyCurrentAnalysisResponse(data)
+    setGraphSyncState('running', '主请求已完成，正在检查图谱更新任务')
     void ensureConversationTitle(text)
     await refreshConversationList(baseConversationId)
     await fetchConversationGraph(baseConversationId, text)
@@ -4535,14 +4628,23 @@ async function sendImpl(textOverride = null, options = {}) {
       restoreDraftInput(restoreDraftOnErrorText, '发送失败，输入内容已恢复', 'error')
     }
     updatePendingMessage(tempKey, { pending: false })
+    currentAnalysis.requestState = 'error'
+    currentAnalysis.requestError = error?.message || '未知错误'
+    currentAnalysis.updatedAt = new Date().toISOString()
+    setGraphSyncState('error', '主请求失败，未完成图谱同步')
     messages.value.push({
       id: `assistant-error-${Date.now()}`,
       key: `assistant-error-${Date.now()}`,
       role: 'assistant',
       content: `请求失败：${error.message || '未知错误'}`,
       time: formatTime(new Date().toISOString()),
+      createdAt: new Date().toISOString(),
       sources: [],
       agentActions: [],
+      routeIntent: '',
+      latencyMs: null,
+      confidenceScore: null,
+      missingInfo: [],
       pending: false,
     })
   } finally {
@@ -5314,6 +5416,10 @@ body,
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.dossier-intelligence-body > .dossier-intelligence-card:last-child {
+  display: none;
 }
 
 .dossier-intelligence-card {
