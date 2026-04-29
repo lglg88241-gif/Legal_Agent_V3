@@ -84,6 +84,97 @@ def _output_summary(tool_name: str, result: Any) -> str:
     return _preview_text(result)
 
 
+def _legal_qa_case_isolated(runtime: dict[str, Any]) -> bool:
+    plan = runtime.get("plan") if isinstance(runtime.get("plan"), dict) else {}
+    message_understanding = (
+        runtime.get("message_understanding")
+        if isinstance(runtime.get("message_understanding"), dict)
+        else {}
+    )
+    route = _normalize_text(plan.get("route")).upper()
+    intent = _normalize_text(plan.get("intent") or message_understanding.get("intent")).lower()
+    strategy = _normalize_text(plan.get("final_response_strategy")).lower()
+    return (
+        route == "LEGAL_QA"
+        and intent == "legal_question"
+        and strategy == "answer_legal_question_without_case_pollution"
+    )
+
+
+def _prior_retrieval_documents(runtime: dict[str, Any]) -> list[dict[str, Any]]:
+    outputs = runtime.get("tool_outputs") if isinstance(runtime.get("tool_outputs"), dict) else {}
+    for tool_name in ("exact_law_lookup", "legal_rag_search"):
+        tool_result = outputs.get(tool_name)
+        if not isinstance(tool_result, dict):
+            continue
+        documents = tool_result.get("result")
+        if isinstance(documents, list):
+            return [item for item in documents if isinstance(item, dict)]
+    return []
+
+
+def _document_label(document: dict[str, Any]) -> str:
+    metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
+    law_name = _normalize_text(
+        metadata.get("law_name")
+        or metadata.get("law")
+        or metadata.get("title")
+        or metadata.get("source")
+    )
+    article = _normalize_text(
+        metadata.get("article")
+        or metadata.get("article_number")
+        or metadata.get("article_no")
+    )
+    if law_name and article:
+        return f"《{law_name}》{article}"
+    if law_name:
+        return f"《{law_name}》"
+    if article:
+        return article
+    return "检索到的法条"
+
+
+def _compose_exact_law_answer_from_documents(
+    *,
+    question: str,
+    documents: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    exact_document = next(
+        (
+            item
+            for item in documents
+            if isinstance(item.get("metadata"), dict)
+            and bool(item["metadata"].get("_exact_lookup"))
+            and _normalize_text(item.get("page_content"))
+        ),
+        None,
+    )
+    document = exact_document or next(
+        (item for item in documents if _normalize_text(item.get("page_content"))),
+        None,
+    )
+    if not isinstance(document, dict):
+        return None
+
+    label = _document_label(document)
+    content = _normalize_text(document.get("page_content"))
+    if not content:
+        return None
+
+    return {
+        "response": f"{label}规定：\n\n{content}",
+        "sources": [label],
+        "route_intent": "LEGAL_QA",
+        "case_summary": "",
+        "is_final": True,
+        "confidence_score": 0.92,
+        "missing_info": [],
+        "composition_mode": "exact_law_lookup_compose",
+        "question": _normalize_text(question),
+    }
+
+
 def _executor_allows_contract(contract: ToolContract | None) -> tuple[bool, str | None]:
     if contract is None:
         return False, "tool_not_registered"
@@ -306,6 +397,19 @@ async def _execute_legal_rag_search(runtime: dict[str, Any]) -> tuple[Any, dict[
 
 async def _execute_legal_answer_compose(runtime: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     handler = runtime.get("legal_answer_handler")
+    case_isolated = _legal_qa_case_isolated(runtime)
+    if case_isolated:
+        direct_answer = _compose_exact_law_answer_from_documents(
+            question=runtime.get("question") or "",
+            documents=_prior_retrieval_documents(runtime),
+        )
+        if isinstance(direct_answer, dict):
+            return direct_answer, {
+                "route_intent": "LEGAL_QA",
+                "used_specialist": "exact_law_lookup_compose",
+                "case_context_injected": False,
+            }
+
     if handler is None:
         raise RuntimeError("legal_answer_handler is required for legal_answer_compose")
 
@@ -314,21 +418,22 @@ async def _execute_legal_answer_compose(runtime: dict[str, Any]) -> tuple[Any, d
             runtime.get("user_id"),
             runtime.get("session_id"),
             runtime.get("question") or "",
-            chat_history=runtime.get("chat_history"),
-            case_summary=runtime.get("case_summary"),
-            graph_memory=runtime.get("graph_memory"),
+            chat_history="" if case_isolated else runtime.get("chat_history"),
+            case_summary="" if case_isolated else runtime.get("case_summary"),
+            graph_memory="" if case_isolated else runtime.get("graph_memory"),
             is_precise_mode=bool(runtime.get("is_precise_mode")),
             proactive_graph_mode=bool(runtime.get("proactive_graph_mode")),
             conversation_id=runtime.get("conversation_id"),
-            saved_case_state=runtime.get("saved_case_state"),
-            dossier_context=runtime.get("advisor_dossier_context"),
-            dossier_graph_summary=runtime.get("advisor_dossier_graph_summary"),
-            dossier_graph_context=runtime.get("advisor_dossier_graph_context"),
+            saved_case_state=None if case_isolated else runtime.get("saved_case_state"),
+            dossier_context=None if case_isolated else runtime.get("advisor_dossier_context"),
+            dossier_graph_summary=None if case_isolated else runtime.get("advisor_dossier_graph_summary"),
+            dossier_graph_context=None if case_isolated else runtime.get("advisor_dossier_graph_context"),
         )
     )
     return result, {
         "route_intent": _normalize_text(result.get("route_intent")) if isinstance(result, dict) else "",
         "used_specialist": "legal_agent.ask",
+        "case_context_injected": not case_isolated,
     }
 
 

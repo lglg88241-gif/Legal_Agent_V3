@@ -86,9 +86,9 @@ def test_exact_law_question_uses_exact_lookup_without_case_writes(monkeypatch) -
             "chat_history": "",
             "latest_user_input": current_question,
             "recent_messages": [],
-            "case_summary": "旧摘要",
-            "graph_memory": "",
-            "saved_case_state": None,
+            "case_summary": "B公司的人事王经理口头通知我不用来了。",
+            "graph_memory": "B公司 -[通知]-> 王经理",
+            "saved_case_state": {"monthly_salary": 12000, "is_illegal_dismissal": True},
             "persistence_consent": "tracked",
             "conversation_mode": "TRACKED_CASE",
             "dossier_id": None,
@@ -100,8 +100,12 @@ def test_exact_law_question_uses_exact_lookup_without_case_writes(monkeypatch) -
     class FakeLegalAgent:
         async def ask(self, *args, **kwargs):
             trackers["legal_agent_calls"] += 1
+            assert kwargs.get("case_summary") == ""
+            assert kwargs.get("graph_memory") == ""
+            assert kwargs.get("saved_case_state") is None
+            assert kwargs.get("dossier_context") is None
             return {
-                "response": "《劳动合同法》第八十七条主要规定违法解除或者终止劳动合同的赔偿责任。",
+                "response": "结合你当前案卷，B公司可能构成违法解除，下一步建议你申请仲裁。",
                 "sources": [],
                 "route_intent": "GENERAL_CONSULT",
                 "case_summary": "",
@@ -154,16 +158,28 @@ def test_exact_law_question_uses_exact_lookup_without_case_writes(monkeypatch) -
 
     assert result["status"] == "success"
     assert result["route_intent"] == "LEGAL_QA"
-    assert trackers["legal_agent_calls"] == 1
+    assert trackers["legal_agent_calls"] == 0
     assert trackers["search_calls"] >= 1
+    assert "第八十七条" in result["response"]
+    forbidden_phrases = ["结合你当前案卷", "B公司", "王经理", "仲裁建议", "下一步建议你", "根据你目前情况"]
+    assert not any(phrase in result["response"] for phrase in forbidden_phrases)
     assert "exact_law_lookup" in tool_names
     assert "legal_answer_compose" in tool_names
     assert trace["agent_plan"]["specialist"] == "legal_qa_agent"
+    assert trace["agent_plan"]["route"] == "LEGAL_QA"
+    assert trace["agent_plan"]["intent"] == "legal_question"
     assert trace["writes"]["requested"] == []
     assert trace["writes"]["allowed"] == []
     assert trace["writes"]["blocked"] == []
     assert trace["writes"]["applied"] == []
     assert trace["writes"]["results"] == []
+    guard_lookup = {item["name"]: item for item in trace["guards_applied"]}
+    assert guard_lookup["legal_qa_blocks_case_graph_pollution"]["triggered"] is True
     assert trace["legacy_fallback"]["used"] is False
-    assert trace["final_basis"]["source"] == "legal_agent"
+    assert trace["final_basis"]["source"] == "legal_answer_compose"
     assert persisted["case_summary"] == ""
+    action_tools = [item["tool"] for item in result["agent_actions"]]
+    assert "legal_answer_compose" in action_tools
+    assert "tool_router" not in action_tools
+    assert "retrieval_tools" not in action_tools
+    assert "legal_advisor" not in action_tools

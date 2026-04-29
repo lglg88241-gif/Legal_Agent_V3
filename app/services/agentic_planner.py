@@ -369,7 +369,7 @@ def build_agentic_plan(
             response_mode="legal_answer",
             response_style="legal_answer",
             specialist="legal_qa_agent",
-            plan_summary="Answer a legal question through retrieval and a legal-answer specialist without any case writes.",
+            plan_summary="通过法条查询和法律回答专员回答当前法律问题，不写入案情或图谱。",
             context_requirements=["message_text"],
             tool_sequence=tool_sequence,
             tool_calls=tool_sequence,
@@ -377,7 +377,7 @@ def build_agentic_plan(
             needs_legal_rag=True,
             needs_graph_context=False,
             needs_structured_persistence=False,
-            final_response_strategy="legal_answer",
+            final_response_strategy="answer_legal_question_without_case_pollution",
             missing_requirements=[],
             fallback_allowed=False,
         )

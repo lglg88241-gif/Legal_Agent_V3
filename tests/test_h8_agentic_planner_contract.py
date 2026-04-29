@@ -215,7 +215,9 @@ def test_legal_question_plan_is_read_only() -> None:
     assert plan["writes_requested"] == []
     assert plan["needs_structured_persistence"] is False
     assert plan["route"] == "LEGAL_QA"
+    assert plan["final_response_strategy"] == "answer_legal_question_without_case_pollution"
     assert _tool_names(plan)[0] == "exact_law_lookup"
+    assert _tool_names(plan)[-1] == "legal_answer_compose"
 
 
 def test_document_request_enters_planner_contract() -> None:

@@ -328,6 +328,15 @@ def _build_dossier_memory_action() -> dict[str, Any]:
     }
 
 
+def _build_legal_qa_specialist_action() -> dict[str, Any]:
+    return {
+        "tool": "legal_answer_compose",
+        "stage": "legal_answer_compose",
+        "status": "success",
+        "result_summary": "Legal answer composed through agentic legal QA specialist",
+    }
+
+
 def _normalize_agentic_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
@@ -2067,9 +2076,9 @@ def ask_agent_task(
                         and str(item.get("tool_name") or "").strip() in {"exact_law_lookup", "legal_rag_search"}
                         and str(item.get("result_summary") or "").strip()
                     ]
-                    final_basis_summary = "Legal answer composed through agentic retrieval plus legacy legal specialist without case writes."
+                    final_basis_summary = "已通过法条查询和法律回答专员处理当前法律问题，不写入案情或图谱。"
                     final_basis_evidence = retrieval_summaries or ["specialist=legal_answer_compose"]
-                    final_basis_source = "legal_agent"
+                    final_basis_source = "legal_answer_compose"
                 except Exception as exc:
                     logger.exception(
                         "Legal answer compose failed, falling back to legacy legal agent | conversation_id=%s user_id=%s error=%s",
@@ -2103,10 +2112,10 @@ def ask_agent_task(
                                 dossier_graph_context=advisor_dossier_graph_context,
                             )
                         )
-                    final_basis_summary = "Agentic legal composition failed and fell back to the legacy legal specialist."
+                    final_basis_summary = "法律回答专员生成失败，已回退到传统法律回答链路。"
                     final_basis_evidence = [f"fallback_reason={legacy_fallback_reason}"]
                     final_basis_source = "legacy_fallback"
-                final_basis_summary = "已按法律问答链路处理当前请求，不会写入案情或图谱。"
+                final_basis_summary = final_basis_summary or "已按法律问答链路处理当前请求，不会写入案情或图谱。"
             else:
                 if execution_plan_uses_legacy_fallback:
                     legacy_fallback_reason = (
@@ -2146,17 +2155,13 @@ def ask_agent_task(
                 final_basis_evidence = [f"fallback_reason={legacy_fallback_reason}"]
                 final_basis_source = "legacy_fallback"
         if legal_answer_plan_active:
-            if final_basis_source == "legal_agent":
-                final_basis_summary = (
-                    "Legal answer composed through agentic retrieval plus legacy legal specialist without case writes."
-                )
+            if final_basis_source in {"legal_agent", "legal_answer_compose"}:
+                final_basis_summary = "已通过法条查询和法律回答专员处理当前法律问题，不写入案情或图谱。"
             elif (
                 final_basis_source == "legacy_fallback"
                 and legacy_fallback_reason == "legal_answer_compose_failed"
             ):
-                final_basis_summary = (
-                    "Agentic legal composition failed and fell back to the legacy legal specialist."
-                )
+                final_basis_summary = "法律回答专员生成失败，已回退到传统法律回答链路。"
 
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
@@ -2303,6 +2308,12 @@ def ask_agent_task(
                 )
             elif case_update_transient_analysis_active:
                 agent_actions.append(_build_transient_case_analysis_action())
+        elif legal_answer_plan_active:
+            agent_actions = [
+                _build_message_understanding_active_action(message_understanding),
+                _build_execution_plan_action(execution_plan),
+                _build_legal_qa_specialist_action(),
+            ]
         elif route_intent == "OUT_OF_SCOPE":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},
@@ -2321,7 +2332,7 @@ def ask_agent_task(
                 {"tool": "retrieval_tools", "result_summary": "Retrieval pipeline completed"},
                 {"tool": "legal_advisor", "result_summary": "Final legal response generated"},
             ]
-        if route_intent not in {"DOSSIER_MEMORY"} and not case_update_plan_active:
+        if route_intent not in {"DOSSIER_MEMORY"} and not case_update_plan_active and not legal_answer_plan_active:
             agent_actions.append(_build_message_understanding_shadow_action(message_understanding))
 
         is_final = answer.get("is_final", False) if isinstance(answer, dict) else False

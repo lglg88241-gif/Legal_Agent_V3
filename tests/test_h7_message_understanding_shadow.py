@@ -139,12 +139,13 @@ def test_ask_agent_task_records_message_understanding_shadow_result_for_non_subj
     assert result["message_understanding"]["provider"] == "openai"
     assert persisted["metadata"]["message_understanding"]["intent"] == "legal_question"
     assert persisted["metadata"]["route_intent"] == "LEGAL_QA"
-    shadow_actions = [
-        item for item in result["agent_actions"] if item.get("stage") == "message_understanding_shadow"
-    ]
-    assert len(shadow_actions) == 1
-    assert shadow_actions[0]["status"] == "success"
-    assert shadow_actions[0]["intent"] == "legal_question"
+    action_tools = [item.get("tool") for item in result["agent_actions"]]
+    assert "message_understanding_shadow" not in action_tools
+    assert "tool_router" not in action_tools
+    assert "retrieval_tools" not in action_tools
+    assert "legal_advisor" not in action_tools
+    assert "legal_answer_compose" in action_tools
+    assert result["execution_trace"]["message_understanding"]["intent"] == "legal_question"
 
 
 def test_ask_agent_task_keeps_main_flow_when_message_understanding_shadow_fails(
