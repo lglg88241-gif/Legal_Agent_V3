@@ -42,6 +42,7 @@ from app.services.dossier_graph_tool import (
 )
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
+from app.services.message_orchestrator import build_execution_plan_from_message_understanding
 from app.services.message_understanding_agent import understand_message_with_agent
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,24 @@ def _build_message_understanding_active_action(
     }
 
 
+def _build_execution_plan_action(
+    execution_plan: dict[str, Any],
+) -> dict[str, Any]:
+    steps = execution_plan.get("steps") if isinstance(execution_plan.get("steps"), list) else []
+    step_descriptions = [str(step.get("name") or "").strip() for step in steps if isinstance(step, dict)]
+    step_summary = ", ".join([item for item in step_descriptions if item]) or "legacy_fallback"
+    return {
+        "tool": "message_orchestrator",
+        "stage": "message_orchestrator",
+        "status": "success" if execution_plan.get("is_actionable") else "fallback",
+        "primary_route": str(execution_plan.get("primary_route") or "UNKNOWN"),
+        "result_summary": (
+            "Execution plan selected "
+            f"{execution_plan.get('primary_route', 'UNKNOWN')}: {step_summary}"
+        ),
+    }
+
+
 def _build_dossier_memory_action() -> dict[str, Any]:
     return {
         "tool": "dossier_memory",
@@ -234,18 +253,6 @@ def _build_dossier_memory_action() -> dict[str, Any]:
 
 def _normalize_subject_reference_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split()).lower()
-
-
-def _is_subject_reference_message_understanding(
-    message_understanding: dict[str, Any] | None,
-) -> bool:
-    if not isinstance(message_understanding, dict):
-        return False
-    return (
-        str(message_understanding.get("intent") or "").strip().lower() == "subject_reference"
-        and str(message_understanding.get("route_hint") or "").strip().upper() == "DOSSIER_MEMORY"
-        and bool(message_understanding.get("needs_legal_rag")) is False
-    )
 
 
 def _subject_reference_type_matches(entity_type: Any, target_type: str) -> bool:
@@ -519,6 +526,84 @@ async def _answer_subject_reference_message_async(
     }
 
 
+def _looks_like_recent_factual_user_message(text: str) -> bool:
+    normalized = " ".join((text or "").strip().split())
+    if not normalized:
+        return False
+    if normalized in {"我确认这个事实", "确认这个事实", "这个事实属实", "上一条是真的"}:
+        return False
+    if "?" in normalized or "？" in normalized:
+        return False
+    return is_case_fact_update_message(normalized) or len(normalized) >= 8
+
+
+def _resolve_confirm_previous_fact_text(
+    *,
+    question: str,
+    message_understanding: dict[str, Any],
+    recent_messages: list[dict[str, Any]] | None,
+) -> str:
+    previous_fact_confirmation = (
+        message_understanding.get("previous_fact_confirmation")
+        if isinstance(message_understanding.get("previous_fact_confirmation"), dict)
+        else {}
+    )
+    target_text = " ".join(
+        str(previous_fact_confirmation.get("target_text") or "").strip().split()
+    )
+    if target_text and target_text != " ".join((question or "").strip().split()):
+        return target_text
+
+    target_message_id = previous_fact_confirmation.get("target_message_id")
+    normalized_target_message_id = None
+    try:
+        normalized_target_message_id = int(target_message_id)
+    except (TypeError, ValueError):
+        normalized_target_message_id = None
+
+    candidates = list(recent_messages or [])
+    for item in reversed(candidates):
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").strip().lower() != "user":
+            continue
+        content = " ".join(str(item.get("content") or "").strip().split())
+        if not content:
+            continue
+        item_message_id = item.get("message_id") or item.get("id")
+        try:
+            normalized_item_message_id = int(item_message_id)
+        except (TypeError, ValueError):
+            normalized_item_message_id = None
+        if normalized_target_message_id is not None and normalized_item_message_id == normalized_target_message_id:
+            return content
+        if _looks_like_recent_factual_user_message(content):
+            return content
+
+    return ""
+
+
+def _build_fact_confirmation_action(confirmed_fact_text: str) -> dict[str, Any]:
+    preview = " ".join((confirmed_fact_text or "").strip().split())
+    if len(preview) > 48:
+        preview = preview[:45].rstrip() + "..."
+    return {
+        "tool": "fact_confirmation",
+        "stage": "fact_confirmation",
+        "status": "success",
+        "result_summary": f"Previous fact confirmed for graph update: {preview}",
+    }
+
+
+def _build_graph_sync_action() -> dict[str, Any]:
+    return {
+        "tool": "graph_sync",
+        "stage": "graph_sync",
+        "status": "success",
+        "result_summary": "Graph update scheduled from confirmed previous fact",
+    }
+
+
 async def _load_controlled_dossier_graph_context_async(
     db: AsyncSession,
     *,
@@ -669,6 +754,7 @@ async def _persist_dialog_turn_async(
     user_content: str,
     assistant_content: str,
     metadata: dict[str, Any],
+    user_metadata: dict[str, Any] | None = None,
     case_summary: str = "",
     case_state_dict: dict[str, Any] | None = None,
     case_type: str | None = None,
@@ -685,7 +771,7 @@ async def _persist_dialog_turn_async(
                 conversation_id=conversation_id,
                 role="user",
                 content=user_content,
-                metadata={},
+                metadata=user_metadata or {},
             )
             await maybe_update_conversation_title(db, conversation, user_content)
             if case_summary.strip():
@@ -743,7 +829,15 @@ def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | 
                         raise ValueError("message_id must point to a user message")
 
                     case_summary = await load_conversation_case_summary(db, conversation_id)
-                    user_input = " ".join((user_message.content or "").strip().split())
+                    metadata = (
+                        user_message.message_metadata
+                        if isinstance(getattr(user_message, "message_metadata", None), dict)
+                        else {}
+                    )
+                    graph_update_input_text = " ".join(
+                        str(metadata.get("graph_update_input_text") or "").strip().split()
+                    )
+                    user_input = graph_update_input_text or " ".join((user_message.content or "").strip().split())
                     if not user_input:
                         raise ValueError("message content is empty")
             finally:
@@ -755,6 +849,13 @@ def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | 
                 user_id,
                 message_id,
             )
+            if graph_update_input_text:
+                logger.info(
+                    "Graph update task using override input text from message metadata | conversation_id=%s user_id=%s message_id=%s",
+                    conversation_id,
+                    user_id,
+                    message_id,
+                )
 
             return await refresh_case_graph(
                 conversation_id=conversation_id,
@@ -850,8 +951,65 @@ def ask_agent_task(
             message_understanding.get("model"),
             message_understanding.get("fallback_reason"),
         )
+        execution_plan = build_execution_plan_from_message_understanding(
+            message_understanding,
+            original_message=question,
+            recent_messages=context.get("recent_messages"),
+            dossier_id=dossier_id,
+            persistence_consent=persistence_consent,
+        )
+        execution_plan_steps = (
+            execution_plan.get("steps") if isinstance(execution_plan.get("steps"), list) else []
+        )
+        execution_plan_step_names = {
+            str(step.get("name") or "").strip()
+            for step in execution_plan_steps
+            if isinstance(step, dict) and str(step.get("name") or "").strip()
+        }
+        execution_plan_trace = (
+            execution_plan.get("trace") if isinstance(execution_plan.get("trace"), dict) else {}
+        )
+        execution_plan_resolved_inputs = (
+            execution_plan.get("resolved_inputs")
+            if isinstance(execution_plan.get("resolved_inputs"), dict)
+            else {}
+        )
+        execution_plan_uses_legacy_fallback = bool(execution_plan_trace.get("use_legacy_fallback"))
+        subject_reference_short_circuit = (
+            bool(execution_plan.get("is_actionable"))
+            and not execution_plan_uses_legacy_fallback
+            and str(execution_plan.get("primary_route") or "").strip().upper() == "DOSSIER_MEMORY"
+            and "dossier_memory_answer" in execution_plan_step_names
+        )
+        case_update_plan_active = (
+            bool(execution_plan.get("is_actionable"))
+            and not execution_plan_uses_legacy_fallback
+            and str(execution_plan.get("primary_route") or "").strip().upper() == "CASE_UPDATE"
+            and "fact_persistence" in execution_plan_step_names
+        )
+        confirm_previous_fact_active = (
+            case_update_plan_active
+            and "fact_confirmation" in execution_plan_step_names
+            and bool(execution_plan_resolved_inputs.get("previous_fact_text"))
+        )
+        confirm_previous_fact_text = " ".join(
+            str(execution_plan_resolved_inputs.get("previous_fact_text") or "").strip().split()
+        )
+        effective_persistence_text = " ".join(
+            str(execution_plan_resolved_inputs.get("effective_persistence_text") or "").strip().split()
+        ) or question
+        graph_update_input_text = " ".join(
+            str(execution_plan_resolved_inputs.get("graph_update_input_text") or "").strip().split()
+        )
+        logger.info(
+            "Message execution plan | primary_route=%s actionable=%s steps=%s fallback=%s",
+            execution_plan.get("primary_route"),
+            execution_plan.get("is_actionable"),
+            sorted(execution_plan_step_names),
+            execution_plan_uses_legacy_fallback,
+        )
 
-        if _is_subject_reference_message_understanding(message_understanding):
+        if subject_reference_short_circuit:
             answer = asyncio.run(
                 _answer_subject_reference_message_async(
                     question=question,
@@ -861,20 +1019,17 @@ def ask_agent_task(
                     case_summary=case_summary,
                 )
             )
-            subject_reference_short_circuit = True
             advisor_dossier_context = None
             advisor_dossier_graph_summary = None
             advisor_dossier_graph_context = None
         else:
-            subject_reference_short_circuit = False
-        dossier_scope_hint = dossier_id or (1 if raw_dossier_context else None)
-        include_dossier_context_for_advisor = should_include_dossier_context_for_advisor(
-            conversation_mode=conversation_mode,
-            dossier_id=dossier_scope_hint,
-            user_message=question,
-            persistence_consent=persistence_consent,
-        )
-        if not subject_reference_short_circuit:
+            dossier_scope_hint = dossier_id or (1 if raw_dossier_context else None)
+            include_dossier_context_for_advisor = should_include_dossier_context_for_advisor(
+                conversation_mode=conversation_mode,
+                dossier_id=dossier_scope_hint,
+                user_message=question,
+                persistence_consent=persistence_consent,
+            )
             advisor_dossier_context = raw_dossier_context if include_dossier_context_for_advisor else None
             advisor_dossier_graph_summary = (
                 raw_dossier_graph_summary if include_dossier_context_for_advisor else None
@@ -912,13 +1067,26 @@ def ask_agent_task(
         response_sources = answer.get("sources", []) if isinstance(answer, dict) else []
         route_intent = answer.get("route_intent", "GENERAL_CONSULT") if isinstance(answer, dict) else "GENERAL_CONSULT"
         original_route_intent = route_intent
+        if subject_reference_short_circuit:
+            route_intent = "DOSSIER_MEMORY"
+        elif case_update_plan_active:
+            route_intent = "CASE_UPDATE"
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
         case_state_dict = answer.get("case_state_snapshot") if isinstance(answer, dict) else None
         case_type = answer.get("case_type") if isinstance(answer, dict) else None
         has_dossier_context = bool(raw_dossier_context)
         dossier_followup_question = has_dossier_context and is_dossier_followup_question(question)
-        message_is_fact_update = is_case_fact_update_message(question)
-        if route_intent == "CASE_UPDATE" and dossier_followup_question and not message_is_fact_update:
+        if case_update_plan_active:
+            updated_case_summary = context.get("case_summary") or ""
+            case_state_dict = None
+            case_type = None
+        message_is_fact_update = case_update_plan_active or is_case_fact_update_message(question)
+        if (
+            route_intent == "CASE_UPDATE"
+            and dossier_followup_question
+            and not message_is_fact_update
+            and not case_update_plan_active
+        ):
             logger.info(
                 "Structured case persistence skipped because message is dossier follow-up question | conversation_id=%s user_id=%s route_intent=%s message_is_fact_update=%s",
                 conversation_id,
@@ -936,17 +1104,26 @@ def ask_agent_task(
             updated_case_summary = context.get("case_summary") or ""
             case_state_dict = None
             case_type = None
-        should_persist_structured_case = should_persist_structured_case_message(
-            text=question,
-            route_intent=route_intent,
-            persistence_consent=persistence_consent,
-            conversation_mode=conversation_mode,
-            has_dossier_context=has_dossier_context,
+        case_update_blocked_by_legal_qa = (
+            case_update_plan_active and conversation_mode == "LEGAL_QA"
         )
+        if case_update_plan_active:
+            should_persist_structured_case = (
+                persistence_consent != "temporary"
+                and not case_update_blocked_by_legal_qa
+            )
+        else:
+            should_persist_structured_case = should_persist_structured_case_message(
+                text=effective_persistence_text,
+                route_intent=route_intent,
+                persistence_consent=persistence_consent,
+                conversation_mode=conversation_mode,
+                has_dossier_context=has_dossier_context,
+            )
         if should_persist_structured_case:
             updated_case_summary = build_structured_case_summary(
                 current_summary=context.get("case_summary"),
-                user_message=question,
+                user_message=effective_persistence_text,
                 proposed_summary=updated_case_summary,
             )
             if route_intent != "CASE_UPDATE":
@@ -965,8 +1142,16 @@ def ask_agent_task(
         elif route_intent == "DOSSIER_MEMORY":
             agent_actions = [
                 _build_message_understanding_active_action(message_understanding),
+                _build_execution_plan_action(execution_plan),
                 _build_dossier_memory_action(),
             ]
+        elif case_update_plan_active:
+            agent_actions = [
+                _build_message_understanding_active_action(message_understanding),
+                _build_execution_plan_action(execution_plan),
+            ]
+            if confirm_previous_fact_active:
+                agent_actions.append(_build_fact_confirmation_action(confirm_previous_fact_text))
         elif route_intent == "OUT_OF_SCOPE":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},
@@ -985,7 +1170,7 @@ def ask_agent_task(
                 {"tool": "retrieval_tools", "result_summary": "Retrieval pipeline completed"},
                 {"tool": "legal_advisor", "result_summary": "Final legal response generated"},
             ]
-        if route_intent != "DOSSIER_MEMORY":
+        if route_intent not in {"DOSSIER_MEMORY"} and not case_update_plan_active:
             agent_actions.append(_build_message_understanding_shadow_action(message_understanding))
 
         result = {
@@ -1001,11 +1186,27 @@ def ask_agent_task(
             "missing_info": answer.get("missing_info", []) if isinstance(answer, dict) else [],
             "route_intent": route_intent,
             "message_understanding": message_understanding,
+            "execution_plan": execution_plan,
             "case_summary": updated_case_summary,
             "latency_ms": latency_ms,
         }
 
         persist_result = {"user_message_id": None, "assistant_message_id": None}
+        user_message_metadata: dict[str, Any] = {}
+        if confirm_previous_fact_active and should_persist_structured_case:
+            user_message_metadata = {
+                "message_understanding": {
+                    "intent": message_understanding.get("intent"),
+                    "route_hint": message_understanding.get("route_hint"),
+                },
+                "execution_plan": {
+                    "primary_route": execution_plan.get("primary_route"),
+                    "steps": sorted(execution_plan_step_names),
+                },
+                "confirmed_fact_text": confirm_previous_fact_text,
+                "graph_update_input_text": graph_update_input_text or confirm_previous_fact_text,
+                "graph_update_source": "confirmed_previous_fact",
+            }
 
         if route_intent != "GREETING":
             persist_result = asyncio.run(
@@ -1023,7 +1224,9 @@ def ask_agent_task(
                         "latency_ms": latency_ms,
                         "route_intent": route_intent,
                         "message_understanding": message_understanding,
+                        "execution_plan": execution_plan,
                     },
+                    user_metadata=user_message_metadata,
                     case_summary=updated_case_summary if should_persist_structured_case else "",
                     case_state_dict=case_state_dict if should_persist_structured_case else None,
                     case_type=case_type if should_persist_structured_case else None,
@@ -1034,6 +1237,8 @@ def ask_agent_task(
             user_message_id = persist_result.get("user_message_id")
             if user_message_id:
                 update_graph_task.delay(conversation_id, user_id, user_message_id)
+                if confirm_previous_fact_active:
+                    agent_actions.append(_build_graph_sync_action())
             else:
                 logger.warning(
                     "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
@@ -1050,6 +1255,17 @@ def ask_agent_task(
                 )
                 logger.info(
                     "Graph update skipped due to temporary consent | conversation_id=%s user_id=%s",
+                    conversation_id,
+                    user_id,
+                )
+            elif case_update_blocked_by_legal_qa:
+                logger.info(
+                    "Structured case persistence skipped because CASE_UPDATE execution plan arrived in LEGAL_QA mode | conversation_id=%s user_id=%s",
+                    conversation_id,
+                    user_id,
+                )
+                logger.info(
+                    "Graph update skipped because CASE_UPDATE execution plan arrived in LEGAL_QA mode | conversation_id=%s user_id=%s",
                     conversation_id,
                     user_id,
                 )
