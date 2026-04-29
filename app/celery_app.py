@@ -41,6 +41,7 @@ from app.services.dossier_graph_tool import (
     load_dossier_graph_context_for_conversation,
     should_include_dossier_context_for_advisor,
 )
+from app.services.execution_trace import ExecutionTrace
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 from app.services.message_orchestrator import build_execution_plan_from_message_understanding
@@ -812,6 +813,36 @@ async def _persist_dialog_turn_async(
         await celery_engine.dispose()
 
 
+async def _merge_message_metadata_async(
+    *,
+    conversation_id: int,
+    message_id: int | None,
+    metadata_patch: dict[str, Any] | None,
+) -> None:
+    if not message_id or not isinstance(metadata_patch, dict) or not metadata_patch:
+        return
+    celery_engine, session_factory = _create_celery_session_factory()
+    try:
+        await ensure_storage_schema(bind_engine=celery_engine)
+        async with session_factory() as db:
+            message = await get_message_for_conversation(
+                db,
+                conversation_id=conversation_id,
+                message_id=message_id,
+            )
+            if message is None:
+                return
+            existing_metadata = message.metadata if isinstance(message.metadata, dict) else {}
+            message.metadata = {
+                **existing_metadata,
+                **metadata_patch,
+            }
+            db.add(message)
+            await db.commit()
+    finally:
+        await celery_engine.dispose()
+
+
 @celery_app.task(name="update_graph_task")
 def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | None = None):
     try:
@@ -920,6 +951,10 @@ def ask_agent_task(
     proactive_graph_mode: bool = True,
 ):
     start_time = time.time()
+    request_id = str(getattr(getattr(self, "request", None), "id", "") or "").strip()
+    if not request_id:
+        request_id = f"{conversation_id}:{session_id}:{int(start_time * 1000)}"
+    execution_trace = ExecutionTrace(request_id=request_id)
 
     try:
         from app.memory.redis_mgr import get_redis_saver_for_current_loop
@@ -948,6 +983,7 @@ def ask_agent_task(
         dossier_id = context.get("dossier_id")
         if not dossier_id and isinstance(raw_dossier_context, dict):
             dossier_id = raw_dossier_context.get("id")
+        message_understanding_started_at = time.time()
         message_understanding = asyncio.run(
             _build_message_understanding_shadow_async(
                 question=question,
@@ -958,6 +994,22 @@ def ask_agent_task(
                 dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
                 case_summary=case_summary,
             )
+        )
+        message_understanding_latency_ms = int(
+            max(0.0, (time.time() - message_understanding_started_at) * 1000)
+        )
+        message_understanding_fallback_used = bool(
+            str(message_understanding.get("provider") or "").strip().lower() in {"fallback", "rules"}
+            or str(message_understanding.get("fallback_reason") or "").strip()
+        )
+        execution_trace.set_message_understanding(
+            intent=message_understanding.get("intent"),
+            route_hint=message_understanding.get("route_hint"),
+            provider=message_understanding.get("provider"),
+            model=message_understanding.get("model"),
+            fallback_used=message_understanding_fallback_used,
+            fallback_reason=str(message_understanding.get("fallback_reason") or "").strip() or None,
+            latency_ms=message_understanding_latency_ms,
         )
         logger.info(
             "Message understanding result | intent=%s route_hint=%s provider=%s model=%s fallback_reason=%s",
@@ -991,6 +1043,11 @@ def ask_agent_task(
             else {}
         )
         execution_plan_uses_legacy_fallback = bool(execution_plan_trace.get("use_legacy_fallback"))
+        execution_trace.set_execution_plan(
+            primary_route=execution_plan.get("primary_route"),
+            actionable=bool(execution_plan.get("is_actionable")),
+            step_names=sorted(execution_plan_step_names),
+        )
         subject_reference_short_circuit = (
             bool(execution_plan.get("is_actionable"))
             and not execution_plan_uses_legacy_fallback
@@ -1032,6 +1089,25 @@ def ask_agent_task(
             and not case_update_blocked_by_legal_qa
         )
         case_update_acknowledgement_result: dict[str, Any] | None = None
+        legacy_fallback_reason: str | None = None
+        missing_previous_fact = bool(
+            str(execution_plan.get("intent") or "").strip().lower() == "confirm_previous_fact"
+            and str(execution_plan.get("primary_route") or "").strip().upper() == "CASE_UPDATE"
+            and "fact_confirmation" in execution_plan_step_names
+            and not confirm_previous_fact_active
+        )
+        execution_trace.add_guard(
+            name="temporary_blocks_persistence",
+            triggered=bool(case_update_plan_active and persistence_consent == "temporary"),
+        )
+        execution_trace.add_guard(
+            name="legal_qa_blocks_graph",
+            triggered=bool(case_update_blocked_by_legal_qa),
+        )
+        execution_trace.add_guard(
+            name="missing_previous_fact",
+            triggered=missing_previous_fact,
+        )
         logger.info(
             "Message execution plan | primary_route=%s actionable=%s steps=%s fallback=%s",
             execution_plan.get("primary_route"),
@@ -1041,18 +1117,23 @@ def ask_agent_task(
         )
 
         if subject_reference_short_circuit:
-            answer = asyncio.run(
-                _answer_subject_reference_message_async(
-                    question=question,
-                    message_understanding=message_understanding,
-                    dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
-                    dossier_graph_context=raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None,
-                    case_summary=case_summary,
+            with execution_trace.step_context(
+                name="dossier_memory_subject_reference",
+                agent="dossier_memory_helper",
+            ):
+                answer = asyncio.run(
+                    _answer_subject_reference_message_async(
+                        question=question,
+                        message_understanding=message_understanding,
+                        dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
+                        dossier_graph_context=raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None,
+                        case_summary=case_summary,
+                    )
                 )
-            )
             advisor_dossier_context = None
             advisor_dossier_graph_summary = None
             advisor_dossier_graph_context = None
+            execution_trace.mark_legacy_fallback(used=False, reason=None)
         else:
             dossier_scope_hint = dossier_id or (1 if raw_dossier_context else None)
             include_dossier_context_for_advisor = should_include_dossier_context_for_advisor(
@@ -1077,21 +1158,27 @@ def ask_agent_task(
 
             if case_update_acknowledgement_active:
                 try:
-                    case_update_acknowledgement_result = build_case_update_acknowledgement(
-                        plan=execution_plan,
-                        intent=str(execution_plan.get("intent") or ""),
-                        user_message_text=question,
-                        persisted_fact_text=effective_persistence_text,
-                        graph_update_scheduled=case_update_graph_update_planned,
-                        graph_update_actions=None,
-                        dossier_id=dossier_id,
-                        conversation_id=conversation_id,
-                        persistence_consent=persistence_consent,
-                        route_intent="CASE_UPDATE",
-                        fallback_reason=(
-                            str(execution_plan_trace.get("fallback_reason") or "").strip() or None
-                        ),
-                    )
+                    with execution_trace.step_context(
+                        name="assistant_acknowledgement",
+                        agent="case_update_acknowledgement",
+                        provider="rules",
+                        model="case-update-ack-rules-v1",
+                    ):
+                        case_update_acknowledgement_result = build_case_update_acknowledgement(
+                            plan=execution_plan,
+                            intent=str(execution_plan.get("intent") or ""),
+                            user_message_text=question,
+                            persisted_fact_text=effective_persistence_text,
+                            graph_update_scheduled=case_update_graph_update_planned,
+                            graph_update_actions=None,
+                            dossier_id=dossier_id,
+                            conversation_id=conversation_id,
+                            persistence_consent=persistence_consent,
+                            route_intent="CASE_UPDATE",
+                            fallback_reason=(
+                                str(execution_plan_trace.get("fallback_reason") or "").strip() or None
+                            ),
+                        )
                     answer = {
                         "response": str(case_update_acknowledgement_result.get("text") or ""),
                         "sources": [],
@@ -1109,6 +1196,50 @@ def ask_agent_task(
                         exc,
                     )
                     case_update_acknowledgement_result = None
+                    legacy_fallback_reason = "case_update_acknowledgement_failed"
+                    execution_trace.mark_legacy_fallback(
+                        used=True,
+                        reason=legacy_fallback_reason,
+                    )
+                    with execution_trace.step_context(
+                        name="legal_agent_answer",
+                        agent="legal_agent",
+                    ):
+                        answer = asyncio.run(
+                            legal_agent.ask(
+                                user_id,
+                                session_id,
+                                question,
+                                chat_history=chat_history,
+                                case_summary=case_summary,
+                                graph_memory=graph_memory,
+                                is_precise_mode=is_precise_mode,
+                                proactive_graph_mode=proactive_graph_mode,
+                                conversation_id=conversation_id,
+                                saved_case_state=context.get("saved_case_state"),
+                                dossier_context=advisor_dossier_context,
+                                dossier_graph_summary=advisor_dossier_graph_summary,
+                                dossier_graph_context=advisor_dossier_graph_context,
+                            )
+                        )
+            else:
+                if execution_plan_uses_legacy_fallback:
+                    legacy_fallback_reason = (
+                        str(execution_plan_trace.get("fallback_reason") or "").strip()
+                        or "message_understanding_fallback"
+                    )
+                elif missing_previous_fact:
+                    legacy_fallback_reason = "missing_previous_fact"
+                else:
+                    legacy_fallback_reason = "no_actionable_execution_plan"
+                execution_trace.mark_legacy_fallback(
+                    used=True,
+                    reason=legacy_fallback_reason,
+                )
+                with execution_trace.step_context(
+                    name="legal_agent_answer",
+                    agent="legal_agent",
+                ):
                     answer = asyncio.run(
                         legal_agent.ask(
                             user_id,
@@ -1126,25 +1257,7 @@ def ask_agent_task(
                             dossier_graph_context=advisor_dossier_graph_context,
                         )
                     )
-            else:
-                answer = asyncio.run(
-                    legal_agent.ask(
-                        user_id,
-                        session_id,
-                        question,
-                        chat_history=chat_history,
-                        case_summary=case_summary,
-                        graph_memory=graph_memory,
-                        is_precise_mode=is_precise_mode,
-                        proactive_graph_mode=proactive_graph_mode,
-                        conversation_id=conversation_id,
-                        saved_case_state=context.get("saved_case_state"),
-                        dossier_context=advisor_dossier_context,
-                        dossier_graph_summary=advisor_dossier_graph_summary,
-                        dossier_graph_context=advisor_dossier_graph_context,
-                    )
-                )
-            
+
 
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
@@ -1165,6 +1278,32 @@ def ask_agent_task(
             case_state_dict = None
             case_type = None
         message_is_fact_update = case_update_plan_active or is_case_fact_update_message(question)
+        if "fact_confirmation" in execution_plan_step_names:
+            if confirm_previous_fact_active:
+                execution_trace.add_step(
+                    name="fact_confirmation",
+                    agent="message_orchestrator",
+                    status="success",
+                    details={
+                        "resolved_previous_fact_text": confirm_previous_fact_text,
+                    },
+                )
+            else:
+                execution_trace.add_step(
+                    name="fact_confirmation",
+                    agent="message_orchestrator",
+                    status="skipped",
+                    skip_reason="missing_previous_fact",
+                )
+        execution_trace.add_guard(
+            name="dossier_followup_question_blocks_persistence",
+            triggered=bool(
+                route_intent == "CASE_UPDATE"
+                and dossier_followup_question
+                and not message_is_fact_update
+                and not case_update_plan_active
+            ),
+        )
         if (
             route_intent == "CASE_UPDATE"
             and dossier_followup_question
@@ -1201,6 +1340,20 @@ def ask_agent_task(
                 conversation_mode=conversation_mode,
                 has_dossier_context=has_dossier_context,
             )
+        execution_trace.add_guard(
+            name="non_persistable_case_update",
+            triggered=bool(
+                route_intent == "CASE_UPDATE"
+                and not should_persist_structured_case
+                and persistence_consent != "temporary"
+                and not case_update_blocked_by_legal_qa
+                and not (
+                    dossier_followup_question
+                    and not message_is_fact_update
+                    and not case_update_plan_active
+                )
+            ),
+        )
         if should_persist_structured_case:
             updated_case_summary = build_structured_case_summary(
                 current_summary=context.get("case_summary"),
@@ -1214,6 +1367,37 @@ def ask_agent_task(
                     user_id,
                     original_route_intent,
                 )
+        elif case_update_plan_active:
+            skip_reason = "case_update_not_persisted"
+            if persistence_consent == "temporary":
+                skip_reason = "temporary"
+            elif case_update_blocked_by_legal_qa:
+                skip_reason = "legal_qa"
+            execution_trace.add_step(
+                name="fact_persistence",
+                agent="conversation_store",
+                status="skipped",
+                skip_reason=skip_reason,
+            )
+            execution_trace.add_step(
+                name="graph_update",
+                agent="celery.update_graph_task",
+                status="skipped",
+                skip_reason=skip_reason,
+            )
+        elif missing_previous_fact:
+            execution_trace.add_step(
+                name="fact_persistence",
+                agent="conversation_store",
+                status="skipped",
+                skip_reason="missing_previous_fact",
+            )
+            execution_trace.add_step(
+                name="graph_update",
+                agent="celery.update_graph_task",
+                status="skipped",
+                skip_reason="missing_previous_fact",
+            )
 
         if route_intent == "GREETING":
             agent_actions = [
@@ -1258,24 +1442,20 @@ def ask_agent_task(
         if route_intent not in {"DOSSIER_MEMORY"} and not case_update_plan_active:
             agent_actions.append(_build_message_understanding_shadow_action(message_understanding))
 
-        result = {
-            "status": "success",
-            "user_id": user_id,
-            "conversation_id": conversation_id,
-            "session_id": session_id,
-            "response": response_text,
-            "agent_actions": agent_actions,
+        is_final = answer.get("is_final", False) if isinstance(answer, dict) else False
+        confidence_score = answer.get("confidence_score", 0.0) if isinstance(answer, dict) else 0.0
+        missing_info = answer.get("missing_info", []) if isinstance(answer, dict) else []
+        assistant_metadata = {
             "sources": response_sources,
-            "is_final": answer.get("is_final", False) if isinstance(answer, dict) else False,
-            "confidence_score": answer.get("confidence_score", 0.0) if isinstance(answer, dict) else 0.0,
-            "missing_info": answer.get("missing_info", []) if isinstance(answer, dict) else [],
+            "agent_actions": agent_actions,
+            "is_final": is_final,
+            "confidence_score": confidence_score,
+            "missing_info": missing_info,
+            "latency_ms": latency_ms,
             "route_intent": route_intent,
             "message_understanding": message_understanding,
             "execution_plan": execution_plan,
-            "case_summary": updated_case_summary,
-            "latency_ms": latency_ms,
         }
-
         persist_result = {"user_message_id": None, "assistant_message_id": None}
         user_message_metadata: dict[str, Any] = {}
         if confirm_previous_fact_active and should_persist_structured_case:
@@ -1294,37 +1474,75 @@ def ask_agent_task(
             }
 
         if route_intent != "GREETING":
-            persist_result = asyncio.run(
-                _persist_dialog_turn_async(
-                    user_id=user_id,
-                    conversation_id=conversation_id,
-                    user_content=question,
-                    assistant_content=response_text,
-                    metadata={
-                        "sources": response_sources,
-                        "agent_actions": agent_actions,
-                        "is_final": result["is_final"],
-                        "confidence_score": result["confidence_score"],
-                        "missing_info": result["missing_info"],
-                        "latency_ms": latency_ms,
-                        "route_intent": route_intent,
-                        "message_understanding": message_understanding,
-                        "execution_plan": execution_plan,
-                    },
-                    user_metadata=user_message_metadata,
-                    case_summary=updated_case_summary if should_persist_structured_case else "",
-                    case_state_dict=case_state_dict if should_persist_structured_case else None,
-                    case_type=case_type if should_persist_structured_case else None,
+            if case_update_plan_active and should_persist_structured_case:
+                with execution_trace.step_context(
+                    name="fact_persistence",
+                    agent="conversation_store",
+                ) as fact_persistence_step:
+                    fact_persistence_step.set_details(
+                        {
+                            "persistence_mode": "structured_case",
+                            "input_text": effective_persistence_text,
+                        }
+                    )
+                    persist_result = asyncio.run(
+                        _persist_dialog_turn_async(
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            user_content=question,
+                            assistant_content=response_text,
+                            metadata=assistant_metadata,
+                            user_metadata=user_message_metadata,
+                            case_summary=updated_case_summary if should_persist_structured_case else "",
+                            case_state_dict=case_state_dict if should_persist_structured_case else None,
+                            case_type=case_type if should_persist_structured_case else None,
+                        )
+                    )
+            else:
+                persist_result = asyncio.run(
+                    _persist_dialog_turn_async(
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        user_content=question,
+                        assistant_content=response_text,
+                        metadata=assistant_metadata,
+                        user_metadata=user_message_metadata,
+                        case_summary=updated_case_summary if should_persist_structured_case else "",
+                        case_state_dict=case_state_dict if should_persist_structured_case else None,
+                        case_type=case_type if should_persist_structured_case else None,
+                    )
                 )
-            )
 
         if should_persist_structured_case:
             user_message_id = persist_result.get("user_message_id")
             if user_message_id:
-                update_graph_task.delay(conversation_id, user_id, user_message_id)
+                with execution_trace.step_context(
+                    name="graph_update",
+                    agent="celery.update_graph_task",
+                ) as graph_update_step:
+                    async_result = update_graph_task.delay(conversation_id, user_id, user_message_id)
+                    graph_task_id = str(getattr(async_result, "id", "") or "").strip()
+                    if not graph_task_id:
+                        graph_task_id = f"scheduled:{conversation_id}:{user_message_id}"
+                    graph_update_step.set_details(
+                        {
+                            "task_id": graph_task_id,
+                            "graph_update_source": (
+                                "confirmed_previous_fact"
+                                if confirm_previous_fact_active
+                                else "current_message"
+                            ),
+                        }
+                    )
                 if confirm_previous_fact_active:
                     agent_actions.append(_build_graph_sync_action())
             else:
+                execution_trace.add_step(
+                    name="graph_update",
+                    agent="celery.update_graph_task",
+                    status="skipped",
+                    skip_reason="missing_user_message_id",
+                )
                 logger.warning(
                     "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
                     conversation_id,
@@ -1384,6 +1602,45 @@ def ask_agent_task(
                     message_is_fact_update,
                     dossier_followup_question,
                 )
+
+        execution_trace_payload = execution_trace.finalize()
+        assistant_metadata["execution_trace"] = execution_trace_payload
+        assistant_message_id = persist_result.get("assistant_message_id")
+        if route_intent != "GREETING" and assistant_message_id:
+            try:
+                asyncio.run(
+                    _merge_message_metadata_async(
+                        conversation_id=conversation_id,
+                        message_id=assistant_message_id,
+                        metadata_patch={"execution_trace": execution_trace_payload},
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to attach execution_trace to assistant metadata | conversation_id=%s assistant_message_id=%s error=%s",
+                    conversation_id,
+                    assistant_message_id,
+                    exc,
+                )
+
+        result = {
+            "status": "success",
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+            "session_id": session_id,
+            "response": response_text,
+            "agent_actions": agent_actions,
+            "sources": response_sources,
+            "is_final": is_final,
+            "confidence_score": confidence_score,
+            "missing_info": missing_info,
+            "route_intent": route_intent,
+            "message_understanding": message_understanding,
+            "execution_plan": execution_plan,
+            "execution_trace": execution_trace_payload,
+            "case_summary": updated_case_summary,
+            "latency_ms": latency_ms,
+        }
 
         return result
 

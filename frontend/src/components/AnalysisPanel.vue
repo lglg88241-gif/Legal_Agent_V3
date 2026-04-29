@@ -64,24 +64,45 @@
 
         <div class="component-status-list">
           <div
-            v-for="entry in coreExecutionEntries"
+            v-for="entry in displayedExecutionEntries"
             :key="entry.key"
             :class="['component-status-row', `status-${normalizeKey(entry.status)}`]"
           >
             <div class="component-status-copy">
               <strong>{{ entry.label }}</strong>
               <span>
-                {{ showExecutionDetail(entry) ? entry.detail : executionStatusQuietLabel(entry.status) }}
+                {{ showExecutionDetail(entry) ? entry.detail : displayExecutionStatusQuietLabel(entry.status) }}
+              </span>
+              <span v-if="hasExecutionTrace && entry.meta" class="component-trace-meta-line">
+                {{ entry.meta }}
               </span>
             </div>
             <div class="component-status-meta">
               <span :class="['status-dot', `status-${normalizeKey(entry.status)}`]"></span>
-              <span class="component-status-badge">{{ executionStatusQuietLabel(entry.status) }}</span>
+              <span class="component-status-badge">{{ displayExecutionStatusQuietLabel(entry.status) }}</span>
             </div>
           </div>
         </div>
 
-        <div v-if="secondaryExecutionEntries.length" class="component-secondary-group">
+        <div v-if="hasExecutionTrace && executionTraceLegacyFallback.used" class="analysis-warning">
+          {{ `本轮回到了传统流程：${executionTraceLegacyFallback.reason || 'unknown'}` }}
+        </div>
+
+        <details v-if="hasExecutionTrace && executionTraceTriggeredGuards.length" class="trace-guard-details">
+          <summary>{{ `Guards (${executionTraceTriggeredGuards.length})` }}</summary>
+          <div class="trace-guard-list">
+            <div
+              v-for="guard in executionTraceTriggeredGuards"
+              :key="guard.name"
+              class="trace-guard-item"
+            >
+              <span>{{ guard.label }}</span>
+              <el-tag size="small" type="warning" effect="plain">已生效</el-tag>
+            </div>
+          </div>
+        </details>
+
+        <div v-if="!hasExecutionTrace && secondaryExecutionEntries.length" class="component-secondary-group">
           <div class="compact-subsection-title">更多组件状态</div>
           <div class="component-inline-list">
             <div
@@ -90,12 +111,12 @@
               :class="['component-inline-chip', `status-${normalizeKey(entry.status)}`]"
             >
               <span>{{ entry.label }}</span>
-              <span>{{ executionStatusQuietLabel(entry.status) }}</span>
+                <span>{{ displayExecutionStatusQuietLabel(entry.status) }}</span>
             </div>
           </div>
         </div>
 
-        <div v-if="highlightedExecutionEntries.length" class="component-note-list">
+        <div v-if="!hasExecutionTrace && highlightedExecutionEntries.length" class="component-note-list">
           <div
             v-for="entry in highlightedExecutionEntries"
             :key="`note-${entry.key}`"
@@ -159,8 +180,8 @@
             >
               <div class="timeline-header">
                 <strong>{{ item.label }}</strong>
-                <el-tag :type="executionStatusTagType(item.status)" size="small" effect="plain">
-                  {{ executionStatusLabel(item.status) }}
+                <el-tag :type="displayExecutionStatusTagType(item.status)" size="small" effect="plain">
+                  {{ displayExecutionStatusLabel(item.status) }}
                 </el-tag>
               </div>
               <div class="timeline-summary">{{ item.summary }}</div>
@@ -244,6 +265,7 @@ const props = defineProps({
       latencyMs: null,
       confidenceScore: null,
       missingInfo: [],
+      executionTrace: null,
       requestState: 'idle',
       requestError: '',
       updatedAt: '',
@@ -316,6 +338,12 @@ const actionLookup = computed(() => {
 })
 
 const routeIntentKey = computed(() => normalizeKey(props.analysis.routeIntent))
+const executionTrace = computed(() =>
+  props.analysis.executionTrace && typeof props.analysis.executionTrace === 'object'
+    ? props.analysis.executionTrace
+    : null
+)
+const hasExecutionTrace = computed(() => Boolean(executionTrace.value))
 
 const requestStateLabel = computed(() =>
   executionStatusLabel(normalizeKey(props.analysis.requestState) || 'idle')
@@ -368,11 +396,96 @@ const highlightedExecutionEntries = computed(() =>
     .slice(0, 3)
 )
 
+const executionTraceLegacyFallback = computed(() => {
+  const fallback = executionTrace.value?.legacy_fallback
+  if (!fallback || typeof fallback !== 'object') {
+    return { used: false, reason: '' }
+  }
+  return {
+    used: Boolean(fallback.used),
+    reason: normalizeText(fallback.reason),
+  }
+})
+
+const executionTraceTriggeredGuards = computed(() =>
+  (Array.isArray(executionTrace.value?.guards_applied) ? executionTrace.value.guards_applied : [])
+    .filter((guard) => guard && typeof guard === 'object' && guard.triggered)
+    .map((guard) => ({
+      name: normalizeText(guard.name),
+      label: guardLabel(guard.name),
+    }))
+)
+
+const executionTraceEntries = computed(() => {
+  if (!hasExecutionTrace.value) return []
+  const traceValue = executionTrace.value || {}
+  const entries = []
+  const messageUnderstanding = traceValue.message_understanding || {}
+  if (messageUnderstanding && typeof messageUnderstanding === 'object' && Object.keys(messageUnderstanding).length) {
+    const status = messageUnderstanding.fallback_used ? 'fallback' : 'success'
+    entries.push({
+      key: 'trace-message-understanding',
+      label: '消息理解',
+      fullLabel: '消息理解',
+      status,
+      detail: `${normalizeText(messageUnderstanding.intent) || 'unknown'} -> ${normalizeText(messageUnderstanding.route_hint) || 'UNKNOWN'}`,
+      meta: formatTraceMeta({
+        agent: 'message_understanding_agent',
+        provider: messageUnderstanding.provider,
+        model: messageUnderstanding.model,
+        latencyMs: messageUnderstanding.latency_ms,
+      }),
+    })
+  }
+  const executionPlanValue = traceValue.execution_plan || {}
+  if (executionPlanValue && typeof executionPlanValue === 'object' && Object.keys(executionPlanValue).length) {
+    const stepNames = Array.isArray(executionPlanValue.step_names) ? executionPlanValue.step_names : []
+    entries.push({
+      key: 'trace-execution-plan',
+      label: '执行计划',
+      fullLabel: '执行计划',
+      status: executionPlanValue.actionable ? 'success' : 'fallback',
+      detail: `${normalizeText(executionPlanValue.primary_route) || 'UNKNOWN'} · ${stepNames.join(', ') || 'legacy_fallback'}`,
+      meta: formatTraceMeta({
+        agent: 'message_orchestrator',
+      }),
+    })
+  }
+  for (const step of Array.isArray(traceValue.steps) ? traceValue.steps : []) {
+    if (!step || typeof step !== 'object') continue
+    const status = normalizeKey(step.status) || 'success'
+    const reasonText =
+      normalizeText(step.skip_reason)
+      || normalizeText(step.fallback_reason)
+      || normalizeText(step.details?.error)
+      || normalizeText(step.agent)
+      || 'step completed'
+    entries.push({
+      key: `trace-step-${normalizeText(step.name)}-${entries.length}`,
+      label: executionTraceLabel(normalizeText(step.name)),
+      fullLabel: executionTraceLabel(normalizeText(step.name)),
+      status,
+      detail: reasonText,
+      meta: formatTraceMeta({
+        agent: step.agent,
+        provider: step.provider,
+        model: step.model,
+        latencyMs: step.latency_ms,
+      }),
+    })
+  }
+  return entries
+})
+
+const displayedExecutionEntries = computed(() =>
+  hasExecutionTrace.value ? executionTraceEntries.value : coreExecutionEntries.value
+)
+
 const componentStatusSummary = computed(() => {
-  const entries = executionComponentEntries.value
+  const entries = hasExecutionTrace.value ? executionTraceEntries.value : executionComponentEntries.value
   const running = entries.filter((entry) => normalizeKey(entry.status) === 'running').length
   const success = entries.filter((entry) => normalizeKey(entry.status) === 'success').length
-  const warning = entries.filter((entry) => ['warning', 'error'].includes(normalizeKey(entry.status))).length
+  const warning = entries.filter((entry) => ['warning', 'error', 'failed', 'fallback'].includes(normalizeKey(entry.status))).length
 
   if (running > 0) return `${running} 个模块处理中`
   if (warning > 0) return `${warning} 个模块需关注`
@@ -396,6 +509,14 @@ const hasAnalysisContent = computed(() => {
 })
 
 const analysisTimeline = computed(() => {
+  if (hasExecutionTrace.value) {
+    return executionTraceEntries.value.map((entry, index) => ({
+      key: `${entry.key}-${index}`,
+      label: entry.label,
+      status: entry.status,
+      summary: entry.meta ? `${entry.detail} · ${entry.meta}` : entry.detail,
+    }))
+  }
   const items = []
   for (const action of props.analysis.actions || []) {
     const key = normalizeKey(action?.tool)
@@ -465,6 +586,69 @@ function executionLabelForTool(key) {
     participant_resolution: '主体识别',
   }
   return labels[key] || key || '未知组件'
+}
+
+function executionTraceLabel(name) {
+  const labels = {
+    message_understanding: '????',
+    execution_plan: '????',
+    dossier_memory_subject_reference: '??????',
+    assistant_acknowledgement: '??????',
+    fact_confirmation: '???????',
+    fact_persistence: '??????',
+    graph_update: '????',
+    legal_agent_answer: '??????',
+  }
+  return labels[normalizeKey(name)] || normalizeText(name) || '????'
+}
+
+function guardLabel(name) {
+  const labels = {
+    temporary_blocks_persistence: 'temporary ???????',
+    legal_qa_blocks_graph: 'LEGAL_QA ??????',
+    missing_previous_fact: '???????????',
+    dossier_followup_question_blocks_persistence: '???????????',
+    non_persistable_case_update: '?? CASE_UPDATE ?????',
+  }
+  return labels[normalizeKey(name)] || normalizeText(name) || 'Guard'
+}
+
+function formatTraceMeta({ agent, provider, model, latencyMs }) {
+  const parts = []
+  const normalizedAgent = normalizeText(agent)
+  const normalizedProvider = normalizeText(provider)
+  const normalizedModel = normalizeText(model)
+  const latency = Number(latencyMs)
+
+  if (normalizedAgent) parts.push(normalizedAgent)
+  if (normalizedProvider || normalizedModel) {
+    parts.push([normalizedProvider, normalizedModel].filter(Boolean).join(' / '))
+  }
+  if (Number.isFinite(latency) && latency >= 0) {
+    parts.push(`${Math.round(latency)} ms`)
+  }
+  return parts.join(' ? ')
+}
+
+function displayExecutionStatusLabel(status) {
+  const key = normalizeKey(status)
+  if (key === 'fallback') return '??'
+  if (key === 'failed') return '??'
+  return executionStatusLabel(status)
+}
+
+function displayExecutionStatusQuietLabel(status) {
+  const key = normalizeKey(status)
+  if (key === 'fallback') return '???'
+  if (key === 'failed') return '??'
+  return executionStatusQuietLabel(status)
+}
+
+function displayExecutionStatusTagType(status) {
+  const key = normalizeKey(status)
+  if (key === 'fallback') return 'warning'
+  if (key === 'failed') return 'danger'
+  return executionStatusTagType(status)
 }
 
 function executionStatusLabel(status) {
@@ -666,7 +850,7 @@ function defaultIdleDetail(key) {
 
 function showExecutionDetail(entry) {
   const status = normalizeKey(entry?.status)
-  return ['success', 'running', 'warning', 'error', 'pending'].includes(status)
+  return ['success', 'running', 'warning', 'error', 'failed', 'pending', 'fallback'].includes(status)
 }
 
 function submit() {
@@ -857,6 +1041,10 @@ function submit() {
   line-height: 1.5;
 }
 
+.component-trace-meta-line {
+  color: #94a3b8;
+}
+
 .component-status-meta {
   display: inline-flex;
   align-items: center;
@@ -887,6 +1075,14 @@ function submit() {
 .status-dot.status-warning,
 .status-dot.status-error {
   background: #f97316;
+}
+
+.status-dot.status-fallback {
+  background: #f59e0b;
+}
+
+.status-dot.status-failed {
+  background: #ef4444;
 }
 
 .component-status-badge {
@@ -948,6 +1144,37 @@ function submit() {
   font-size: 11px;
   color: #64748b;
   line-height: 1.5;
+}
+
+.trace-guard-details {
+  margin-top: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.72);
+  padding: 10px 12px;
+}
+
+.trace-guard-details summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.trace-guard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.trace-guard-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  color: #475569;
 }
 
 .timeline-item {

@@ -2038,6 +2038,7 @@ const currentAnalysis = reactive({
   latencyMs: null,
   confidenceScore: null,
   missingInfo: [],
+  executionTrace: null,
   requestState: 'idle',
   requestError: '',
   updatedAt: '',
@@ -3072,6 +3073,7 @@ function resetAnalysis() {
   currentAnalysis.latencyMs = null
   currentAnalysis.confidenceScore = null
   currentAnalysis.missingInfo = []
+  currentAnalysis.executionTrace = null
   currentAnalysis.requestState = 'idle'
   currentAnalysis.requestError = ''
   currentAnalysis.updatedAt = ''
@@ -3115,6 +3117,10 @@ function applyCurrentAnalysisResponse(data = {}) {
     ? Number(data.confidence_score)
     : null
   currentAnalysis.missingInfo = Array.isArray(data.missing_info) ? data.missing_info : []
+  currentAnalysis.executionTrace =
+    data.execution_trace && typeof data.execution_trace === 'object'
+      ? data.execution_trace
+      : null
   currentAnalysis.requestState = 'success'
   currentAnalysis.requestError = ''
   currentAnalysis.updatedAt = new Date().toISOString()
@@ -3149,6 +3155,10 @@ function buildMessageViewModel(message, index = 0) {
     latencyMs: metadata.latency_ms ?? null,
     confidenceScore: metadata.confidence_score ?? null,
     missingInfo: metadata.missing_info || [],
+    executionTrace:
+      metadata.execution_trace && typeof metadata.execution_trace === 'object'
+        ? metadata.execution_trace
+        : null,
     pending: false,
   }
 }
@@ -3169,6 +3179,10 @@ function syncCurrentAnalysisFromMessages() {
   currentAnalysis.missingInfo = Array.isArray(latestAssistant.missingInfo)
     ? latestAssistant.missingInfo
     : []
+  currentAnalysis.executionTrace =
+    latestAssistant.executionTrace && typeof latestAssistant.executionTrace === 'object'
+      ? latestAssistant.executionTrace
+      : null
   currentAnalysis.requestState = 'success'
   currentAnalysis.updatedAt = latestAssistant.createdAt || ''
   if (currentGraph.loading) {
@@ -5910,6 +5924,10 @@ async function sendImpl(textOverride = null, options = {}) {
       latencyMs: data.latency_ms ?? null,
       confidenceScore: data.confidence_score ?? null,
       missingInfo: data.missing_info || [],
+      executionTrace:
+        data.execution_trace && typeof data.execution_trace === 'object'
+          ? data.execution_trace
+          : null,
       pending: false,
     })
 
@@ -5942,6 +5960,7 @@ async function sendImpl(textOverride = null, options = {}) {
       latencyMs: null,
       confidenceScore: null,
       missingInfo: [],
+      executionTrace: null,
       pending: false,
     })
   } finally {
