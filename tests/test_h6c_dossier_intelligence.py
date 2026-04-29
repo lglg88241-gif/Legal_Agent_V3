@@ -55,6 +55,7 @@ def _patch_display_graph_context(
     *,
     raw_nodes: list[dict] | None = None,
     display_nodes: list[dict] | None = None,
+    participant_candidates: list[dict] | None = None,
     confirmed_participants: list[dict] | None = None,
     participant_mappings: list[dict] | None = None,
     entity_resolution_decisions: list[dict] | None = None,
@@ -68,6 +69,7 @@ def _patch_display_graph_context(
         return (
             {
                 "participant_aliases": participant_aliases or {},
+                "participant_candidates": participant_candidates or [],
                 "confirmed_participants": confirmed_participants or [],
                 "participant_mappings": participant_mappings or [],
                 "entity_resolution_decisions": entity_resolution_decisions or [],

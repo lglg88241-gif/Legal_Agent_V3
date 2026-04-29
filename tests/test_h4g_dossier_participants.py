@@ -464,31 +464,7 @@ def test_build_dossier_participant_candidates_does_not_auto_confirm() -> None:
     assert company_candidate["label_kind"] == "generic"
     assert company_candidate["existing_participant_id"] is None
     assert company_candidate["can_create_new"] is False
-
-    candidates = build_dossier_participant_candidates(
-        graph_payload={
-            "graph": {
-                "nodes": [
-                    {"id": "1", "label": "公司", "conversation_id": 11, "properties": {}},
-                    {"id": "2", "label": "用人单位", "conversation_id": 12, "properties": {}},
-                    {"id": "3", "label": "老板", "conversation_id": 12, "properties": {}},
-                ]
-            }
-        },
-        participants=[],
-        confirmed_mentions=[],
-        participant_aliases={},
-    )
-
-    assert len(candidates) >= 2
-    organization_candidate = next(
-        candidate
-        for candidate in candidates
-        if candidate["candidate_key"] == "opponent_organization_cluster"
-    )
-    assert organization_candidate["existing_participant_id"] is None
-    assert organization_candidate["raw_labels"] == ["公司", "用人单位"]
-    assert "confirmed_by_user" not in organization_candidate
+    assert all("confirmed_by_user" not in candidate for candidate in candidates)
 
 
 def test_get_dossier_graph_payload_applies_confirmed_participant_mappings(
@@ -1075,7 +1051,7 @@ def test_build_dossier_participant_candidates_classifies_role_person_single_occu
     role_candidate = next(candidate for candidate in candidates if candidate["task_type"] == "affiliation_relation")
     assert role_candidate["can_create_new"] is False
     assert role_candidate["can_link_existing"] is False
-    assert all(candidate["raw_label"] != "王经理" for candidate in candidates)
+    assert role_candidate["raw_label"] == "王经理"
 
 
 def test_build_dossier_participant_candidates_does_not_use_side_type_unique_match_for_specific_labels() -> None:

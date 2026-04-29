@@ -808,6 +808,7 @@ async def get_dossier_participant_candidates(
         "dossier_id": dossier.id,
         "conversation_count": len(conversations),
         "candidates": candidates,
+        "classifier_tasks_available": True,
     }
 
 
