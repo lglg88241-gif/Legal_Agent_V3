@@ -35,6 +35,7 @@ from app.services.case_followup import (
     is_dossier_followup_question,
     should_persist_structured_case_message,
 )
+from app.services.case_update_acknowledgement import build_case_update_acknowledgement
 from app.services.dossier_graph import build_dossier_graph_summary_for_conversation
 from app.services.dossier_graph_tool import (
     load_dossier_graph_context_for_conversation,
@@ -604,6 +605,21 @@ def _build_graph_sync_action() -> dict[str, Any]:
     }
 
 
+def _build_case_update_acknowledgement_action(
+    acknowledgement_result: dict[str, Any],
+) -> dict[str, Any]:
+    fallback_used = bool(acknowledgement_result.get("fallback_used"))
+    return {
+        "tool": "case_update_acknowledgement",
+        "stage": "case_update_acknowledgement",
+        "status": "fallback" if fallback_used else "success",
+        "provider": str(acknowledgement_result.get("provider") or "rules"),
+        "model": str(acknowledgement_result.get("model") or ""),
+        "fallback_reason": str(acknowledgement_result.get("fallback_reason") or "").strip() or None,
+        "result_summary": "Lightweight case update acknowledgement generated",
+    }
+
+
 async def _load_controlled_dossier_graph_context_async(
     db: AsyncSession,
     *,
@@ -987,6 +1003,12 @@ def ask_agent_task(
             and str(execution_plan.get("primary_route") or "").strip().upper() == "CASE_UPDATE"
             and "fact_persistence" in execution_plan_step_names
         )
+        case_update_acknowledgement_active = (
+            case_update_plan_active
+            and str(execution_plan.get("intent") or "").strip().lower()
+            in {"fact_update", "confirm_previous_fact"}
+            and "assistant_acknowledgement" in execution_plan_step_names
+        )
         confirm_previous_fact_active = (
             case_update_plan_active
             and "fact_confirmation" in execution_plan_step_names
@@ -1001,6 +1023,15 @@ def ask_agent_task(
         graph_update_input_text = " ".join(
             str(execution_plan_resolved_inputs.get("graph_update_input_text") or "").strip().split()
         )
+        case_update_blocked_by_legal_qa = (
+            case_update_plan_active and conversation_mode == "LEGAL_QA"
+        )
+        case_update_graph_update_planned = (
+            case_update_acknowledgement_active
+            and persistence_consent != "temporary"
+            and not case_update_blocked_by_legal_qa
+        )
+        case_update_acknowledgement_result: dict[str, Any] | None = None
         logger.info(
             "Message execution plan | primary_route=%s actionable=%s steps=%s fallback=%s",
             execution_plan.get("primary_route"),
@@ -1044,23 +1075,76 @@ def ask_agent_task(
                     user_id,
                 )
 
-            answer = asyncio.run(
-                legal_agent.ask(
-                    user_id,
-                    session_id,
-                    question,
-                    chat_history=chat_history,
-                    case_summary=case_summary,
-                    graph_memory=graph_memory,
-                    is_precise_mode=is_precise_mode,
-                    proactive_graph_mode=proactive_graph_mode,
-                    conversation_id=conversation_id,
-                    saved_case_state=context.get("saved_case_state"),
-                    dossier_context=advisor_dossier_context,
-                    dossier_graph_summary=advisor_dossier_graph_summary,
-                    dossier_graph_context=advisor_dossier_graph_context,
+            if case_update_acknowledgement_active:
+                try:
+                    case_update_acknowledgement_result = build_case_update_acknowledgement(
+                        plan=execution_plan,
+                        intent=str(execution_plan.get("intent") or ""),
+                        user_message_text=question,
+                        persisted_fact_text=effective_persistence_text,
+                        graph_update_scheduled=case_update_graph_update_planned,
+                        graph_update_actions=None,
+                        dossier_id=dossier_id,
+                        conversation_id=conversation_id,
+                        persistence_consent=persistence_consent,
+                        route_intent="CASE_UPDATE",
+                        fallback_reason=(
+                            str(execution_plan_trace.get("fallback_reason") or "").strip() or None
+                        ),
+                    )
+                    answer = {
+                        "response": str(case_update_acknowledgement_result.get("text") or ""),
+                        "sources": [],
+                        "route_intent": "CASE_UPDATE",
+                        "case_summary": context.get("case_summary") or "",
+                        "is_final": True,
+                        "confidence_score": 0.92,
+                        "missing_info": [],
+                    }
+                except Exception as exc:
+                    logger.exception(
+                        "Case update acknowledgement specialist failed, falling back to legacy advisor | conversation_id=%s user_id=%s error=%s",
+                        conversation_id,
+                        user_id,
+                        exc,
+                    )
+                    case_update_acknowledgement_result = None
+                    answer = asyncio.run(
+                        legal_agent.ask(
+                            user_id,
+                            session_id,
+                            question,
+                            chat_history=chat_history,
+                            case_summary=case_summary,
+                            graph_memory=graph_memory,
+                            is_precise_mode=is_precise_mode,
+                            proactive_graph_mode=proactive_graph_mode,
+                            conversation_id=conversation_id,
+                            saved_case_state=context.get("saved_case_state"),
+                            dossier_context=advisor_dossier_context,
+                            dossier_graph_summary=advisor_dossier_graph_summary,
+                            dossier_graph_context=advisor_dossier_graph_context,
+                        )
+                    )
+            else:
+                answer = asyncio.run(
+                    legal_agent.ask(
+                        user_id,
+                        session_id,
+                        question,
+                        chat_history=chat_history,
+                        case_summary=case_summary,
+                        graph_memory=graph_memory,
+                        is_precise_mode=is_precise_mode,
+                        proactive_graph_mode=proactive_graph_mode,
+                        conversation_id=conversation_id,
+                        saved_case_state=context.get("saved_case_state"),
+                        dossier_context=advisor_dossier_context,
+                        dossier_graph_summary=advisor_dossier_graph_summary,
+                        dossier_graph_context=advisor_dossier_graph_context,
+                    )
                 )
-            )
+            
 
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
@@ -1104,9 +1188,6 @@ def ask_agent_task(
             updated_case_summary = context.get("case_summary") or ""
             case_state_dict = None
             case_type = None
-        case_update_blocked_by_legal_qa = (
-            case_update_plan_active and conversation_mode == "LEGAL_QA"
-        )
         if case_update_plan_active:
             should_persist_structured_case = (
                 persistence_consent != "temporary"
@@ -1152,6 +1233,10 @@ def ask_agent_task(
             ]
             if confirm_previous_fact_active:
                 agent_actions.append(_build_fact_confirmation_action(confirm_previous_fact_text))
+            if case_update_acknowledgement_result is not None:
+                agent_actions.append(
+                    _build_case_update_acknowledgement_action(case_update_acknowledgement_result)
+                )
         elif route_intent == "OUT_OF_SCOPE":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},

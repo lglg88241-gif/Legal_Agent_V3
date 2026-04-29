@@ -195,6 +195,7 @@ def test_build_execution_plan_confirm_previous_fact_paraphrases_use_previous_fac
         "fact_confirmation",
         "fact_persistence",
         "graph_update",
+        "assistant_acknowledgement",
     ]
     assert plan["resolved_inputs"]["previous_fact_text"] == FACT_MESSAGE
     assert plan["resolved_inputs"]["effective_persistence_text"] == FACT_MESSAGE

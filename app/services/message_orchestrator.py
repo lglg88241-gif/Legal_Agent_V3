@@ -208,6 +208,13 @@ def build_execution_plan_from_message_understanding(
                         action="update_graph",
                         input_source="resolved_previous_fact",
                     ),
+                    _build_step(
+                        name="assistant_acknowledgement",
+                        agent="assistant_response",
+                        action="acknowledge_confirmed_fact",
+                        input_source="resolved_previous_fact",
+                        required=False,
+                    ),
                 ]
             )
             plan["resolved_inputs"]["effective_persistence_text"] = previous_fact_text
