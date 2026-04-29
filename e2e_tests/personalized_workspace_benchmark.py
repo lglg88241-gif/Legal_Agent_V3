@@ -915,7 +915,7 @@ def _candidate_task_type(candidate: dict[str, Any] | None) -> str:
 
 
 def _is_cross_conversation_candidate(candidate: dict[str, Any] | None) -> bool:
-    return _candidate_task_type(candidate) == "cross_conversation_entity_resolution"
+    return _candidate_task_type(candidate) in {"cross_conversation_entity_resolution", "identity"}
 
 
 def _graph_node_label(node: dict[str, Any] | None) -> str:
@@ -1931,7 +1931,7 @@ def run_case_h(
     )
     candidate_structure_ok = (
         cross_candidate_ok
-        and _candidate_task_type(cross_candidate) == "cross_conversation_entity_resolution"
+        and _is_cross_conversation_candidate(cross_candidate)
         and bool(str(cross_candidate.get("candidate_key") or "").strip())
         and bool(str(cross_candidate.get("task_key") or "").strip())
         and bool(str(cross_candidate.get("reason") or "").strip())

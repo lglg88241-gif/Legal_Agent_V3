@@ -5,7 +5,7 @@
         <span class="eyebrow">Neo4j Live</span>
         <span class="headline">知识图谱侧边栏</span>
       </div>
-      <el-tooltip :content="collapsed ? '展开侧栏' : '收起侧栏'" placement="left">
+      <el-tooltip :content="collapsed ? '展开侧边栏' : '收起侧边栏'" placement="left">
         <el-button circle size="small" @click="$emit('toggle-sidebar')">
           <el-icon><component :is="collapsed ? Expand : Fold" /></el-icon>
         </el-button>
@@ -56,8 +56,8 @@
       <div class="panel-section panel-section-compact">
         <div class="section-title-row">
           <div>
-            <div class="section-title section-title-tight">组件状态</div>
-            <div class="section-description">只突出当前请求真正触发的关键模块。</div>
+            <div class="section-title section-title-tight">执行状态</div>
+            <div class="section-description">展示当前请求真实触发的关键模块和执行状态。</div>
           </div>
           <span class="section-summary">{{ componentStatusSummary }}</span>
         </div>
@@ -85,11 +85,11 @@
         </div>
 
         <div v-if="hasExecutionTrace && executionTraceLegacyFallback.used" class="analysis-warning">
-          {{ `本轮回到了传统流程：${executionTraceLegacyFallback.reason || 'unknown'}` }}
+          {{ `传统流程兜底：${executionTraceLegacyFallback.reason || '未提供原因'}。这不代表失败，只表示回退到旧链路。` }}
         </div>
 
         <details v-if="hasExecutionTrace && executionTraceTriggeredGuards.length" class="trace-guard-details">
-          <summary>{{ `Guards (${executionTraceTriggeredGuards.length})` }}</summary>
+          <summary>{{ `执行保护条件（${executionTraceTriggeredGuards.length}）` }}</summary>
           <div class="trace-guard-list">
             <div
               v-for="guard in executionTraceTriggeredGuards"
@@ -111,7 +111,7 @@
               :class="['component-inline-chip', `status-${normalizeKey(entry.status)}`]"
             >
               <span>{{ entry.label }}</span>
-                <span>{{ displayExecutionStatusQuietLabel(entry.status) }}</span>
+              <span>{{ displayExecutionStatusQuietLabel(entry.status) }}</span>
             </div>
           </div>
         </div>
@@ -132,13 +132,13 @@
         <div class="section-title-row">
           <div>
             <div class="section-title section-title-tight">本轮分析</div>
-            <div class="section-description">当前会话请求的处理过程与结果摘要。</div>
+            <div class="section-description">展示当前会话请求的处理过程和结果摘要。</div>
           </div>
         </div>
 
         <div v-if="!hasAnalysisContent" class="analysis-empty-state">
           <div class="analysis-empty-copy">
-            <strong>等待你发送问题后，我会在这里展示本轮分析过程。</strong>
+            <strong>发送问题后，我会在这里展示本轮分析过程。</strong>
             <span>系统会按请求类型自动安排处理链路，并同步关键执行状态。</span>
           </div>
           <div class="analysis-empty-hints">
@@ -289,16 +289,94 @@ const emit = defineEmits(['feedback', 'toggle-sidebar'])
 const rating = ref(0)
 const comment = ref('')
 
+const EXECUTION_COMPONENT_LABELS = {
+  request: '请求处理',
+  tool_router: '任务分流',
+  fact_updater: '案情理解',
+  retrieval_tools: '依据检索',
+  reflector: '风险审查',
+  legal_advisor: '法律回答生成',
+  greeting: '问候响应',
+  out_of_scope: '范围拦截',
+  graph_sync: '图谱更新',
+  dossier_intelligence: '案卷智能分析',
+  summary_update: '摘要更新',
+  participant_resolution: '主体关系确认',
+  message_understanding: '消息理解',
+  message_understanding_shadow: '消息理解影子链路',
+  message_orchestrator: '执行计划',
+  dossier_memory: '会话/案卷指代解析',
+  legal_agent_answer: '法律问答',
+  case_update_acknowledgement: '事实补充确认',
+  fact_confirmation: '上一事实确认',
+}
+
+const TRACE_STEP_LABELS = {
+  message_understanding: '消息理解',
+  message_understanding_agent: '消息理解智能体',
+  execution_plan: '执行计划',
+  message_orchestrator: '执行计划',
+  dossier_memory_subject_reference: '会话/案卷指代解析',
+  assistant_acknowledgement: '事实补充确认',
+  legal_agent_answer: '法律问答',
+  fact_confirmation: '上一事实确认',
+  fact_persistence: '案情结构化记录',
+  graph_update: '图谱更新',
+  dossier_intelligence: '案卷智能分析',
+  participant_resolution: '主体关系确认',
+  summary_update: '案卷摘要更新',
+  legacy_fallback: '传统流程兜底',
+}
+
+const ROUTE_LABELS = {
+  legal_qa: '法律问答',
+  case_update: '案情更新',
+  dossier_memory: '案卷/会话记忆查询',
+  general_consult: '一般咨询',
+  document_assist: '文书辅助',
+  greeting: '问候',
+  out_of_scope: '超出范围',
+  unknown: '未知分流',
+}
+
+const RESPONSE_MODE_LABELS = {
+  acknowledge_and_persist: '确认并持久化',
+  case_analysis_without_persistence: '仅分析不持久化',
+  legal_answer: '法律回答',
+  dossier_memory_answer: '记忆解析回答',
+}
+
+const STATUS_LABELS = {
+  success: '已完成',
+  skipped: '已跳过',
+  failed: '失败',
+  fallback: '兜底',
+  scheduled: '已调度',
+  running: '执行中',
+  pending: '待执行',
+  idle: '空闲',
+  warning: '需关注',
+  error: '失败',
+}
+
+const GUARD_LABELS = {
+  temporary_blocks_persistence: 'temporary 模式阻断结构化持久化',
+  legal_qa_blocks_graph: 'LEGAL_QA 阻断图谱更新',
+  missing_previous_fact: '未找到可确认的上一条事实',
+  dossier_followup_question_blocks_persistence: '案卷追问阻断案情写入',
+  non_persistable_case_update: '当前 CASE_UPDATE 不满足持久化条件',
+}
+
 const executionDefinitions = [
   { key: 'tool_router', label: '任务分流', fullLabel: '任务分流' },
   { key: 'fact_updater', label: '案情理解', fullLabel: '案情理解' },
   { key: 'retrieval_tools', label: '依据检索', fullLabel: '依据检索' },
   { key: 'reflector', label: '风险审查', fullLabel: '风险审查' },
-  { key: 'legal_advisor', label: '答复生成', fullLabel: '答复生成' },
+  { key: 'legal_advisor', label: '法律回答生成', fullLabel: '法律回答生成' },
   { key: 'graph_sync', label: '图谱更新', fullLabel: '图谱更新' },
-  { key: 'dossier_intelligence', label: '案卷整理', fullLabel: '案卷整理' },
-  { key: 'summary_update', label: '摘要生成', fullLabel: '摘要生成' },
-  { key: 'participant_resolution', label: '主体识别', fullLabel: '主体识别' },
+  { key: 'dossier_intelligence', label: '案卷智能分析', fullLabel: '案卷智能分析' },
+  { key: 'summary_update', label: '摘要更新', fullLabel: '摘要更新' },
+  { key: 'participant_resolution', label: '主体关系确认', fullLabel: '主体关系确认' },
 ]
 
 const coreExecutionKeys = ['fact_updater', 'retrieval_tools', 'graph_sync']
@@ -345,24 +423,8 @@ const executionTrace = computed(() =>
 )
 const hasExecutionTrace = computed(() => Boolean(executionTrace.value))
 
-const requestStateLabel = computed(() =>
-  executionStatusLabel(normalizeKey(props.analysis.requestState) || 'idle')
-)
-
-const routeIntentLabel = computed(() => {
-  switch (routeIntentKey.value) {
-    case 'case_update':
-      return '案情更新'
-    case 'general_consult':
-      return '一般咨询'
-    case 'greeting':
-      return '问候'
-    case 'out_of_scope':
-      return '超出范围'
-    default:
-      return '未返回'
-  }
-})
+const requestStateLabel = computed(() => displayExecutionStatusLabel(props.analysis.requestState || 'idle'))
+const routeIntentLabel = computed(() => routeLabel(props.analysis.routeIntent))
 
 const latencyLabel = computed(() => {
   const latency = Number(props.analysis.latencyMs)
@@ -420,15 +482,15 @@ const executionTraceEntries = computed(() => {
   if (!hasExecutionTrace.value) return []
   const traceValue = executionTrace.value || {}
   const entries = []
+
   const messageUnderstanding = traceValue.message_understanding || {}
   if (messageUnderstanding && typeof messageUnderstanding === 'object' && Object.keys(messageUnderstanding).length) {
-    const status = messageUnderstanding.fallback_used ? 'fallback' : 'success'
     entries.push({
       key: 'trace-message-understanding',
       label: '消息理解',
       fullLabel: '消息理解',
-      status,
-      detail: `${normalizeText(messageUnderstanding.intent) || 'unknown'} -> ${normalizeText(messageUnderstanding.route_hint) || 'UNKNOWN'}`,
+      status: messageUnderstanding.fallback_used ? 'fallback' : 'success',
+      detail: `${intentLabel(messageUnderstanding.intent)} -> ${routeLabel(messageUnderstanding.route_hint)}`,
       meta: formatTraceMeta({
         agent: 'message_understanding_agent',
         provider: messageUnderstanding.provider,
@@ -437,35 +499,32 @@ const executionTraceEntries = computed(() => {
       }),
     })
   }
+
   const executionPlanValue = traceValue.execution_plan || {}
   if (executionPlanValue && typeof executionPlanValue === 'object' && Object.keys(executionPlanValue).length) {
     const stepNames = Array.isArray(executionPlanValue.step_names) ? executionPlanValue.step_names : []
+    const mappedSteps = stepNames.map((name) => executionTraceLabel(name))
+    const responseModeText = normalizeText(executionPlanValue.response_mode)
+      ? ` · ${responseModeLabel(executionPlanValue.response_mode)}`
+      : ''
     entries.push({
       key: 'trace-execution-plan',
       label: '执行计划',
       fullLabel: '执行计划',
       status: executionPlanValue.actionable ? 'success' : 'fallback',
-      detail: `${normalizeText(executionPlanValue.primary_route) || 'UNKNOWN'} · ${stepNames.join(', ') || 'legacy_fallback'}`,
-      meta: formatTraceMeta({
-        agent: 'message_orchestrator',
-      }),
+      detail: `${routeLabel(executionPlanValue.primary_route)}${responseModeText} · ${mappedSteps.join('、') || '传统流程兜底'}`,
+      meta: formatTraceMeta({ agent: 'message_orchestrator' }),
     })
   }
+
   for (const step of Array.isArray(traceValue.steps) ? traceValue.steps : []) {
     if (!step || typeof step !== 'object') continue
-    const status = normalizeKey(step.status) || 'success'
-    const reasonText =
-      normalizeText(step.skip_reason)
-      || normalizeText(step.fallback_reason)
-      || normalizeText(step.details?.error)
-      || normalizeText(step.agent)
-      || 'step completed'
     entries.push({
       key: `trace-step-${normalizeText(step.name)}-${entries.length}`,
-      label: executionTraceLabel(normalizeText(step.name)),
-      fullLabel: executionTraceLabel(normalizeText(step.name)),
-      status,
-      detail: reasonText,
+      label: executionTraceLabel(step.name),
+      fullLabel: executionTraceLabel(step.name),
+      status: normalizeKey(step.status) || 'success',
+      detail: buildTraceStepDetail(step),
       meta: formatTraceMeta({
         agent: step.agent,
         provider: step.provider,
@@ -474,6 +533,7 @@ const executionTraceEntries = computed(() => {
       }),
     })
   }
+
   return entries
 })
 
@@ -484,13 +544,15 @@ const displayedExecutionEntries = computed(() =>
 const componentStatusSummary = computed(() => {
   const entries = hasExecutionTrace.value ? executionTraceEntries.value : executionComponentEntries.value
   const running = entries.filter((entry) => normalizeKey(entry.status) === 'running').length
+  const warning = entries.filter((entry) =>
+    ['warning', 'error', 'failed', 'fallback'].includes(normalizeKey(entry.status))
+  ).length
   const success = entries.filter((entry) => normalizeKey(entry.status) === 'success').length
-  const warning = entries.filter((entry) => ['warning', 'error', 'failed', 'fallback'].includes(normalizeKey(entry.status))).length
 
-  if (running > 0) return `${running} 个模块处理中`
-  if (warning > 0) return `${warning} 个模块需关注`
-  if (success > 0) return `${success} 个模块已完成`
-  return '等待问题触发'
+  if (running > 0) return `${running} 个步骤执行中`
+  if (warning > 0) return `${warning} 个步骤需要关注`
+  if (success > 0) return `${success} 个步骤已完成`
+  return '等待请求触发'
 })
 
 const hasAnalysisContent = computed(() => {
@@ -517,6 +579,7 @@ const analysisTimeline = computed(() => {
       summary: entry.meta ? `${entry.detail} · ${entry.meta}` : entry.detail,
     }))
   }
+
   const items = []
   for (const action of props.analysis.actions || []) {
     const key = normalizeKey(action?.tool)
@@ -524,7 +587,7 @@ const analysisTimeline = computed(() => {
     items.push({
       key,
       label: executionLabelForTool(key),
-      status: 'success',
+      status: normalizeKey(action?.status) || 'success',
       summary: normalizeText(action?.result_summary) || '本轮已完成执行',
     })
   }
@@ -545,7 +608,7 @@ const analysisTimeline = computed(() => {
       key: 'request',
       label: '请求处理',
       status: 'running',
-      summary: '主请求处理中，等待后端节点返回执行结果',
+      summary: '当前请求处理中，等待后端返回执行结果。',
     })
   }
 
@@ -560,6 +623,12 @@ function normalizeKey(value) {
   return normalizeText(value).toLowerCase()
 }
 
+function unknownLabel(prefix, value, emptyFallback) {
+  const raw = normalizeText(value)
+  if (!raw) return emptyFallback
+  return `${prefix}：${raw}`
+}
+
 function componentLabel(key) {
   const labels = {
     chroma: 'Chroma',
@@ -567,50 +636,40 @@ function componentLabel(key) {
     llm: 'LLM',
     celery: 'Celery',
   }
-  return labels[key] || key
+  return labels[key] || unknownLabel('未知组件', key, '未知组件')
+}
+
+function intentLabel(value) {
+  const labels = {
+    subject_reference: '主体指代',
+    fact_update: '事实补充',
+    confirm_previous_fact: '上一事实确认',
+    legal_question: '法律问题',
+    advice_question: '维权建议',
+    document_request: '文书请求',
+    unknown: '未知意图',
+  }
+  return labels[normalizeKey(value)] || unknownLabel('未知意图', value, '未知意图')
 }
 
 function executionLabelForTool(key) {
-  const labels = {
-    request: '请求处理',
-    tool_router: '任务分流',
-    fact_updater: '案情理解',
-    retrieval_tools: '依据检索',
-    reflector: '风险审查',
-    legal_advisor: '答复生成',
-    greeting: '问候响应',
-    out_of_scope: '范围拦截',
-    graph_sync: '图谱更新',
-    dossier_intelligence: '案卷整理',
-    summary_update: '摘要生成',
-    participant_resolution: '主体识别',
-  }
-  return labels[key] || key || '未知组件'
+  return EXECUTION_COMPONENT_LABELS[normalizeKey(key)] || unknownLabel('未知组件', key, '未知组件')
 }
 
 function executionTraceLabel(name) {
-  const labels = {
-    message_understanding: '????',
-    execution_plan: '????',
-    dossier_memory_subject_reference: '??????',
-    assistant_acknowledgement: '??????',
-    fact_confirmation: '???????',
-    fact_persistence: '??????',
-    graph_update: '????',
-    legal_agent_answer: '??????',
-  }
-  return labels[normalizeKey(name)] || normalizeText(name) || '????'
+  return TRACE_STEP_LABELS[normalizeKey(name)] || unknownLabel('未知步骤', name, '未知步骤')
+}
+
+function routeLabel(value) {
+  return ROUTE_LABELS[normalizeKey(value)] || unknownLabel('未知分流', value, '未返回')
+}
+
+function responseModeLabel(value) {
+  return RESPONSE_MODE_LABELS[normalizeKey(value)] || unknownLabel('未知响应模式', value, '未声明')
 }
 
 function guardLabel(name) {
-  const labels = {
-    temporary_blocks_persistence: 'temporary ???????',
-    legal_qa_blocks_graph: 'LEGAL_QA ??????',
-    missing_previous_fact: '???????????',
-    dossier_followup_question_blocks_persistence: '???????????',
-    non_persistable_case_update: '?? CASE_UPDATE ?????',
-  }
-  return labels[normalizeKey(name)] || normalizeText(name) || 'Guard'
+  return GUARD_LABELS[normalizeKey(name)] || unknownLabel('未知保护', name, '未知保护')
 }
 
 function formatTraceMeta({ agent, provider, model, latencyMs }) {
@@ -627,88 +686,45 @@ function formatTraceMeta({ agent, provider, model, latencyMs }) {
   if (Number.isFinite(latency) && latency >= 0) {
     parts.push(`${Math.round(latency)} ms`)
   }
-  return parts.join(' ? ')
+  return parts.join(' · ')
+}
+
+function buildTraceStepDetail(step) {
+  const details = step?.details && typeof step.details === 'object' ? step.details : {}
+  const status = normalizeKey(step?.status)
+  if (status === 'skipped') {
+    return unknownLabel('跳过原因', step?.skip_reason, '已跳过')
+  }
+  if (status === 'fallback') {
+    return unknownLabel('兜底原因', step?.fallback_reason, '已兜底')
+  }
+  if (status === 'failed') {
+    return normalizeText(details.error) || '执行失败'
+  }
+  if (normalizeText(details.selected_scope)) {
+    return `已选择作用域：${details.selected_scope}`
+  }
+  if (normalizeText(details.task_id)) {
+    return `已调度任务：${details.task_id}`
+  }
+  if (normalizeText(details.graph_update_source)) {
+    return `图谱更新来源：${details.graph_update_source}`
+  }
+  if (normalizeText(details.input_text)) {
+    return '已写入结构化案情'
+  }
+  return '本步骤已完成'
 }
 
 function displayExecutionStatusLabel(status) {
-  const key = normalizeKey(status)
-  if (key === 'fallback') return '??'
-  if (key === 'failed') return '??'
-  return executionStatusLabel(status)
+  return STATUS_LABELS[normalizeKey(status)] || unknownLabel('未知状态', status, '未知状态')
 }
 
 function displayExecutionStatusQuietLabel(status) {
-  const key = normalizeKey(status)
-  if (key === 'fallback') return '???'
-  if (key === 'failed') return '??'
-  return executionStatusQuietLabel(status)
+  return STATUS_LABELS[normalizeKey(status)] || unknownLabel('未知状态', status, '未知状态')
 }
 
 function displayExecutionStatusTagType(status) {
-  const key = normalizeKey(status)
-  if (key === 'fallback') return 'warning'
-  if (key === 'failed') return 'danger'
-  return executionStatusTagType(status)
-}
-
-function executionStatusLabel(status) {
-  switch (normalizeKey(status)) {
-    case 'success':
-      return '成功'
-    case 'running':
-      return '执行中'
-    case 'pending':
-      return '待执行'
-    case 'warning':
-      return '需关注'
-    case 'error':
-      return '失败'
-    case 'skipped':
-      return '已跳过'
-    default:
-      return '空闲'
-  }
-}
-
-function executionStatusCompactLabel(status) {
-  switch (normalizeKey(status)) {
-    case 'success':
-      return '已完成'
-    case 'running':
-      return '进行中'
-    case 'pending':
-      return '待执行'
-    case 'warning':
-      return '关注'
-    case 'error':
-      return '失败'
-    case 'skipped':
-      return '跳过'
-    default:
-      return '待命'
-  }
-}
-
-function executionStatusQuietLabel(status) {
-  switch (normalizeKey(status)) {
-    case 'success':
-      return '已完成'
-    case 'running':
-      return '进行中'
-    case 'pending':
-      return '等待中'
-    case 'warning':
-      return '需关注'
-    case 'error':
-      return '失败'
-    case 'skipped':
-      return '本轮未涉及'
-    default:
-      return '待命'
-  }
-}
-
-function executionStatusTagType(status) {
   switch (normalizeKey(status)) {
     case 'success':
       return 'success'
@@ -717,11 +733,14 @@ function executionStatusTagType(status) {
     case 'warning':
       return 'warning'
     case 'error':
+    case 'failed':
       return 'danger'
     case 'pending':
-      return 'info'
+    case 'scheduled':
     case 'skipped':
       return 'info'
+    case 'fallback':
+      return 'warning'
     default:
       return ''
   }
@@ -749,8 +768,8 @@ function buildExecutionEntry(definition) {
       key,
       label: definition.label,
       fullLabel: definition.fullLabel,
-      status: 'success',
-      detail: normalizeText(action?.result_summary) || '本轮已执行',
+      status: normalizeKey(action?.status) || 'success',
+      detail: normalizeText(action?.result_summary) || '本轮已完成执行',
     }
   }
 
@@ -761,7 +780,7 @@ function buildExecutionEntry(definition) {
         label: definition.label,
         fullLabel: definition.fullLabel,
         status: 'running',
-        detail: '正在判定当前会话请求的处理路径',
+        detail: '正在判断当前请求的处理路径。',
       }
     }
     return {
@@ -769,7 +788,7 @@ function buildExecutionEntry(definition) {
       label: definition.label,
       fullLabel: definition.fullLabel,
       status: 'pending',
-      detail: '等待上游节点结果',
+      detail: '等待上游步骤完成。',
     }
   }
 
@@ -779,8 +798,8 @@ function buildExecutionEntry(definition) {
         key,
         label: definition.label,
         fullLabel: definition.fullLabel,
-        status: 'error',
-        detail: '主请求失败，未完整返回执行结果',
+        status: 'failed',
+        detail: '主请求失败，未完整返回执行结果。',
       }
     }
     return {
@@ -820,37 +839,37 @@ function shouldSkipForRoute(key, routeIntent) {
     return ['fact_updater', 'reflector', 'summary_update', 'participant_resolution'].includes(key)
   }
   if (routeIntent === 'case_update') {
-    return ['legal_advisor', 'dossier_intelligence', 'summary_update', 'participant_resolution'].includes(key)
+    return ['dossier_intelligence', 'summary_update', 'participant_resolution'].includes(key)
   }
   return false
 }
 
 function skippedOrIdleDetail(key, routeIntent) {
   if (shouldSkipForRoute(key, routeIntent)) {
-    return '当前请求路由下未触发该模块'
+    return '当前请求路径下未触发该组件。'
   }
   return defaultIdleDetail(key)
 }
 
 function defaultIdleDetail(key) {
   if (key === 'dossier_intelligence') {
-    return '案卷级整理不属于当前会话主链路'
+    return '案卷级智能分析不属于当前会话主链路。'
   }
   if (key === 'summary_update') {
-    return '本轮未触发摘要更新'
+    return '本轮未触发摘要更新。'
   }
   if (key === 'participant_resolution') {
-    return '本轮未触发主体确认写入'
+    return '本轮未触发主体确认写入。'
   }
   if (key === 'graph_sync') {
-    return '当前未触发图谱同步状态更新'
+    return '当前未触发图谱同步状态更新。'
   }
-  return '等待当前会话请求触发'
+  return '等待当前请求触发。'
 }
 
 function showExecutionDetail(entry) {
   const status = normalizeKey(entry?.status)
-  return ['success', 'running', 'warning', 'error', 'failed', 'pending', 'fallback'].includes(status)
+  return ['success', 'running', 'warning', 'error', 'failed', 'pending', 'fallback', 'scheduled'].includes(status)
 }
 
 function submit() {

@@ -612,6 +612,10 @@ def _build_party_naming_task(
         return None
 
     current_label = evidence["raw_labels"][0]
+    if not _is_self_anchor_candidate_label(current_label):
+        return None
+    if _is_organization_like_label(current_label) or is_role_person_label(current_label):
+        return None
     return {
         "task_type": "party_naming",
         "subject": "self_anchor",

@@ -286,7 +286,13 @@ def test_fact_update_execution_trace_records_specialist_chain(
         question="后来王经理又口头说让我不用再来上班。",
         recent_messages=[],
         message_understanding_result=_fact_update_result(),
-        fail_on_legal_agent=True,
+        legal_agent_response={
+            "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
+            "sources": [],
+            "route_intent": "GENERAL_CONSULT",
+            "case_summary": "",
+            "confidence_score": 0.78,
+        },
     )
 
     trace = result["execution_trace"]
@@ -340,7 +346,7 @@ def test_confirm_previous_fact_without_previous_fact_marks_guard_and_skips_graph
     assert persisted["case_summary"] == ""
 
 
-def test_temporary_fact_update_marks_guard_and_skips_persistence_steps(
+def test_temporary_fact_update_uses_transient_case_analysis_without_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_ask_agent_task(
@@ -349,19 +355,27 @@ def test_temporary_fact_update_marks_guard_and_skips_persistence_steps(
         recent_messages=[],
         message_understanding_result=_fact_update_result(),
         persistence_consent="temporary",
-        fail_on_legal_agent=True,
+        legal_agent_response={
+            "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
+            "sources": [],
+            "route_intent": "GENERAL_CONSULT",
+            "case_summary": "",
+            "confidence_score": 0.78,
+        },
     )
 
     guards = _guard_lookup(result)
     steps = _step_lookup(result)
     assert guards["temporary_blocks_persistence"]["triggered"] is True
-    assert steps["assistant_acknowledgement"]["status"] == "success"
-    assert steps["fact_persistence"]["status"] == "skipped"
-    assert steps["fact_persistence"]["skip_reason"] == "temporary"
-    assert steps["graph_update"]["status"] == "skipped"
-    assert steps["graph_update"]["skip_reason"] == "temporary"
+    assert result["execution_trace"]["execution_plan"]["response_mode"] == "case_analysis_without_persistence"
+    assert steps["legal_agent_answer"]["status"] == "success"
+    assert "assistant_acknowledgement" not in steps
+    assert "fact_persistence" not in steps
+    assert "graph_update" not in steps
     assert graph_calls == []
-    assert trackers["legal_agent_calls"] == 0
+    assert trackers["legal_agent_calls"] == 1
+    assert result["route_intent"] == "CASE_UPDATE"
+    assert "确认书" in result["response"]
     assert persisted["case_summary"] == ""
 
 
@@ -381,6 +395,7 @@ def test_subject_reference_trace_uses_dossier_memory_step(
     assert result["execution_trace"]["legacy_fallback"]["used"] is False
     assert steps["dossier_memory_subject_reference"]["status"] == "success"
     assert steps["dossier_memory_subject_reference"]["agent"] == "dossier_memory_helper"
+    assert "selected_scope" in (steps["dossier_memory_subject_reference"]["details"] or {})
     assert "graph_update" not in steps
     assert trackers["legal_agent_calls"] == 0
     assert graph_calls == []

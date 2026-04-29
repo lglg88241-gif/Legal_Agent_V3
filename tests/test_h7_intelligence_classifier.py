@@ -541,7 +541,9 @@ def test_build_dossier_intelligence_adds_classifier_confirmation_tasks(
         )
     )
 
-    identity_task = next(task for task in result["confirmation_tasks"] if task.get("task_type") == "identity")
+    identity_task = next(
+        task for task in result["confirmation_tasks"] if task.get("task_type") == "entity_identity"
+    )
     assert identity_task["origin"] == "intelligence_classifier"
     assert identity_task["should_show_to_user"] is True
     assert result["candidate_classifier"]["provider"] == "openai"

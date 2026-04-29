@@ -44,6 +44,7 @@ from app.services.dossier_graph_tool import (
 from app.services.execution_trace import ExecutionTrace
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
+from app.services.memory_resolver import answer_subject_reference_message_async
 from app.services.message_orchestrator import build_execution_plan_from_message_understanding
 from app.services.message_understanding_agent import understand_message_with_agent
 
@@ -224,6 +225,66 @@ def _build_message_understanding_active_action(
             f"{message_understanding.get('route_hint', 'UNKNOWN')}"
         ),
     }
+
+
+def _derive_case_update_snapshot(
+    *,
+    case_summary: str,
+    user_message: str,
+    graph_memory: str,
+    saved_case_state: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        from app.schemas.case_state import CaseState
+
+        normalized_case_summary = str(case_summary or "")
+        normalized_user_message = str(user_message or "")
+        normalized_graph_memory = str(graph_memory or "")
+
+        if not any(
+            (
+                normalized_case_summary.strip(),
+                normalized_user_message.strip(),
+                normalized_graph_memory.strip(),
+                isinstance(saved_case_state, dict) and bool(saved_case_state),
+            )
+        ):
+            return None, None
+
+        snapshot_state = CaseState.from_text(
+            case_summary=normalized_case_summary,
+            question=normalized_user_message,
+            graph_context=normalized_graph_memory,
+        ).model_dump()
+
+        if isinstance(saved_case_state, dict):
+            for numeric_field in ("monthly_salary", "work_months", "service_years", "owed_wages", "owed_months"):
+                if snapshot_state.get(numeric_field) is None and saved_case_state.get(numeric_field) is not None:
+                    snapshot_state[numeric_field] = saved_case_state.get(numeric_field)
+            for bool_field in (
+                "has_unsigned_contract",
+                "has_owed_wages",
+                "has_deposit_dispute",
+                "has_entity_change",
+                "is_illegal_dismissal",
+                "no_30day_notice",
+            ):
+                if not snapshot_state.get(bool_field) and bool(saved_case_state.get(bool_field)):
+                    snapshot_state[bool_field] = True
+            if float(snapshot_state.get("deposit") or 0.0) == 0.0 and float(saved_case_state.get("deposit") or 0.0) > 0.0:
+                snapshot_state["deposit"] = saved_case_state.get("deposit")
+            if not str(snapshot_state.get("case_type") or "").strip() and str(saved_case_state.get("case_type") or "").strip():
+                snapshot_state["case_type"] = saved_case_state.get("case_type")
+
+        inferred_case_type = str(snapshot_state.get("case_type") or "").strip()
+        if inferred_case_type:
+            snapshot_state["case_type"] = inferred_case_type
+
+        case_state = CaseState.model_validate(snapshot_state)
+        return case_state.model_dump(), (inferred_case_type or None)
+    except Exception:
+        logger.exception("Failed to derive tracked case update snapshot")
+        return None, None
 
 
 def _build_execution_plan_action(
@@ -742,6 +803,15 @@ def _build_case_update_acknowledgement_action(
     }
 
 
+def _build_transient_case_analysis_action() -> dict[str, Any]:
+    return {
+        "tool": "legal_agent_answer",
+        "stage": "legal_agent_answer",
+        "status": "success",
+        "result_summary": "Transient case analysis generated without persistence",
+    }
+
+
 async def _load_controlled_dossier_graph_context_async(
     db: AsyncSession,
     *,
@@ -1168,7 +1238,11 @@ def ask_agent_task(
             primary_route=execution_plan.get("primary_route"),
             actionable=bool(execution_plan.get("is_actionable")),
             step_names=sorted(execution_plan_step_names),
+            response_mode=execution_plan.get("response_mode"),
+            persistence_allowed=execution_plan.get("persistence_allowed"),
+            graph_update_allowed=execution_plan.get("graph_update_allowed"),
         )
+        execution_plan_response_mode = str(execution_plan.get("response_mode") or "").strip().lower()
         subject_reference_short_circuit = (
             bool(execution_plan.get("is_actionable"))
             and not execution_plan_uses_legacy_fallback
@@ -1179,10 +1253,15 @@ def ask_agent_task(
             bool(execution_plan.get("is_actionable"))
             and not execution_plan_uses_legacy_fallback
             and str(execution_plan.get("primary_route") or "").strip().upper() == "CASE_UPDATE"
-            and "fact_persistence" in execution_plan_step_names
+        )
+        case_update_transient_analysis_active = (
+            case_update_plan_active
+            and execution_plan_response_mode == "case_analysis_without_persistence"
+            and "legal_agent_answer" in execution_plan_step_names
         )
         case_update_acknowledgement_active = (
             case_update_plan_active
+            and execution_plan_response_mode == "acknowledge_and_persist"
             and str(execution_plan.get("intent") or "").strip().lower()
             in {"fact_update", "confirm_previous_fact"}
             and "assistant_acknowledgement" in execution_plan_step_names
@@ -1206,7 +1285,7 @@ def ask_agent_task(
         )
         case_update_graph_update_planned = (
             case_update_acknowledgement_active
-            and persistence_consent != "temporary"
+            and bool(execution_plan.get("graph_update_allowed"))
             and not case_update_blocked_by_legal_qa
         )
         case_update_acknowledgement_result: dict[str, Any] | None = None
@@ -1241,16 +1320,23 @@ def ask_agent_task(
             with execution_trace.step_context(
                 name="dossier_memory_subject_reference",
                 agent="dossier_memory_helper",
-            ):
+            ) as subject_reference_step:
                 answer = asyncio.run(
-                    _answer_subject_reference_message_async(
+                    answer_subject_reference_message_async(
                         question=question,
                         message_understanding=message_understanding,
                         dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
                         dossier_graph_context=raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None,
                         case_summary=case_summary,
+                        recent_messages=context.get("recent_messages"),
+                        current_conversation_id=conversation_id,
                     )
                 )
+                resolution_trace = (
+                    answer.get("resolution_trace") if isinstance(answer, dict) else None
+                )
+                if isinstance(resolution_trace, dict):
+                    subject_reference_step.set_details(resolution_trace)
             advisor_dossier_context = None
             advisor_dossier_graph_summary = None
             advisor_dossier_graph_context = None
@@ -1277,7 +1363,30 @@ def ask_agent_task(
                     user_id,
                 )
 
-            if case_update_acknowledgement_active:
+            if case_update_transient_analysis_active:
+                execution_trace.mark_legacy_fallback(used=False, reason=None)
+                with execution_trace.step_context(
+                    name="legal_agent_answer",
+                    agent="legal_agent",
+                ):
+                    answer = asyncio.run(
+                        legal_agent.ask(
+                            user_id,
+                            session_id,
+                            question,
+                            chat_history=chat_history,
+                            case_summary=case_summary,
+                            graph_memory=graph_memory,
+                            is_precise_mode=is_precise_mode,
+                            proactive_graph_mode=proactive_graph_mode,
+                            conversation_id=conversation_id,
+                            saved_case_state=context.get("saved_case_state"),
+                            dossier_context=advisor_dossier_context,
+                            dossier_graph_summary=advisor_dossier_graph_summary,
+                            dossier_graph_context=advisor_dossier_graph_context,
+                        )
+                    )
+            elif case_update_acknowledgement_active:
                 try:
                     with execution_trace.step_context(
                         name="assistant_acknowledgement",
@@ -1481,6 +1590,13 @@ def ask_agent_task(
                 user_message=effective_persistence_text,
                 proposed_summary=updated_case_summary,
             )
+            if case_update_plan_active:
+                case_state_dict, case_type = _derive_case_update_snapshot(
+                    case_summary=updated_case_summary,
+                    user_message=effective_persistence_text,
+                    graph_memory=context.get("graph_memory") or "",
+                    saved_case_state=context.get("saved_case_state"),
+                )
             if route_intent != "CASE_UPDATE":
                 logger.info(
                     "Structured case persistence promoted for tracked factual message | conversation_id=%s user_id=%s original_route_intent=%s",
@@ -1488,24 +1604,28 @@ def ask_agent_task(
                     user_id,
                     original_route_intent,
                 )
-        elif case_update_plan_active:
+        elif case_update_plan_active and (
+            "fact_persistence" in execution_plan_step_names or "graph_update" in execution_plan_step_names
+        ):
             skip_reason = "case_update_not_persisted"
             if persistence_consent == "temporary":
                 skip_reason = "temporary"
             elif case_update_blocked_by_legal_qa:
                 skip_reason = "legal_qa"
-            execution_trace.add_step(
-                name="fact_persistence",
-                agent="conversation_store",
-                status="skipped",
-                skip_reason=skip_reason,
-            )
-            execution_trace.add_step(
-                name="graph_update",
-                agent="celery.update_graph_task",
-                status="skipped",
-                skip_reason=skip_reason,
-            )
+            if "fact_persistence" in execution_plan_step_names:
+                execution_trace.add_step(
+                    name="fact_persistence",
+                    agent="conversation_store",
+                    status="skipped",
+                    skip_reason=skip_reason,
+                )
+            if "graph_update" in execution_plan_step_names:
+                execution_trace.add_step(
+                    name="graph_update",
+                    agent="celery.update_graph_task",
+                    status="skipped",
+                    skip_reason=skip_reason,
+                )
         elif missing_previous_fact:
             execution_trace.add_step(
                 name="fact_persistence",
@@ -1542,6 +1662,8 @@ def ask_agent_task(
                 agent_actions.append(
                     _build_case_update_acknowledgement_action(case_update_acknowledgement_result)
                 )
+            elif case_update_transient_analysis_active:
+                agent_actions.append(_build_transient_case_analysis_action())
         elif route_intent == "OUT_OF_SCOPE":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},

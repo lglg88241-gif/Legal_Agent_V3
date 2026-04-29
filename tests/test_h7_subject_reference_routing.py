@@ -183,6 +183,11 @@ def test_subject_reference_routes_through_dossier_memory_without_legal_rag(
     assert persisted["case_type"] is None
     assert persisted["metadata"]["message_understanding"]["intent"] == "subject_reference"
     assert persisted["metadata"]["route_intent"] == "DOSSIER_MEMORY"
+    trace_steps = result["execution_trace"]["steps"]
+    resolver_step = next(
+        step for step in trace_steps if step["name"] == "dossier_memory_subject_reference"
+    )
+    assert resolver_step["details"]["selected_scope"] == "current_conversation_graph"
 
     action_summaries = [str(item.get("result_summary") or "") for item in result["agent_actions"]]
     assert any("subject_reference -> DOSSIER_MEMORY" in summary for summary in action_summaries)

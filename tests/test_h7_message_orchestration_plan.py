@@ -166,6 +166,26 @@ def test_build_execution_plan_fact_update_paraphrases_use_current_message(messag
     assert plan["resolved_inputs"]["graph_update_input_text"] == message
 
 
+def test_build_execution_plan_temporary_fact_update_uses_transient_case_analysis() -> None:
+    plan = build_execution_plan_from_message_understanding(
+        _fact_update_result(),
+        original_message=FACT_MESSAGE,
+        recent_messages=[],
+        dossier_id=12,
+        persistence_consent="temporary",
+    )
+
+    assert plan["intent"] == "fact_update"
+    assert plan["primary_route"] == "CASE_UPDATE"
+    assert plan["response_mode"] == "case_analysis_without_persistence"
+    assert plan["persistence_allowed"] is False
+    assert plan["graph_update_allowed"] is False
+    assert plan["is_actionable"] is True
+    assert [step["name"] for step in plan["steps"]] == ["legal_agent_answer"]
+    assert plan["resolved_inputs"]["effective_persistence_text"] == FACT_MESSAGE
+    assert plan["resolved_inputs"]["graph_update_input_text"] == FACT_MESSAGE
+
+
 @pytest.mark.parametrize(
     "message",
     [

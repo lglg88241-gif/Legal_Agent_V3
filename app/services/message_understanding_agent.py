@@ -36,7 +36,19 @@ _SUPPORTED_SUBJECT_REFERENCE_SCOPES = {
     "current_conversation_graph",
     "current_conversation_messages",
     "dossier_confirmed_entities",
+    "dossier_confirmed_participants",
+    "dossier_display_graph",
     "dossier_cross_conversation_graph",
+    "dossier_cross_conversation_candidates",
+}
+_SUBJECT_REFERENCE_SCOPE_ALIASES = {
+    "dossier_confirmed_entities": "dossier_confirmed_participants",
+    "dossier_confirmed_participants": "dossier_confirmed_participants",
+    "dossier_cross_conversation_graph": "dossier_cross_conversation_candidates",
+    "dossier_cross_conversation_candidates": "dossier_cross_conversation_candidates",
+    "dossier_display_graph": "dossier_display_graph",
+    "current_conversation_graph": "current_conversation_graph",
+    "current_conversation_messages": "current_conversation_messages",
 }
 _MAX_RECENT_MESSAGES = 8
 _MAX_MESSAGE_LENGTH = 500
@@ -110,8 +122,9 @@ _SYSTEM_PROMPT = """你是消息理解智能体，不负责提供法律建议。
     "scope_order": [
       "current_conversation_graph",
       "current_conversation_messages",
-      "dossier_confirmed_entities",
-      "dossier_cross_conversation_graph"
+      "dossier_confirmed_participants",
+      "dossier_display_graph",
+      "dossier_cross_conversation_candidates"
     ],
     "needs_clarification_if_ambiguous": true
   }
@@ -258,7 +271,7 @@ def _normalize_subject_reference(value: Any, *, message: str) -> dict[str, Any] 
     raw_scope_order = value.get("scope_order")
     scope_order: list[str] = []
     for item in raw_scope_order if isinstance(raw_scope_order, list) else []:
-        normalized_scope = _normalize_text(item)
+        normalized_scope = _SUBJECT_REFERENCE_SCOPE_ALIASES.get(_normalize_text(item))
         if (
             normalized_scope in _SUPPORTED_SUBJECT_REFERENCE_SCOPES
             and normalized_scope not in scope_order
@@ -268,8 +281,9 @@ def _normalize_subject_reference(value: Any, *, message: str) -> dict[str, Any] 
         scope_order = [
             "current_conversation_graph",
             "current_conversation_messages",
-            "dossier_confirmed_entities",
-            "dossier_cross_conversation_graph",
+            "dossier_confirmed_participants",
+            "dossier_display_graph",
+            "dossier_cross_conversation_candidates",
         ]
 
     return {
@@ -432,8 +446,9 @@ def _normalize_llm_result(
             "scope_order": [
                 "current_conversation_graph",
                 "current_conversation_messages",
-                "dossier_confirmed_entities",
-                "dossier_cross_conversation_graph",
+                "dossier_confirmed_participants",
+                "dossier_display_graph",
+                "dossier_cross_conversation_candidates",
             ],
             "needs_clarification_if_ambiguous": True,
         }

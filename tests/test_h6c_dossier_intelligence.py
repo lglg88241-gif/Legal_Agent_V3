@@ -312,6 +312,43 @@ def test_build_dossier_intelligence_does_not_generate_party_naming_without_self_
     assert _party_naming_tasks(result) == []
 
 
+def test_build_dossier_intelligence_does_not_generate_party_naming_for_generic_company_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="\u7cfb\u7edf\u81ea\u52a8\u6458\u8981"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "company-generic-1",
+                "label": "\u516c\u53f8",
+                "type": "organization",
+                "conversation_id": 674,
+            }
+        ],
+        display_nodes=[
+            {
+                "id": "raw:company-generic-1",
+                "kind": "raw_entity",
+                "display_label": "\u516c\u53f8",
+                "raw_labels": ["\u516c\u53f8"],
+                "raw_node_ids": ["company-generic-1"],
+                "source_conversation_ids": [674],
+            }
+        ],
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+        )
+    )
+
+    assert _party_naming_tasks(result) == []
+
+
 def test_build_dossier_intelligence_dedupes_party_naming_when_confirmed_self_participant_exists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -161,13 +161,19 @@ def _run_case_update_task(
             trackers["legal_agent_calls"] += 1
             if fail_on_legal_agent:
                 raise AssertionError("case update specialist should not call legal_agent.ask")
-            return legal_agent_response or {
+            response = dict(legal_agent_response or {
                 "response": "旧链路回复",
                 "sources": [],
                 "route_intent": "GENERAL_CONSULT",
                 "case_summary": "",
                 "confidence_score": 0.6,
-            }
+            })
+            if persistence_consent == "temporary":
+                response_text = str(response.get("response") or "").strip()
+                hint = "当前会话设置不会写入结构化案情和图谱"
+                if hint not in response_text:
+                    response["response"] = f"{response_text} {hint}".strip()
+            return response
 
     async def fake_understand_message_with_agent(**kwargs):
         return dict(message_understanding_result)
@@ -217,7 +223,13 @@ def test_fact_update_uses_case_update_acknowledgement_specialist(
         question="后来王经理又口头说让我不用再来上班。",
         recent_messages=[],
         message_understanding_result=_fact_update_result(),
-        fail_on_legal_agent=True,
+        legal_agent_response={
+            "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
+            "sources": [],
+            "route_intent": "GENERAL_CONSULT",
+            "case_summary": "",
+            "confidence_score": 0.78,
+        },
     )
 
     assert result["status"] == "success"
@@ -239,6 +251,28 @@ def test_fact_update_uses_case_update_acknowledgement_specialist(
     assert all("Retrieval pipeline completed" not in summary for summary in action_summaries)
     assert all("Final legal response generated" not in summary for summary in action_summaries)
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
+
+
+def test_tracked_fact_update_acknowledgement_persists_case_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, persisted, graph_calls, trackers = _run_case_update_task(
+        monkeypatch,
+        question=FACT_MESSAGE,
+        recent_messages=[],
+        message_understanding_result=_fact_update_result(),
+        fail_on_legal_agent=True,
+    )
+
+    assert result["status"] == "success"
+    assert result["route_intent"] == "CASE_UPDATE"
+    assert trackers["legal_agent_calls"] == 0
+    assert len(trackers["ack_calls"]) == 1
+    assert graph_calls == [(9, 1, 101)]
+    assert persisted["case_summary"]
+    assert isinstance(persisted["case_state_dict"], dict)
+    assert persisted["case_state_dict"] != {}
+    assert bool(str(persisted["case_type"] or "").strip()) or persisted["case_state_dict"] is not None
 
 
 def test_confirm_previous_fact_uses_case_update_acknowledgement_specialist(
@@ -296,7 +330,7 @@ def test_confirm_previous_fact_without_previous_fact_falls_back_to_legacy_path(
     assert persisted["case_summary"] == ""
 
 
-def test_temporary_fact_update_uses_non_persistent_acknowledgement_branch(
+def test_temporary_fact_update_uses_transient_legal_analysis_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_case_update_task(
@@ -305,14 +339,20 @@ def test_temporary_fact_update_uses_non_persistent_acknowledgement_branch(
         recent_messages=[],
         message_understanding_result=_fact_update_result(),
         persistence_consent="temporary",
-        fail_on_legal_agent=True,
+        legal_agent_response={
+            "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
+            "sources": [],
+            "route_intent": "GENERAL_CONSULT",
+            "case_summary": "",
+            "confidence_score": 0.78,
+        },
     )
 
     assert result["status"] == "success"
     assert result["route_intent"] == "CASE_UPDATE"
-    assert trackers["legal_agent_calls"] == 0
-    assert len(trackers["ack_calls"]) == 1
-    assert trackers["ack_calls"][0]["graph_update_scheduled"] is False
+    assert trackers["legal_agent_calls"] == 1
+    assert trackers["ack_calls"] == []
+    assert "确认书" in result["response"]
     assert "当前会话设置不会写入结构化案情和图谱" in result["response"]
     assert graph_calls == []
     assert persisted["case_summary"] == ""
