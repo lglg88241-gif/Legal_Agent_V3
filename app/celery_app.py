@@ -203,6 +203,322 @@ def _build_message_understanding_shadow_action(
     }
 
 
+def _build_message_understanding_active_action(
+    message_understanding: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "tool": "message_understanding",
+        "stage": "message_understanding",
+        "status": "success",
+        "intent": str(message_understanding.get("intent") or "unknown"),
+        "route_hint": str(message_understanding.get("route_hint") or "UNKNOWN"),
+        "provider": str(message_understanding.get("provider") or ""),
+        "model": str(message_understanding.get("model") or ""),
+        "fallback_reason": str(message_understanding.get("fallback_reason") or "").strip() or None,
+        "result_summary": (
+            "Message understanding selected "
+            f"{message_understanding.get('intent', 'unknown')} -> "
+            f"{message_understanding.get('route_hint', 'UNKNOWN')}"
+        ),
+    }
+
+
+def _build_dossier_memory_action() -> dict[str, Any]:
+    return {
+        "tool": "dossier_memory",
+        "stage": "dossier_memory",
+        "status": "success",
+        "result_summary": "Dossier subject reference answered",
+    }
+
+
+def _normalize_subject_reference_text(value: Any) -> str:
+    return " ".join(str(value or "").strip().split()).lower()
+
+
+def _is_subject_reference_message_understanding(
+    message_understanding: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(message_understanding, dict):
+        return False
+    return (
+        str(message_understanding.get("intent") or "").strip().lower() == "subject_reference"
+        and str(message_understanding.get("route_hint") or "").strip().upper() == "DOSSIER_MEMORY"
+        and bool(message_understanding.get("needs_legal_rag")) is False
+    )
+
+
+def _subject_reference_type_matches(entity_type: Any, target_type: str) -> bool:
+    normalized_entity_type = _normalize_subject_reference_text(entity_type)
+    if target_type == "organization":
+        return normalized_entity_type in {"organization", "company", "employer"}
+    if target_type == "person":
+        return normalized_entity_type in {"person", "individual"}
+    if target_type == "self":
+        return normalized_entity_type in {"person", "individual", "party"}
+    if target_type == "role":
+        return normalized_entity_type in {"role", "person", "organization"}
+    return bool(normalized_entity_type)
+
+
+def _build_subject_reference_candidates(
+    *,
+    message_understanding: dict[str, Any],
+    dossier_context: dict[str, Any] | None,
+    dossier_graph_context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    subject_reference = (
+        message_understanding.get("subject_reference")
+        if isinstance(message_understanding, dict)
+        else None
+    )
+    subject_reference = subject_reference if isinstance(subject_reference, dict) else {}
+    mention = _normalize_subject_reference_text(subject_reference.get("mention"))
+    target_type = _normalize_subject_reference_text(subject_reference.get("target_type")) or "unknown"
+
+    candidates: dict[str, dict[str, Any]] = {}
+
+    def register_candidate(
+        label: str,
+        *,
+        entity_type: str,
+        score: int,
+        reason: str,
+    ) -> None:
+        cleaned_label = " ".join((label or "").strip().split())
+        if not cleaned_label:
+            return
+        key = cleaned_label.lower()
+        bucket = candidates.setdefault(
+            key,
+            {
+                "label": cleaned_label,
+                "entity_type": entity_type or "unknown",
+                "score": 0,
+                "reasons": [],
+            },
+        )
+        bucket["score"] += score
+        if reason not in bucket["reasons"]:
+            bucket["reasons"].append(reason)
+        if bucket["entity_type"] == "unknown" and entity_type:
+            bucket["entity_type"] = entity_type
+
+    dossier_mentions = []
+    if isinstance(dossier_context, dict):
+        dossier_mentions.extend(
+            item
+            for item in dossier_context.get("participant_mentions", [])
+            if isinstance(item, dict)
+        )
+    if isinstance(dossier_graph_context, dict):
+        dossier_mentions.extend(
+            item
+            for item in dossier_graph_context.get("participant_mentions", [])
+            if isinstance(item, dict)
+        )
+
+    for mention_item in dossier_mentions:
+        participant_label = str(mention_item.get("participant_label") or "").strip()
+        if not participant_label:
+            continue
+        raw_label = _normalize_subject_reference_text(
+            mention_item.get("raw_label") or mention_item.get("graph_node_label")
+        )
+        participant_entity_type = str(
+            mention_item.get("participant_entity_type")
+            or mention_item.get("graph_node_type")
+            or ""
+        ).strip()
+        if mention and mention in raw_label:
+            register_candidate(
+                participant_label,
+                entity_type=participant_entity_type,
+                score=5,
+                reason="mention_mapping",
+            )
+        elif target_type != "unknown" and _subject_reference_type_matches(participant_entity_type, target_type):
+            register_candidate(
+                participant_label,
+                entity_type=participant_entity_type,
+                score=2,
+                reason="mention_type_match",
+            )
+
+    confirmed_participants = []
+    if isinstance(dossier_context, dict):
+        confirmed_participants.extend(
+            item
+            for item in dossier_context.get("confirmed_participants", [])
+            if isinstance(item, dict)
+        )
+    if isinstance(dossier_graph_context, dict):
+        confirmed_participants.extend(
+            item
+            for item in dossier_graph_context.get("participants", [])
+            if isinstance(item, dict)
+        )
+
+    for participant in confirmed_participants:
+        label = str(participant.get("label") or participant.get("display_label") or "").strip()
+        if not label:
+            continue
+        entity_type = str(participant.get("entity_type") or "").strip()
+        role = _normalize_subject_reference_text(participant.get("role"))
+        description = _normalize_subject_reference_text(participant.get("description"))
+        normalized_label = _normalize_subject_reference_text(label)
+        score = 0
+        reasons: list[str] = []
+        if target_type != "unknown" and _subject_reference_type_matches(entity_type, target_type):
+            score += 2
+            reasons.append("participant_type_match")
+        if mention and (
+            mention in normalized_label
+            or mention in role
+            or mention in description
+        ):
+            score += 1
+            reasons.append("participant_text_match")
+        if score <= 0:
+            continue
+        for reason in reasons:
+            register_candidate(label, entity_type=entity_type, score=score if reason == reasons[0] else 0, reason=reason)
+
+    matched_nodes = (
+        dossier_graph_context.get("matched_nodes", [])
+        if isinstance(dossier_graph_context, dict)
+        else []
+    )
+    for node in matched_nodes:
+        if not isinstance(node, dict):
+            continue
+        label = str(
+            node.get("display_label")
+            or node.get("participant_label")
+            or node.get("raw_label")
+            or node.get("label")
+            or ""
+        ).strip()
+        if not label:
+            continue
+        node_type = str(node.get("type") or node.get("graph_node_type") or "").strip()
+        normalized_label = _normalize_subject_reference_text(label)
+        raw_label = _normalize_subject_reference_text(node.get("raw_label") or node.get("label"))
+        score = 0
+        reasons: list[str] = []
+        if target_type != "unknown" and _subject_reference_type_matches(node_type, target_type):
+            score += 1
+            reasons.append("matched_node_type")
+        if mention and (mention in normalized_label or mention in raw_label):
+            score += 2
+            reasons.append("matched_node_text")
+        if score <= 0:
+            continue
+        for reason in reasons:
+            register_candidate(label, entity_type=node_type, score=score if reason == reasons[0] else 0, reason=reason)
+
+    return sorted(
+        candidates.values(),
+        key=lambda item: (-int(item.get("score") or 0), str(item.get("label") or "")),
+    )
+
+
+def _build_subject_reference_response_text(
+    *,
+    question: str,
+    message_understanding: dict[str, Any],
+    dossier_context: dict[str, Any] | None,
+    dossier_graph_context: dict[str, Any] | None,
+) -> tuple[str, float]:
+    _ = question
+    subject_reference = (
+        message_understanding.get("subject_reference")
+        if isinstance(message_understanding, dict)
+        else None
+    )
+    subject_reference = subject_reference if isinstance(subject_reference, dict) else {}
+    mention = str(subject_reference.get("mention") or "").strip() or "这个主体"
+    target_type = _normalize_subject_reference_text(subject_reference.get("target_type")) or "unknown"
+    candidates = _build_subject_reference_candidates(
+        message_understanding=message_understanding,
+        dossier_context=dossier_context if isinstance(dossier_context, dict) else None,
+        dossier_graph_context=dossier_graph_context if isinstance(dossier_graph_context, dict) else None,
+    )
+
+    if candidates:
+        top_candidate = candidates[0]
+        second_score = int(candidates[1].get("score") or 0) if len(candidates) > 1 else -1
+        top_score = int(top_candidate.get("score") or 0)
+        if len(candidates) == 1 or top_score >= second_score + 2:
+            evidence_bits: list[str] = []
+            reasons = set(top_candidate.get("reasons", []))
+            if "mention_mapping" in reasons:
+                evidence_bits.append(f"案卷里“{mention}”这一原始称呼已经映射到 {top_candidate['label']}")
+            if "participant_type_match" in reasons or "mention_type_match" in reasons:
+                evidence_bits.append(f"当前案卷的已确认主体记录中，最匹配的主体也是 {top_candidate['label']}")
+            if "matched_node_text" in reasons or "matched_node_type" in reasons:
+                evidence_bits.append(f"当前案卷图谱里与该称呼相关的节点同样指向 {top_candidate['label']}")
+            if not evidence_bits:
+                evidence_bits.append(f"当前案卷里的主体映射和图谱线索都更接近 {top_candidate['label']}")
+            return (
+                f"这里的“{mention}”目前指 {top_candidate['label']}。"
+                f"依据是：{'；'.join(evidence_bits)}。"
+                f"如果后续案卷里出现其他同类主体，系统不会自动把它们合并，仍需要你确认。",
+                0.92 if top_score >= 5 else 0.75,
+            )
+
+        ambiguous_labels = "、".join(
+            candidate["label"]
+            for candidate in candidates[:3]
+        )
+        subject_type_text = "主体"
+        if target_type == "organization":
+            subject_type_text = "公司主体"
+        elif target_type == "person":
+            subject_type_text = "人物主体"
+        elif target_type == "self":
+            subject_type_text = "当事人主体"
+        return (
+            f"当前案卷里与“{mention}”相关的{subject_type_text}不止一个：{ambiguous_labels}。"
+            "现在还不能直接确定你问的是哪一个，需要结合具体会话或进一步确认。"
+            f"系统不会自动把多个{subject_type_text}视为同一个主体。",
+            0.42,
+        )
+
+    return (
+        f"当前案卷里还不能稳定确定“{mention}”具体指向哪个主体。"
+        "现有主体映射或图谱线索还不足，暂时不能直接下结论。"
+        "如果后续补充了更明确的主体映射，我可以再按案卷记录继续确认。",
+        0.28,
+    )
+
+
+async def _answer_subject_reference_message_async(
+    *,
+    question: str,
+    message_understanding: dict[str, Any],
+    dossier_context: dict[str, Any] | None,
+    dossier_graph_context: dict[str, Any] | None,
+    case_summary: str | None,
+) -> dict[str, Any]:
+    _ = case_summary
+    response_text, confidence_score = _build_subject_reference_response_text(
+        question=question,
+        message_understanding=message_understanding,
+        dossier_context=dossier_context,
+        dossier_graph_context=dossier_graph_context,
+    )
+    return {
+        "response": response_text,
+        "sources": [],
+        "route_intent": "DOSSIER_MEMORY",
+        "case_summary": case_summary or "",
+        "is_final": True,
+        "confidence_score": confidence_score,
+        "missing_info": [],
+    }
+
+
 async def _load_controlled_dossier_graph_context_async(
     db: AsyncSession,
     *,
@@ -515,45 +831,6 @@ def ask_agent_task(
         dossier_id = context.get("dossier_id")
         if not dossier_id and isinstance(raw_dossier_context, dict):
             dossier_id = raw_dossier_context.get("id")
-        dossier_scope_hint = dossier_id or (1 if raw_dossier_context else None)
-        include_dossier_context_for_advisor = should_include_dossier_context_for_advisor(
-            conversation_mode=conversation_mode,
-            dossier_id=dossier_scope_hint,
-            user_message=question,
-            persistence_consent=persistence_consent,
-        )
-        advisor_dossier_context = raw_dossier_context if include_dossier_context_for_advisor else None
-        advisor_dossier_graph_summary = (
-            raw_dossier_graph_summary if include_dossier_context_for_advisor else None
-        )
-        advisor_dossier_graph_context = (
-            raw_dossier_graph_context if include_dossier_context_for_advisor else None
-        )
-        if raw_dossier_context and not include_dossier_context_for_advisor:
-            logger.info(
-                "Advisor dossier context skipped for pure legal query | conversation_id=%s user_id=%s",
-                conversation_id,
-                user_id,
-            )
-
-        answer = asyncio.run(
-            legal_agent.ask(
-                user_id,
-                session_id,
-                question,
-                chat_history=chat_history,
-                case_summary=case_summary,
-                graph_memory=graph_memory,
-                is_precise_mode=is_precise_mode,
-                proactive_graph_mode=proactive_graph_mode,
-                conversation_id=conversation_id,
-                saved_case_state=context.get("saved_case_state"),
-                dossier_context=advisor_dossier_context,
-                dossier_graph_summary=advisor_dossier_graph_summary,
-                dossier_graph_context=advisor_dossier_graph_context,
-            )
-        )
-
         message_understanding = asyncio.run(
             _build_message_understanding_shadow_async(
                 question=question,
@@ -566,13 +843,69 @@ def ask_agent_task(
             )
         )
         logger.info(
-            "Message understanding shadow result | intent=%s route_hint=%s provider=%s model=%s fallback_reason=%s",
+            "Message understanding result | intent=%s route_hint=%s provider=%s model=%s fallback_reason=%s",
             message_understanding.get("intent"),
             message_understanding.get("route_hint"),
             message_understanding.get("provider"),
             message_understanding.get("model"),
             message_understanding.get("fallback_reason"),
         )
+
+        if _is_subject_reference_message_understanding(message_understanding):
+            answer = asyncio.run(
+                _answer_subject_reference_message_async(
+                    question=question,
+                    message_understanding=message_understanding,
+                    dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
+                    dossier_graph_context=raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None,
+                    case_summary=case_summary,
+                )
+            )
+            subject_reference_short_circuit = True
+            advisor_dossier_context = None
+            advisor_dossier_graph_summary = None
+            advisor_dossier_graph_context = None
+        else:
+            subject_reference_short_circuit = False
+        dossier_scope_hint = dossier_id or (1 if raw_dossier_context else None)
+        include_dossier_context_for_advisor = should_include_dossier_context_for_advisor(
+            conversation_mode=conversation_mode,
+            dossier_id=dossier_scope_hint,
+            user_message=question,
+            persistence_consent=persistence_consent,
+        )
+        if not subject_reference_short_circuit:
+            advisor_dossier_context = raw_dossier_context if include_dossier_context_for_advisor else None
+            advisor_dossier_graph_summary = (
+                raw_dossier_graph_summary if include_dossier_context_for_advisor else None
+            )
+            advisor_dossier_graph_context = (
+                raw_dossier_graph_context if include_dossier_context_for_advisor else None
+            )
+            if raw_dossier_context and not include_dossier_context_for_advisor:
+                logger.info(
+                    "Advisor dossier context skipped for pure legal query | conversation_id=%s user_id=%s",
+                    conversation_id,
+                    user_id,
+                )
+
+            answer = asyncio.run(
+                legal_agent.ask(
+                    user_id,
+                    session_id,
+                    question,
+                    chat_history=chat_history,
+                    case_summary=case_summary,
+                    graph_memory=graph_memory,
+                    is_precise_mode=is_precise_mode,
+                    proactive_graph_mode=proactive_graph_mode,
+                    conversation_id=conversation_id,
+                    saved_case_state=context.get("saved_case_state"),
+                    dossier_context=advisor_dossier_context,
+                    dossier_graph_summary=advisor_dossier_graph_summary,
+                    dossier_graph_context=advisor_dossier_graph_context,
+                )
+            )
 
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
@@ -629,6 +962,11 @@ def ask_agent_task(
                 {"tool": "tool_router", "result_summary": "Greeting route selected"},
                 {"tool": "greeting", "result_summary": "Fast greeting response generated"},
             ]
+        elif route_intent == "DOSSIER_MEMORY":
+            agent_actions = [
+                _build_message_understanding_active_action(message_understanding),
+                _build_dossier_memory_action(),
+            ]
         elif route_intent == "OUT_OF_SCOPE":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},
@@ -647,7 +985,8 @@ def ask_agent_task(
                 {"tool": "retrieval_tools", "result_summary": "Retrieval pipeline completed"},
                 {"tool": "legal_advisor", "result_summary": "Final legal response generated"},
             ]
-        agent_actions.append(_build_message_understanding_shadow_action(message_understanding))
+        if route_intent != "DOSSIER_MEMORY":
+            agent_actions.append(_build_message_understanding_shadow_action(message_understanding))
 
         result = {
             "status": "success",

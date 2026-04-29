@@ -43,7 +43,7 @@ def _load_celery_module():
     return importlib.import_module("app.celery_app")
 
 
-def test_ask_agent_task_records_message_understanding_shadow_result(
+def test_ask_agent_task_records_message_understanding_shadow_result_for_non_subject_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     celery_module = _load_celery_module()
@@ -57,7 +57,7 @@ def test_ask_agent_task_records_message_understanding_shadow_result(
                 {
                     "message_id": 41,
                     "role": "user",
-                    "content": "这里的公司指的是哪家公司？",
+                    "content": "劳动合同法第八十七条规定了什么？",
                 }
             ],
             "case_summary": "旧摘要",
@@ -82,31 +82,27 @@ def test_ask_agent_task_records_message_understanding_shadow_result(
             }
 
     async def fake_understand_message_with_agent(**kwargs):
-        assert kwargs["message"] == "这里的公司指的是哪家公司？"
+        assert kwargs["message"] == "劳动合同法第八十七条规定了什么？"
         assert kwargs["conversation_mode"] == "TRACKED_CASE"
         assert kwargs["dossier_id"] == 12
         return {
             "source": "message_understanding_agent",
-            "intent": "subject_reference",
-            "route_hint": "DOSSIER_MEMORY",
-            "needs_legal_rag": False,
-            "needs_dossier_graph_context": True,
+            "intent": "legal_question",
+            "route_hint": "LEGAL_QA",
+            "needs_legal_rag": True,
+            "needs_dossier_graph_context": False,
             "needs_structured_persistence": False,
             "needs_graph_update": False,
-            "subject_reference": {
-                "enabled": True,
-                "target_span": "这里的公司",
-                "mention": "公司",
-                "target_type": "organization",
-                "question": "这里的公司指的是哪家公司？",
-                "resolution_strategy": "use_dossier_context",
-            },
+            "subject_reference": None,
             "fact_update": None,
             "previous_fact_confirmation": None,
             "advice_question": None,
-            "legal_question": None,
+            "legal_question": {
+                "enabled": True,
+                "question": "劳动合同法第八十七条规定了什么？",
+            },
             "confidence": "high",
-            "reason": "Shadow classified this as dossier memory.",
+            "reason": "Shadow classified this as a legal question.",
             "provider": "openai",
             "model": "gpt-5.1",
             "fallback_reason": None,
@@ -126,7 +122,7 @@ def test_ask_agent_task_records_message_understanding_shadow_result(
         5,
         9,
         "session-9",
-        "这里的公司指的是哪家公司？",
+        "劳动合同法第八十七条规定了什么？",
         True,
         True,
     )
@@ -134,17 +130,17 @@ def test_ask_agent_task_records_message_understanding_shadow_result(
     assert result["status"] == "success"
     assert result["route_intent"] == "GENERAL_CONSULT"
     assert result["response"] == "主链路回答"
-    assert result["message_understanding"]["intent"] == "subject_reference"
-    assert result["message_understanding"]["route_hint"] == "DOSSIER_MEMORY"
+    assert result["message_understanding"]["intent"] == "legal_question"
+    assert result["message_understanding"]["route_hint"] == "LEGAL_QA"
     assert result["message_understanding"]["provider"] == "openai"
-    assert persisted["metadata"]["message_understanding"]["intent"] == "subject_reference"
+    assert persisted["metadata"]["message_understanding"]["intent"] == "legal_question"
     assert persisted["metadata"]["route_intent"] == "GENERAL_CONSULT"
     shadow_actions = [
         item for item in result["agent_actions"] if item.get("stage") == "message_understanding_shadow"
     ]
     assert len(shadow_actions) == 1
     assert shadow_actions[0]["status"] == "success"
-    assert shadow_actions[0]["intent"] == "subject_reference"
+    assert shadow_actions[0]["intent"] == "legal_question"
 
 
 def test_ask_agent_task_keeps_main_flow_when_message_understanding_shadow_fails(
