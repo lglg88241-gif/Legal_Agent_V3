@@ -97,6 +97,9 @@ def build_execution_plan_from_message_understanding(
         "source": "message_understanding",
         "intent": intent,
         "primary_route": primary_route,
+        "response_mode": "legal_answer",
+        "persistence_allowed": False,
+        "graph_update_allowed": False,
         "steps": [],
         "guards": {
             "temporary_blocks_persistence": str(persistence_consent or "").strip().lower() == "temporary",
@@ -121,6 +124,7 @@ def build_execution_plan_from_message_understanding(
             "effective_persistence_text": normalized_message,
             "graph_update_input_text": "",
             "previous_fact_text": "",
+            "subject_reference_scope_order": [],
         },
         "is_actionable": False,
     }
@@ -136,6 +140,11 @@ def build_execution_plan_from_message_understanding(
         and primary_route == "DOSSIER_MEMORY"
         and bool(mu_result.get("needs_legal_rag")) is False
     ):
+        subject_reference = (
+            mu_result.get("subject_reference")
+            if isinstance(mu_result.get("subject_reference"), dict)
+            else {}
+        )
         plan["steps"] = [
             _build_step(
                 name="dossier_memory_answer",
@@ -144,39 +153,63 @@ def build_execution_plan_from_message_understanding(
                 input_source="current_message",
             )
         ]
+        plan["response_mode"] = "dossier_memory_answer"
+        plan["resolved_inputs"]["subject_reference_scope_order"] = list(
+            subject_reference.get("scope_order")
+            if isinstance(subject_reference.get("scope_order"), list)
+            else []
+        )
         plan["is_actionable"] = True
         return plan
 
-    if (
-        intent == "fact_update"
-        and primary_route == "CASE_UPDATE"
-        and bool(mu_result.get("needs_structured_persistence")) is True
-        and bool(mu_result.get("needs_graph_update")) is True
-    ):
-        plan["steps"] = [
-            _build_step(
-                name="fact_persistence",
-                agent="fact_persistence",
-                action="update_case_summary",
-                input_source="current_message",
-            ),
-            _build_step(
-                name="graph_update",
-                agent="graph_extractor",
-                action="update_graph",
-                input_source="current_message",
-            ),
-            _build_step(
-                name="assistant_acknowledgement",
-                agent="assistant_response",
-                action="acknowledge_fact_update",
-                input_source="current_message",
-                required=False,
-            ),
-        ]
+    if intent == "fact_update" and primary_route == "CASE_UPDATE":
         plan["resolved_inputs"]["graph_update_input_text"] = normalized_message
         plan["is_actionable"] = True
-        return plan
+        if str(persistence_consent or "").strip().lower() == "temporary":
+            plan["response_mode"] = "case_analysis_without_persistence"
+            plan["steps"] = [
+                _build_step(
+                    name="legal_agent_answer",
+                    agent="legal_agent",
+                    action="answer_case_analysis_without_persistence",
+                    input_source="current_message",
+                )
+            ]
+            plan["trace"]["reason"] = (
+                plan["trace"]["reason"]
+                or "用户选择仅本次分析，应基于事实给出法律分析，但不得持久化或更新图谱。"
+            )
+            return plan
+
+        if (
+            bool(mu_result.get("needs_structured_persistence")) is True
+            and bool(mu_result.get("needs_graph_update")) is True
+        ):
+            plan["steps"] = [
+                _build_step(
+                    name="fact_persistence",
+                    agent="fact_persistence",
+                    action="update_case_summary",
+                    input_source="current_message",
+                ),
+                _build_step(
+                    name="graph_update",
+                    agent="graph_extractor",
+                    action="update_graph",
+                    input_source="current_message",
+                ),
+                _build_step(
+                    name="assistant_acknowledgement",
+                    agent="assistant_response",
+                    action="acknowledge_fact_update",
+                    input_source="current_message",
+                    required=False,
+                ),
+            ]
+            plan["response_mode"] = "acknowledge_and_persist"
+            plan["persistence_allowed"] = True
+            plan["graph_update_allowed"] = True
+            return plan
 
     if intent == "confirm_previous_fact" and primary_route == "CASE_UPDATE":
         previous_fact_text = _resolve_previous_fact_text(
@@ -219,6 +252,9 @@ def build_execution_plan_from_message_understanding(
             )
             plan["resolved_inputs"]["effective_persistence_text"] = previous_fact_text
             plan["resolved_inputs"]["graph_update_input_text"] = previous_fact_text
+            plan["response_mode"] = "acknowledge_and_persist"
+            plan["persistence_allowed"] = str(persistence_consent or "").strip().lower() != "temporary"
+            plan["graph_update_allowed"] = str(persistence_consent or "").strip().lower() != "temporary"
             plan["is_actionable"] = True
         else:
             plan["trace"]["warnings"].append("confirmed_previous_fact_text_unavailable")

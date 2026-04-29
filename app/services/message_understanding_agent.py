@@ -32,6 +32,12 @@ _SUPPORTED_ROUTE_HINTS = {
 _SUPPORTED_CONFIDENCE = {"high", "medium", "low"}
 _SUPPORTED_SUBJECT_TYPES = {"organization", "person", "self", "role", "unknown"}
 _SUPPORTED_CONFIRM_ACTIONS = {"confirm", "reject", "unclear"}
+_SUPPORTED_SUBJECT_REFERENCE_SCOPES = {
+    "current_conversation_graph",
+    "current_conversation_messages",
+    "dossier_confirmed_entities",
+    "dossier_cross_conversation_graph",
+}
 _MAX_RECENT_MESSAGES = 8
 _MAX_MESSAGE_LENGTH = 500
 _MAX_CONTEXT_LENGTH = 1600
@@ -71,6 +77,7 @@ _SYSTEM_PROMPT = """你是消息理解智能体，不负责提供法律建议。
 8. 如果 recent_messages 不足以定位上一条事实，不要编造 target_text；返回 unknown，或返回低置信度的 confirm_previous_fact 并明确 reason=no_previous_fact_found。
 9. 如果是明确法条/法规定义问题，应识别为 legal_question，并设置 needs_legal_rag=true。
 10. 如果信息不足，返回 unknown，保持保守。
+11. 如果是主体指代问题，请输出一个 reference resolution plan，明确 reference_type、scope_order，以及是否在歧义时要求澄清。
 
 请输出包含以下顶层字段的 JSON：
 {
@@ -95,9 +102,18 @@ _SYSTEM_PROMPT = """你是消息理解智能体，不负责提供法律建议。
     "enabled": true,
     "target_span": "这里的公司",
     "mention": "公司",
+    "target_mention": "公司",
     "target_type": "organization",
+    "reference_type": "organization",
     "question": "这里的公司指的是哪家公司？",
-    "resolution_strategy": "use_dossier_context"
+    "resolution_strategy": "use_dossier_context",
+    "scope_order": [
+      "current_conversation_graph",
+      "current_conversation_messages",
+      "dossier_confirmed_entities",
+      "dossier_cross_conversation_graph"
+    ],
+    "needs_clarification_if_ambiguous": true
   }
 - fact_update:
   {
@@ -235,13 +251,41 @@ def _normalize_subject_reference(value: Any, *, message: str) -> dict[str, Any] 
     if target_type not in _SUPPORTED_SUBJECT_TYPES:
         target_type = "unknown"
 
+    reference_type = _normalize_text(value.get("reference_type")).lower() or target_type
+    if reference_type not in _SUPPORTED_SUBJECT_TYPES:
+        reference_type = target_type
+
+    raw_scope_order = value.get("scope_order")
+    scope_order: list[str] = []
+    for item in raw_scope_order if isinstance(raw_scope_order, list) else []:
+        normalized_scope = _normalize_text(item)
+        if (
+            normalized_scope in _SUPPORTED_SUBJECT_REFERENCE_SCOPES
+            and normalized_scope not in scope_order
+        ):
+            scope_order.append(normalized_scope)
+    if not scope_order:
+        scope_order = [
+            "current_conversation_graph",
+            "current_conversation_messages",
+            "dossier_confirmed_entities",
+            "dossier_cross_conversation_graph",
+        ]
+
     return {
         "enabled": _coerce_bool(value.get("enabled"), True),
         "target_span": _normalize_text(value.get("target_span")) or message,
         "mention": _normalize_text(value.get("mention")),
+        "target_mention": _normalize_text(value.get("target_mention")) or _normalize_text(value.get("mention")),
         "target_type": target_type,
+        "reference_type": reference_type,
         "question": _normalize_text(value.get("question")) or message,
         "resolution_strategy": _normalize_text(value.get("resolution_strategy")) or "use_dossier_context",
+        "scope_order": scope_order,
+        "needs_clarification_if_ambiguous": _coerce_bool(
+            value.get("needs_clarification_if_ambiguous"),
+            True,
+        ),
     }
 
 
@@ -380,9 +424,18 @@ def _normalize_llm_result(
             "enabled": True,
             "target_span": message,
             "mention": "",
+            "target_mention": "",
             "target_type": "unknown",
+            "reference_type": "unknown",
             "question": message,
             "resolution_strategy": "use_dossier_context",
+            "scope_order": [
+                "current_conversation_graph",
+                "current_conversation_messages",
+                "dossier_confirmed_entities",
+                "dossier_cross_conversation_graph",
+            ],
+            "needs_clarification_if_ambiguous": True,
         }
     elif intent == "fact_update":
         result["fact_update"] = _normalize_fact_update(

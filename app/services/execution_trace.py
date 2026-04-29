@@ -144,6 +144,9 @@ class ExecutionTrace:
         primary_route: Any,
         actionable: bool,
         step_names: list[str] | tuple[str, ...] | set[str],
+        response_mode: Any = None,
+        persistence_allowed: bool | None = None,
+        graph_update_allowed: bool | None = None,
     ) -> None:
         normalized_step_names = [
             _normalize_text(item)
@@ -154,6 +157,9 @@ class ExecutionTrace:
             "primary_route": _normalize_text(primary_route).upper() or "UNKNOWN",
             "actionable": bool(actionable),
             "step_names": normalized_step_names,
+            "response_mode": _normalize_text(response_mode) or None,
+            "persistence_allowed": persistence_allowed if persistence_allowed is not None else None,
+            "graph_update_allowed": graph_update_allowed if graph_update_allowed is not None else None,
         }
 
     def add_step(

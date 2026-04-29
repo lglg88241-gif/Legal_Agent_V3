@@ -43,6 +43,7 @@ _CLASSIFIER_FALLBACK_REASON = "llm_not_enabled_in_candidate_classifier"
 _SUMMARY_FALLBACK_TEXT = "\u5f53\u524d\u6848\u5377\u6682\u65e0\u53ef\u7528\u6458\u8981\u3002"
 _CLASSIFIER_SUPPORTED_TASK_TYPES = {
     "identity",
+    "entity_identity",
     "party_naming",
     "affiliation_relation",
     "relation_only",
@@ -51,6 +52,7 @@ _CLASSIFIER_SUPPORTED_TASK_TYPES = {
 _CLASSIFIER_SUPPORTED_CONFIDENCE = {"high", "medium", "low"}
 _CLASSIFIER_SHOW_TO_USER_DEFAULTS = {
     "identity": True,
+    "entity_identity": True,
     "party_naming": True,
     "affiliation_relation": True,
     "relation_only": False,
@@ -790,6 +792,51 @@ def _normalize_candidate_task_type(value: Any) -> str:
     return normalized
 
 
+def _subject_kind_from_node_flags(
+    *,
+    label: str,
+    graph_node_type: str,
+    is_role_person: bool,
+    is_self_anchor: bool,
+    is_organization: bool,
+) -> str:
+    normalized_type = _normalize_key(graph_node_type)
+    if is_self_anchor:
+        return "self_anchor"
+    if is_organization:
+        return "organization"
+    if is_role_person:
+        return "role"
+    if normalized_type in {"person", "individual"}:
+        return "person"
+    if normalized_type in {
+        "event",
+        "fact",
+        "evidence",
+        "document",
+        "amount",
+        "money",
+        "time",
+        "date",
+        "law",
+        "statute",
+        "claim",
+        "procedure",
+        "issue",
+        "action",
+        "benefit",
+        "social_insurance",
+        "notice",
+        "relationship_event",
+    }:
+        return "evidence"
+    if normalized_type:
+        return normalized_type
+    if label:
+        return "unknown"
+    return "unknown"
+
+
 def _node_payload_from_candidate_node(
     node_payload: dict[str, Any] | None,
     *,
@@ -811,6 +858,12 @@ def _node_payload_from_candidate_node(
     conversation_id = _positive_int(node.get("conversation_id")) or fallback_conversation_id
     graph_node_id = _normalize_text(node.get("graph_node_id") or node.get("id"))
     label_for_flags = graph_node_label or raw_label
+    is_role_person = is_role_person_label(label_for_flags)
+    is_self_anchor = _is_self_anchor_candidate_label(label_for_flags)
+    is_organization = (
+        graph_node_type in {"organization", "company", "employer"}
+        or _is_organization_like_label(label_for_flags)
+    )
 
     return {
         "conversation_id": conversation_id,
@@ -818,9 +871,16 @@ def _node_payload_from_candidate_node(
         "raw_label": raw_label or graph_node_label,
         "graph_node_label": graph_node_label or raw_label,
         "graph_node_type": graph_node_type or "unknown",
-        "is_role_person": is_role_person_label(label_for_flags),
-        "is_self_anchor": _is_self_anchor_candidate_label(label_for_flags),
-        "is_organization": graph_node_type in {"organization", "company", "employer"} or _is_organization_like_label(label_for_flags),
+        "is_role_person": is_role_person,
+        "is_self_anchor": is_self_anchor,
+        "is_organization": is_organization,
+        "subject_kind": _subject_kind_from_node_flags(
+            label=label_for_flags,
+            graph_node_type=graph_node_type,
+            is_role_person=is_role_person,
+            is_self_anchor=is_self_anchor,
+            is_organization=is_organization,
+        ),
     }
 
 
@@ -1198,13 +1258,28 @@ def _apply_classifier_task_guards(
     prior_decision_types = _candidate_prior_decision_types(candidate)
     subject_type = _normalize_key(subject.get("graph_node_type"))
     object_type = _normalize_key(object_node.get("graph_node_type"))
+    subject_kind = _normalize_key(subject.get("subject_kind"))
+    object_kind = _normalize_key(object_node.get("subject_kind"))
+    is_identity_task = task_type in {"identity", "entity_identity"}
 
     if subject_type in _CLASSIFIER_EXCLUDED_NODE_TYPES or object_type in _CLASSIFIER_EXCLUDED_NODE_TYPES:
         task["task_type"] = "not_actionable"
         task["should_show_to_user"] = False
         return task
 
-    if task_type == "identity" and (subject.get("is_role_person") or object_node.get("is_role_person")):
+    if task_type == "party_naming" and subject_kind != "self_anchor":
+        if subject_kind == "organization":
+            task["task_type"] = "entity_identity"
+            task["should_show_to_user"] = True
+        elif subject_kind in {"role", "person"} and (subject.get("is_role_person") or object_node.get("is_organization")):
+            task["task_type"] = "affiliation_relation"
+            task["should_show_to_user"] = True
+        else:
+            task["task_type"] = "not_actionable"
+            task["should_show_to_user"] = False
+        return task
+
+    if is_identity_task and (subject.get("is_role_person") or object_node.get("is_role_person")):
         if subject.get("is_organization") or object_node.get("is_organization"):
             task["task_type"] = "affiliation_relation"
             task["should_show_to_user"] = True
@@ -1213,12 +1288,12 @@ def _apply_classifier_task_guards(
             task["should_show_to_user"] = False
         return task
 
-    if task_type == "identity" and (subject.get("is_self_anchor") or object_node.get("is_self_anchor")):
+    if is_identity_task and (subject.get("is_self_anchor") or object_node.get("is_self_anchor")):
         task["task_type"] = "party_naming"
         task["should_show_to_user"] = True
         return task
 
-    if task_type == "identity" and prior_decision_types & {"same", "not_same", "not_actionable"}:
+    if is_identity_task and prior_decision_types & {"same", "not_same", "not_actionable"}:
         return None
 
     if task_type == "affiliation_relation" and prior_decision_types & {"not_same", "not_actionable"}:
@@ -1462,6 +1537,7 @@ def _classifier_task_to_confirmation_task(
     origin: str,
 ) -> dict[str, Any]:
     task_type = _normalize_candidate_task_type(task.get("task_type"))
+    confirmation_task_type = "entity_identity" if task_type == "identity" else task_type
     subject = task.get("subject") if isinstance(task.get("subject"), dict) else {}
     object_node = task.get("object") if isinstance(task.get("object"), dict) else {}
     reason = _normalize_text(task.get("reason"))
@@ -1495,14 +1571,14 @@ def _classifier_task_to_confirmation_task(
         }
 
     return {
-        "task_type": task_type,
+        "task_type": confirmation_task_type,
         "candidate_key": _normalize_text(task.get("candidate_key")),
         "reason": reason,
         "confidence": confidence,
         "should_show_to_user": should_show,
         "origin": origin,
         "source": "dossier_intelligence_classifier",
-        "requires_user_confirmation": task_type in {"identity", "affiliation_relation", "party_naming"},
+        "requires_user_confirmation": confirmation_task_type in {"entity_identity", "affiliation_relation", "party_naming"},
         "evidence_summary": evidence_summary,
         "subject_node": subject,
         "object_node": object_node or None,

@@ -270,20 +270,47 @@ def _subject_reference_type_matches(entity_type: Any, target_type: str) -> bool:
     return bool(normalized_entity_type)
 
 
-def _build_subject_reference_candidates(
+def _subject_reference_scope_order(subject_reference: dict[str, Any]) -> list[str]:
+    scope_order: list[str] = []
+    for item in subject_reference.get("scope_order", []):
+        normalized = _normalize_subject_reference_text(item)
+        if normalized and normalized not in scope_order:
+            scope_order.append(normalized)
+    if scope_order:
+        return scope_order
+    return [
+        "current_conversation_graph",
+        "current_conversation_messages",
+        "dossier_confirmed_entities",
+        "dossier_cross_conversation_graph",
+    ]
+
+
+def _subject_reference_mention_tokens(subject_reference: dict[str, Any]) -> list[str]:
+    tokens = [
+        _normalize_subject_reference_text(subject_reference.get("target_mention")),
+        _normalize_subject_reference_text(subject_reference.get("mention")),
+        _normalize_subject_reference_text(subject_reference.get("target_span")),
+    ]
+    return [token for token in tokens if token]
+
+
+def _build_subject_reference_candidates_for_scope(
     *,
-    message_understanding: dict[str, Any],
+    scope_name: str,
+    subject_reference: dict[str, Any],
     dossier_context: dict[str, Any] | None,
     dossier_graph_context: dict[str, Any] | None,
+    recent_messages: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
-    subject_reference = (
-        message_understanding.get("subject_reference")
-        if isinstance(message_understanding, dict)
-        else None
-    )
-    subject_reference = subject_reference if isinstance(subject_reference, dict) else {}
-    mention = _normalize_subject_reference_text(subject_reference.get("mention"))
+    mention_tokens = _subject_reference_mention_tokens(subject_reference)
     target_type = _normalize_subject_reference_text(subject_reference.get("target_type")) or "unknown"
+    active_conversation_id = 0
+    if isinstance(dossier_context, dict):
+        try:
+            active_conversation_id = int(dossier_context.get("active_conversation_id") or 0)
+        except (TypeError, ValueError):
+            active_conversation_id = 0
 
     candidates: dict[str, dict[str, Any]] = {}
 
@@ -293,6 +320,7 @@ def _build_subject_reference_candidates(
         entity_type: str,
         score: int,
         reason: str,
+        scope: str,
     ) -> None:
         cleaned_label = " ".join((label or "").strip().split())
         if not cleaned_label:
@@ -305,6 +333,7 @@ def _build_subject_reference_candidates(
                 "entity_type": entity_type or "unknown",
                 "score": 0,
                 "reasons": [],
+                "scope": scope,
             },
         )
         bucket["score"] += score
@@ -312,6 +341,17 @@ def _build_subject_reference_candidates(
             bucket["reasons"].append(reason)
         if bucket["entity_type"] == "unknown" and entity_type:
             bucket["entity_type"] = entity_type
+
+    def matches_scope(conversation_id: Any) -> bool:
+        try:
+            normalized_conversation_id = int(conversation_id or 0)
+        except (TypeError, ValueError):
+            normalized_conversation_id = 0
+        if scope_name == "current_conversation_graph":
+            return active_conversation_id > 0 and normalized_conversation_id == active_conversation_id
+        if scope_name == "dossier_cross_conversation_graph":
+            return active_conversation_id > 0 and normalized_conversation_id > 0 and normalized_conversation_id != active_conversation_id
+        return False
 
     dossier_mentions = []
     if isinstance(dossier_context, dict):
@@ -331,6 +371,10 @@ def _build_subject_reference_candidates(
         participant_label = str(mention_item.get("participant_label") or "").strip()
         if not participant_label:
             continue
+        if scope_name in {"current_conversation_graph", "dossier_cross_conversation_graph"} and not matches_scope(
+            mention_item.get("conversation_id")
+        ):
+            continue
         raw_label = _normalize_subject_reference_text(
             mention_item.get("raw_label") or mention_item.get("graph_node_label")
         )
@@ -339,12 +383,13 @@ def _build_subject_reference_candidates(
             or mention_item.get("graph_node_type")
             or ""
         ).strip()
-        if mention and mention in raw_label:
+        if mention_tokens and any(token in raw_label for token in mention_tokens):
             register_candidate(
                 participant_label,
                 entity_type=participant_entity_type,
                 score=5,
                 reason="mention_mapping",
+                scope=scope_name,
             )
         elif target_type != "unknown" and _subject_reference_type_matches(participant_entity_type, target_type):
             register_candidate(
@@ -352,6 +397,7 @@ def _build_subject_reference_candidates(
                 entity_type=participant_entity_type,
                 score=2,
                 reason="mention_type_match",
+                scope=scope_name,
             )
 
     confirmed_participants = []
@@ -369,6 +415,8 @@ def _build_subject_reference_candidates(
         )
 
     for participant in confirmed_participants:
+        if scope_name not in {"dossier_confirmed_entities", "current_conversation_messages"}:
+            continue
         label = str(participant.get("label") or participant.get("display_label") or "").strip()
         if not label:
             continue
@@ -381,17 +429,35 @@ def _build_subject_reference_candidates(
         if target_type != "unknown" and _subject_reference_type_matches(entity_type, target_type):
             score += 2
             reasons.append("participant_type_match")
-        if mention and (
-            mention in normalized_label
-            or mention in role
-            or mention in description
+        if mention_tokens and any(
+            token in normalized_label or token in role or token in description
+            for token in mention_tokens
         ):
             score += 1
             reasons.append("participant_text_match")
+        if scope_name == "current_conversation_messages" and recent_messages:
+            recent_text = " ".join(
+                _normalize_subject_reference_text(item.get("content"))
+                for item in recent_messages
+                if isinstance(item, dict)
+                and str(item.get("role") or "").strip().lower() == "user"
+            )
+            if normalized_label and normalized_label in recent_text:
+                score += 2
+                reasons.append("message_context_match")
+            elif mention_tokens and any(token in recent_text for token in mention_tokens):
+                score += 1
+                reasons.append("message_mention_match")
         if score <= 0:
             continue
         for reason in reasons:
-            register_candidate(label, entity_type=entity_type, score=score if reason == reasons[0] else 0, reason=reason)
+            register_candidate(
+                label,
+                entity_type=entity_type,
+                score=score if reason == reasons[0] else 0,
+                reason=reason,
+                scope=scope_name,
+            )
 
     matched_nodes = (
         dossier_graph_context.get("matched_nodes", [])
@@ -399,7 +465,11 @@ def _build_subject_reference_candidates(
         else []
     )
     for node in matched_nodes:
+        if scope_name not in {"current_conversation_graph", "dossier_cross_conversation_graph"}:
+            continue
         if not isinstance(node, dict):
+            continue
+        if not matches_scope(node.get("conversation_id")):
             continue
         label = str(
             node.get("display_label")
@@ -418,13 +488,19 @@ def _build_subject_reference_candidates(
         if target_type != "unknown" and _subject_reference_type_matches(node_type, target_type):
             score += 1
             reasons.append("matched_node_type")
-        if mention and (mention in normalized_label or mention in raw_label):
+        if mention_tokens and any(token in normalized_label or token in raw_label for token in mention_tokens):
             score += 2
             reasons.append("matched_node_text")
         if score <= 0:
             continue
         for reason in reasons:
-            register_candidate(label, entity_type=node_type, score=score if reason == reasons[0] else 0, reason=reason)
+            register_candidate(
+                label,
+                entity_type=node_type,
+                score=score if reason == reasons[0] else 0,
+                reason=reason,
+                scope=scope_name,
+            )
 
     return sorted(
         candidates.values(),
@@ -438,7 +514,8 @@ def _build_subject_reference_response_text(
     message_understanding: dict[str, Any],
     dossier_context: dict[str, Any] | None,
     dossier_graph_context: dict[str, Any] | None,
-) -> tuple[str, float]:
+    recent_messages: list[dict[str, Any]] | None,
+) -> tuple[str, float, dict[str, Any]]:
     _ = question
     subject_reference = (
         message_understanding.get("subject_reference")
@@ -446,59 +523,100 @@ def _build_subject_reference_response_text(
         else None
     )
     subject_reference = subject_reference if isinstance(subject_reference, dict) else {}
-    mention = str(subject_reference.get("mention") or "").strip() or "这个主体"
-    target_type = _normalize_subject_reference_text(subject_reference.get("target_type")) or "unknown"
-    candidates = _build_subject_reference_candidates(
-        message_understanding=message_understanding,
-        dossier_context=dossier_context if isinstance(dossier_context, dict) else None,
-        dossier_graph_context=dossier_graph_context if isinstance(dossier_graph_context, dict) else None,
+    mention = (
+        str(subject_reference.get("target_mention") or "").strip()
+        or str(subject_reference.get("mention") or "").strip()
+        or "这个主体"
     )
+    target_type = _normalize_subject_reference_text(subject_reference.get("target_type")) or "unknown"
+    scope_order = _subject_reference_scope_order(subject_reference)
+    candidate_count_by_scope: dict[str, int] = {}
+    selected_scope = ""
+    ambiguity = False
+    whether_escalated_to_dossier = False
 
-    if candidates:
+    for scope_name in scope_order:
+        candidates = _build_subject_reference_candidates_for_scope(
+            scope_name=scope_name,
+            subject_reference=subject_reference,
+            dossier_context=dossier_context if isinstance(dossier_context, dict) else None,
+            dossier_graph_context=dossier_graph_context if isinstance(dossier_graph_context, dict) else None,
+            recent_messages=recent_messages,
+        )
+        candidate_count_by_scope[scope_name] = len(candidates)
+        if not candidates:
+            continue
+
+        selected_scope = scope_name
+        whether_escalated_to_dossier = scope_name.startswith("dossier_")
         top_candidate = candidates[0]
         second_score = int(candidates[1].get("score") or 0) if len(candidates) > 1 else -1
         top_score = int(top_candidate.get("score") or 0)
-        if len(candidates) == 1 or top_score >= second_score + 2:
-            evidence_bits: list[str] = []
-            reasons = set(top_candidate.get("reasons", []))
-            if "mention_mapping" in reasons:
-                evidence_bits.append(f"案卷里“{mention}”这一原始称呼已经映射到 {top_candidate['label']}")
-            if "participant_type_match" in reasons or "mention_type_match" in reasons:
-                evidence_bits.append(f"当前案卷的已确认主体记录中，最匹配的主体也是 {top_candidate['label']}")
-            if "matched_node_text" in reasons or "matched_node_type" in reasons:
-                evidence_bits.append(f"当前案卷图谱里与该称呼相关的节点同样指向 {top_candidate['label']}")
-            if not evidence_bits:
-                evidence_bits.append(f"当前案卷里的主体映射和图谱线索都更接近 {top_candidate['label']}")
+        ambiguity = len(candidates) > 1 and top_score < second_score + 2
+        if ambiguity and bool(subject_reference.get("needs_clarification_if_ambiguous")):
+            ambiguous_labels = "、".join(candidate["label"] for candidate in candidates[:3])
             return (
-                f"这里的“{mention}”目前指 {top_candidate['label']}。"
-                f"依据是：{'；'.join(evidence_bits)}。"
-                f"如果后续案卷里出现其他同类主体，系统不会自动把它们合并，仍需要你确认。",
-                0.92 if top_score >= 5 else 0.75,
+                f"我现在还不能直接确定“{mention}”指的是哪一个主体，当前可匹配的候选有：{ambiguous_labels}。"
+                "需要你再补充一句上下文，或确认它具体对应哪一个主体。",
+                0.42,
+                {
+                    "selected_scope": selected_scope,
+                    "candidate_count_by_scope": candidate_count_by_scope,
+                    "ambiguity": True,
+                    "whether_escalated_to_dossier": whether_escalated_to_dossier,
+                },
             )
 
-        ambiguous_labels = "、".join(
-            candidate["label"]
-            for candidate in candidates[:3]
-        )
-        subject_type_text = "主体"
-        if target_type == "organization":
-            subject_type_text = "公司主体"
-        elif target_type == "person":
-            subject_type_text = "人物主体"
-        elif target_type == "self":
-            subject_type_text = "当事人主体"
-        return (
-            f"当前案卷里与“{mention}”相关的{subject_type_text}不止一个：{ambiguous_labels}。"
-            "现在还不能直接确定你问的是哪一个，需要结合具体会话或进一步确认。"
-            f"系统不会自动把多个{subject_type_text}视为同一个主体。",
-            0.42,
-        )
+        if scope_name == "current_conversation_graph":
+            return (
+                f"在当前会话里，这里的“{mention}”指 {top_candidate['label']}。"
+                "当前会话图谱里的主体映射已经直接指向这个主体。"
+                "如果后续又出现新的同类主体，仍需要你确认是否是同一主体。",
+                0.92 if top_score >= 5 else 0.78,
+                {
+                    "selected_scope": selected_scope,
+                    "candidate_count_by_scope": candidate_count_by_scope,
+                    "ambiguity": False,
+                    "whether_escalated_to_dossier": False,
+                },
+            )
+        if scope_name == "current_conversation_messages":
+            return (
+                f"结合当前会话的上下文，这里的“{mention}”更可能指 {top_candidate['label']}。"
+                "这个判断主要来自当前会话里已出现的主体称呼和消息上下文。"
+                "如果你指的是别的主体，可以直接点明具体名字。",
+                0.74,
+                {
+                    "selected_scope": selected_scope,
+                    "candidate_count_by_scope": candidate_count_by_scope,
+                    "ambiguity": False,
+                    "whether_escalated_to_dossier": False,
+                },
+            )
+        if scope_name in {"dossier_confirmed_entities", "dossier_cross_conversation_graph"}:
+            return (
+                f"当前会话里还没有直接确认“{mention}”对应的主体。"
+                f"从案卷其他记录看，它更可能指 {top_candidate['label']}，但仍需要你确认这是否是同一主体。"
+                "在你确认之前，系统不会自动把跨会话主体合并。",
+                0.58,
+                {
+                    "selected_scope": selected_scope,
+                    "candidate_count_by_scope": candidate_count_by_scope,
+                    "ambiguity": False,
+                    "whether_escalated_to_dossier": True,
+                },
+            )
 
     return (
-        f"当前案卷里还不能稳定确定“{mention}”具体指向哪个主体。"
-        "现有主体映射或图谱线索还不足，暂时不能直接下结论。"
-        "如果后续补充了更明确的主体映射，我可以再按案卷记录继续确认。",
+        f"当前还不能稳定确定“{mention}”具体指向哪个主体。"
+        "当前会话和案卷里的主体映射线索都还不够，需要你再补充一句上下文或直接给出主体名称。",
         0.28,
+        {
+            "selected_scope": "",
+            "candidate_count_by_scope": candidate_count_by_scope,
+            "ambiguity": False,
+            "whether_escalated_to_dossier": False,
+        },
     )
 
 
@@ -509,13 +627,15 @@ async def _answer_subject_reference_message_async(
     dossier_context: dict[str, Any] | None,
     dossier_graph_context: dict[str, Any] | None,
     case_summary: str | None,
+    recent_messages: list[dict[str, Any]] | None,
 ) -> dict[str, Any]:
     _ = case_summary
-    response_text, confidence_score = _build_subject_reference_response_text(
+    response_text, confidence_score, resolution_trace = _build_subject_reference_response_text(
         question=question,
         message_understanding=message_understanding,
         dossier_context=dossier_context,
         dossier_graph_context=dossier_graph_context,
+        recent_messages=recent_messages,
     )
     return {
         "response": response_text,
@@ -525,6 +645,7 @@ async def _answer_subject_reference_message_async(
         "is_final": True,
         "confidence_score": confidence_score,
         "missing_info": [],
+        "resolution_trace": resolution_trace,
     }
 
 
