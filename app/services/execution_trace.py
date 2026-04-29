@@ -110,6 +110,7 @@ class ExecutionTrace:
         self.schema_version = schema_version
         self._message_understanding: dict[str, Any] = {}
         self._execution_plan: dict[str, Any] = {}
+        self._memory_resolution: dict[str, Any] = {}
         self._steps: list[dict[str, Any]] = []
         self._guards: list[dict[str, Any]] = []
         self._legacy_fallback: dict[str, Any] = {
@@ -161,6 +162,13 @@ class ExecutionTrace:
             "persistence_allowed": persistence_allowed if persistence_allowed is not None else None,
             "graph_update_allowed": graph_update_allowed if graph_update_allowed is not None else None,
         }
+
+    def set_memory_resolution(self, resolution: dict[str, Any] | None = None, **kwargs: Any) -> None:
+        payload: dict[str, Any] = {}
+        if isinstance(resolution, dict):
+            payload.update(resolution)
+        payload.update({key: value for key, value in kwargs.items() if value is not None})
+        self._memory_resolution = payload
 
     def add_step(
         self,
@@ -221,6 +229,7 @@ class ExecutionTrace:
             "request_id": self.request_id,
             "message_understanding": self._message_understanding,
             "execution_plan": self._execution_plan,
+            "memory_resolution": dict(self._memory_resolution),
             "steps": list(self._steps),
             "guards_applied": list(self._guards),
             "legacy_fallback": dict(self._legacy_fallback),

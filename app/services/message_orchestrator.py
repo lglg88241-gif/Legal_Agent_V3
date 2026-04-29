@@ -136,15 +136,26 @@ def build_execution_plan_from_message_understanding(
         return plan
 
     if (
-        intent == "subject_reference"
+        intent in {"subject_reference", "clarification_response"}
         and primary_route == "DOSSIER_MEMORY"
         and bool(mu_result.get("needs_legal_rag")) is False
     ):
-        subject_reference = (
-            mu_result.get("subject_reference")
-            if isinstance(mu_result.get("subject_reference"), dict)
-            else {}
-        )
+        subject_reference = {}
+        if intent == "subject_reference":
+            subject_reference = (
+                mu_result.get("subject_reference")
+                if isinstance(mu_result.get("subject_reference"), dict)
+                else {}
+            )
+        else:
+            clarification_response = (
+                mu_result.get("clarification_response")
+                if isinstance(mu_result.get("clarification_response"), dict)
+                else {}
+            )
+            subject_reference = {
+                "scope_order": clarification_response.get("scope_attempted", []),
+            }
         plan["steps"] = [
             _build_step(
                 name="dossier_memory_answer",

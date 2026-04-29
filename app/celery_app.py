@@ -890,6 +890,11 @@ async def _run_task_async(
                     "message_id": getattr(message, "id", None),
                     "role": message.role,
                     "content": content,
+                    "metadata": (
+                        message.message_metadata
+                        if isinstance(getattr(message, "message_metadata", None), dict)
+                        else {}
+                    ),
                 }
             )
 
@@ -1023,8 +1028,12 @@ async def _merge_message_metadata_async(
             )
             if message is None:
                 return
-            existing_metadata = message.metadata if isinstance(message.metadata, dict) else {}
-            message.metadata = {
+            existing_metadata = (
+                message.message_metadata
+                if isinstance(getattr(message, "message_metadata", None), dict)
+                else {}
+            )
+            message.message_metadata = {
                 **existing_metadata,
                 **metadata_patch,
             }
@@ -1336,6 +1345,7 @@ def ask_agent_task(
                     answer.get("resolution_trace") if isinstance(answer, dict) else None
                 )
                 if isinstance(resolution_trace, dict):
+                    execution_trace.set_memory_resolution(resolution_trace)
                     subject_reference_step.set_details(resolution_trace)
             advisor_dossier_context = None
             advisor_dossier_graph_summary = None
@@ -1562,6 +1572,8 @@ def ask_agent_task(
                 persistence_consent != "temporary"
                 and not case_update_blocked_by_legal_qa
             )
+        elif route_intent == "DOSSIER_MEMORY":
+            should_persist_structured_case = False
         else:
             should_persist_structured_case = should_persist_structured_case_message(
                 text=effective_persistence_text,
@@ -1699,6 +1711,10 @@ def ask_agent_task(
             "message_understanding": message_understanding,
             "execution_plan": execution_plan,
         }
+        if subject_reference_short_circuit and isinstance(answer, dict):
+            pending_clarification = answer.get("pending_clarification")
+            if isinstance(pending_clarification, dict):
+                assistant_metadata["pending_clarification"] = pending_clarification
         persist_result = {"user_message_id": None, "assistant_message_id": None}
         user_message_metadata: dict[str, Any] = {}
         if confirm_previous_fact_active and should_persist_structured_case:

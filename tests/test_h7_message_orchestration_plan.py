@@ -39,6 +39,37 @@ def _subject_reference_result() -> dict[str, object]:
     }
 
 
+def _clarification_response_result() -> dict[str, object]:
+    return {
+        "source": "message_understanding_agent",
+        "intent": "clarification_response",
+        "route_hint": "DOSSIER_MEMORY",
+        "needs_legal_rag": False,
+        "needs_dossier_graph_context": False,
+        "needs_structured_persistence": False,
+        "needs_graph_update": False,
+        "subject_reference": None,
+        "clarification_response": {
+            "enabled": True,
+            "question": "是B公司",
+            "target_mention": "公司",
+            "reference_type": "organization",
+            "scope_attempted": ["current_conversation_graph"],
+            "expected_response": "entity_name_or_context",
+        },
+        "fact_update": None,
+        "previous_fact_confirmation": None,
+        "advice_question": None,
+        "legal_question": None,
+        "confidence": "high",
+        "reason": "Pending clarification follow-up detected.",
+        "provider": "contract",
+        "model": "pending-clarification-contract-v1",
+        "fallback_reason": None,
+        "trace": {"steps": ["build_request", "detect_pending_clarification"], "warnings": []},
+    }
+
+
 def _fact_update_result() -> dict[str, object]:
     return {
         "source": "message_understanding_agent",
@@ -135,6 +166,23 @@ def test_build_execution_plan_subject_reference_paraphrases(message: str) -> Non
     assert plan["resolved_inputs"]["effective_persistence_text"] == message
     assert plan["trace"]["provider"] == "openai"
     assert all(step["name"] != "graph_update" for step in plan["steps"])
+
+
+def test_build_execution_plan_clarification_response_routes_to_dossier_memory() -> None:
+    plan = build_execution_plan_from_message_understanding(
+        _clarification_response_result(),
+        original_message="是B公司",
+        recent_messages=[],
+        dossier_id=12,
+        persistence_consent="tracked",
+    )
+
+    assert plan["intent"] == "clarification_response"
+    assert plan["primary_route"] == "DOSSIER_MEMORY"
+    assert plan["response_mode"] == "dossier_memory_answer"
+    assert plan["is_actionable"] is True
+    assert [step["name"] for step in plan["steps"]] == ["dossier_memory_answer"]
+    assert plan["resolved_inputs"]["subject_reference_scope_order"] == ["current_conversation_graph"]
 
 
 @pytest.mark.parametrize(

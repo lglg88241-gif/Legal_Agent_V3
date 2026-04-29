@@ -9,11 +9,16 @@ from openai import AsyncOpenAI
 
 from app.core.llm_factory import create_cloud_llm
 from app.core.llm_provider import get_llm_router
+from app.services.memory_resolver import (
+    extract_pending_subject_reference_clarification,
+    looks_like_subject_reference_clarification_response,
+)
 
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_INTENTS = {
     "subject_reference",
+    "clarification_response",
     "fact_update",
     "confirm_previous_fact",
     "legal_question",
@@ -184,6 +189,7 @@ def _build_base_result() -> dict[str, Any]:
         "needs_structured_persistence": False,
         "needs_graph_update": False,
         "subject_reference": None,
+        "clarification_response": None,
         "fact_update": None,
         "previous_fact_confirmation": None,
         "advice_question": None,
@@ -231,6 +237,11 @@ def _intent_defaults(intent: str) -> dict[str, Any]:
         defaults.update(
             route_hint="DOSSIER_MEMORY",
             needs_dossier_graph_context=True,
+        )
+    elif intent == "clarification_response":
+        defaults.update(
+            route_hint="DOSSIER_MEMORY",
+            needs_dossier_graph_context=False,
         )
     elif intent == "fact_update":
         defaults.update(
@@ -381,6 +392,38 @@ def _normalize_optional_question(value: Any, *, message: str) -> dict[str, Any] 
     return None
 
 
+def _normalize_clarification_response(
+    value: Any,
+    *,
+    message: str,
+    pending_clarification: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    payload = value if isinstance(value, dict) else {}
+    pending = pending_clarification if isinstance(pending_clarification, dict) else {}
+    target_mention = _normalize_text(
+        payload.get("target_mention") or pending.get("target_mention")
+    )
+    reference_type = _normalize_text(
+        payload.get("reference_type") or pending.get("reference_type")
+    ).lower() or "unknown"
+    scope_attempted = pending.get("scope_attempted") if isinstance(pending.get("scope_attempted"), list) else []
+    normalized_scope_attempted: list[str] = []
+    for item in scope_attempted:
+        normalized_scope = _SUBJECT_REFERENCE_SCOPE_ALIASES.get(_normalize_text(item))
+        if normalized_scope and normalized_scope not in normalized_scope_attempted:
+            normalized_scope_attempted.append(normalized_scope)
+    return {
+        "enabled": True,
+        "question": message,
+        "target_mention": target_mention,
+        "reference_type": reference_type if reference_type in _SUPPORTED_SUBJECT_TYPES else "unknown",
+        "scope_attempted": normalized_scope_attempted,
+        "expected_response": _normalize_text(
+            payload.get("expected_response") or pending.get("expected_response")
+        ) or "entity_name_or_context",
+    }
+
+
 def _normalize_llm_result(
     parsed: dict[str, Any],
     *,
@@ -493,6 +536,22 @@ def _normalize_llm_result(
     ):
         trace["warnings"].append("no_previous_fact_found")
 
+    if result["intent"] == "clarification_response":
+        result["clarification_response"] = _normalize_clarification_response(
+            parsed.get("clarification_response"),
+            message=message,
+            pending_clarification=extract_pending_subject_reference_clarification(
+                parsed.get("recent_messages") if isinstance(parsed.get("recent_messages"), list) else None
+            ),
+        ) or {
+            "enabled": True,
+            "question": message,
+            "target_mention": "",
+            "reference_type": "unknown",
+            "scope_attempted": [],
+            "expected_response": "entity_name_or_context",
+        }
+
     return result
 
 
@@ -537,16 +596,48 @@ def _build_fallback_result(
     return result
 
 
+def _build_pending_clarification_contract_result(
+    *,
+    message: str,
+    pending_clarification: dict[str, Any],
+    trace: dict[str, Any],
+) -> dict[str, Any]:
+    result = _build_base_result()
+    result.update(
+        intent="clarification_response",
+        route_hint="DOSSIER_MEMORY",
+        needs_legal_rag=False,
+        needs_dossier_graph_context=False,
+        needs_structured_persistence=False,
+        needs_graph_update=False,
+        confidence="high",
+        reason="Pending subject reference clarification detected from recent assistant metadata.",
+        provider="contract",
+        model="pending-clarification-contract-v1",
+        fallback_reason=None,
+        trace=trace,
+    )
+    result["clarification_response"] = _normalize_clarification_response(
+        {},
+        message=message,
+        pending_clarification=pending_clarification,
+    )
+    trace["steps"].append("detect_pending_clarification")
+    return result
+
+
 def _serialize_recent_messages(recent_messages: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     serialized: list[dict[str, Any]] = []
     for item in list(recent_messages or [])[-_MAX_RECENT_MESSAGES:]:
         if not isinstance(item, dict):
             continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else None
         serialized.append(
             {
                 "message_id": _coerce_int(item.get("message_id") or item.get("id")),
                 "role": _normalize_text(item.get("role")) or "user",
                 "content": _normalize_text(item.get("content"), limit=_MAX_MESSAGE_LENGTH),
+                "metadata": metadata,
             }
         )
     return serialized
@@ -677,6 +768,17 @@ async def understand_message_with_agent(
         return _build_fallback_result(
             message="",
             fallback_reason="empty_message",
+            trace=trace,
+        )
+
+    pending_clarification = extract_pending_subject_reference_clarification(recent_messages)
+    if looks_like_subject_reference_clarification_response(
+        message=normalized_message,
+        pending_clarification=pending_clarification,
+    ):
+        return _build_pending_clarification_contract_result(
+            message=normalized_message,
+            pending_clarification=pending_clarification,
             trace=trace,
         )
 

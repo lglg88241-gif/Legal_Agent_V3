@@ -326,3 +326,37 @@ def test_understand_message_with_agent_does_not_fabricate_previous_fact_target(
     assert result["previous_fact_confirmation"]["target_fact_summary"] is None
     assert result["reason"] == "no_previous_fact_found"
     assert "no_previous_fact_found" in result["trace"]["warnings"]
+
+
+def test_understand_message_with_agent_detects_pending_subject_reference_clarification_without_llm() -> None:
+    result = _run(
+        message_understanding_agent.understand_message_with_agent(
+            message="是B公司",
+            recent_messages=[
+                {
+                    "message_id": 12,
+                    "role": "assistant",
+                    "content": "当前还不能稳定确定“公司”具体指向哪个主体。",
+                    "metadata": {
+                        "pending_clarification": {
+                            "type": "subject_reference_resolution",
+                            "target_mention": "公司",
+                            "reference_type": "organization",
+                            "previous_question": "这里的公司指的是哪家公司？",
+                            "scope_attempted": ["current_conversation_graph"],
+                            "expected_response": "entity_name_or_context",
+                        }
+                    },
+                }
+            ],
+            use_llm=False,
+        )
+    )
+
+    assert result["intent"] == "clarification_response"
+    assert result["route_hint"] == "DOSSIER_MEMORY"
+    assert result["provider"] == "contract"
+    assert result["model"] == "pending-clarification-contract-v1"
+    assert result["fallback_reason"] is None
+    assert result["clarification_response"]["target_mention"] == "公司"
+    assert result["trace"]["steps"] == ["build_request", "detect_pending_clarification"]

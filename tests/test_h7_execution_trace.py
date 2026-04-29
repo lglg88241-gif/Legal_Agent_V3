@@ -393,6 +393,7 @@ def test_subject_reference_trace_uses_dossier_memory_step(
     steps = _step_lookup(result)
     assert result["route_intent"] == "DOSSIER_MEMORY"
     assert result["execution_trace"]["legacy_fallback"]["used"] is False
+    assert "selected_scope" in result["execution_trace"]["memory_resolution"]
     assert steps["dossier_memory_subject_reference"]["status"] == "success"
     assert steps["dossier_memory_subject_reference"]["agent"] == "dossier_memory_helper"
     assert "selected_scope" in (steps["dossier_memory_subject_reference"]["details"] or {})
@@ -449,6 +450,7 @@ def test_execution_trace_schema_constraints_hold(
     assert trace["schema_version"] == 1
     assert "provider" not in trace
     assert "model" not in trace
+    assert "memory_resolution" in trace
     for step in trace["steps"]:
         assert step["name"]
         assert step["agent"]

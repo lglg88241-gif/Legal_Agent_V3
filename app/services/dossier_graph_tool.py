@@ -461,6 +461,7 @@ def _build_base_response(
         "participant_aliases": participant_aliases,
         "participants": [],
         "participant_mentions": [],
+        "graph_nodes": [],
         "matched_nodes": [],
         "matched_edges": [],
         "graph_summary": None,
@@ -591,6 +592,7 @@ async def query_dossier_graph_context(
         participant_aliases=participant_aliases,
         warnings=warnings,
     )
+    response["graph_nodes"] = list(nodes)
 
     if query_type == "summary":
         response["participants"], participants_truncated = _truncate_items(
