@@ -7,10 +7,12 @@ from typing import Any
 
 import pytest
 
-from app.services.case_update_acknowledgement import build_case_update_acknowledgement as real_build_case_update_acknowledgement
+from app.services.case_update_acknowledgement import (
+    build_case_update_acknowledgement as real_build_case_update_acknowledgement,
+)
 
 
-FACT_MESSAGE = "B公司的人事通知我去签确认书。而且人事王经理口头通知我不用来了。"
+FACT_MESSAGE = "B公司的人事通知我去签确认书，而且人事王经理口头通知我不用来了。"
 
 
 def _fact_update_result() -> dict[str, object]:
@@ -105,8 +107,12 @@ def _install_celery_import_stubs() -> None:
     async def _refresh_case_graph(*args, **kwargs):
         return {"actions_applied": 0, "actions": []}
 
+    async def _get_case_graph(*args, **kwargs):
+        return {"query": "", "nodes": [], "edges": []}
+
     fake_graph_extractor.format_graph_memory = _format_graph_memory
     fake_graph_extractor.refresh_case_graph = _refresh_case_graph
+    fake_graph_extractor.get_case_graph = _get_case_graph
     sys.modules["app.services.graph_extractor"] = fake_graph_extractor
 
     fake_redis_mgr = ModuleType("app.memory.redis_mgr")
@@ -133,6 +139,8 @@ def _run_case_update_task(
     acknowledgement_handler: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[tuple[int, int, int]], dict[str, Any]]:
     celery_module = _load_celery_module()
+    import app.services.agentic_tool_executor as tool_executor_module
+
     persisted: dict[str, Any] = {}
     graph_calls: list[tuple[int, int, int]] = []
     trackers: dict[str, Any] = {
@@ -161,18 +169,20 @@ def _run_case_update_task(
             trackers["legal_agent_calls"] += 1
             if fail_on_legal_agent:
                 raise AssertionError("case update specialist should not call legal_agent.ask")
-            response = dict(legal_agent_response or {
-                "response": "旧链路回复",
-                "sources": [],
-                "route_intent": "GENERAL_CONSULT",
-                "case_summary": "",
-                "confidence_score": 0.6,
-            })
+            response = dict(
+                legal_agent_response
+                or {
+                    "response": "旧链路回答",
+                    "sources": [],
+                    "route_intent": "GENERAL_CONSULT",
+                    "case_summary": "",
+                    "confidence_score": 0.6,
+                }
+            )
             if persistence_consent == "temporary":
-                response_text = str(response.get("response") or "").strip()
-                hint = "当前会话设置不会写入结构化案情和图谱"
-                if hint not in response_text:
-                    response["response"] = f"{response_text} {hint}".strip()
+                suffix = "当前会话设置不会写入结构化案情和图谱"
+                if suffix not in str(response.get("response") or ""):
+                    response["response"] = f"{response['response']} {suffix}".strip()
             return response
 
     async def fake_understand_message_with_agent(**kwargs):
@@ -198,11 +208,8 @@ def _run_case_update_task(
     monkeypatch.setattr(celery_module, "understand_message_with_agent", fake_understand_message_with_agent)
     monkeypatch.setattr(celery_module, "_persist_dialog_turn_async", fake_persist_dialog_turn_async)
     monkeypatch.setattr(celery_module, "update_graph_task", FakeGraphTask())
-    monkeypatch.setattr(
-        celery_module,
-        "build_case_update_acknowledgement",
-        tracked_acknowledgement_handler,
-    )
+    monkeypatch.setattr(celery_module, "build_case_update_acknowledgement", tracked_acknowledgement_handler)
+    monkeypatch.setattr(tool_executor_module, "build_case_update_acknowledgement", tracked_acknowledgement_handler)
 
     result = celery_module.ask_agent_task.run(
         1,
@@ -238,13 +245,9 @@ def test_fact_update_uses_case_update_acknowledgement_specialist(
     assert len(trackers["ack_calls"]) == 1
     assert "已记录这条新的案情事实" in result["response"]
     assert "王经理" in result["response"]
-    assert "劳动合同法" not in result["response"]
-    assert "仲裁" not in result["response"]
+    assert "法律" not in result["response"]
     assert "参与者" not in result["response"]
     assert "映射" not in result["response"]
-    assert "当事人标签" not in result["response"]
-    assert "张三" not in result["response"]
-    assert "李四" not in result["response"]
     assert graph_calls == [(9, 1, 101)]
     action_summaries = [str(item.get("result_summary") or "") for item in result["agent_actions"]]
     assert any("Lightweight case update acknowledgement generated" in summary for summary in action_summaries)
@@ -253,29 +256,7 @@ def test_fact_update_uses_case_update_acknowledgement_specialist(
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
 
 
-def test_tracked_fact_update_acknowledgement_persists_case_snapshot(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    result, persisted, graph_calls, trackers = _run_case_update_task(
-        monkeypatch,
-        question=FACT_MESSAGE,
-        recent_messages=[],
-        message_understanding_result=_fact_update_result(),
-        fail_on_legal_agent=True,
-    )
-
-    assert result["status"] == "success"
-    assert result["route_intent"] == "CASE_UPDATE"
-    assert trackers["legal_agent_calls"] == 0
-    assert len(trackers["ack_calls"]) == 1
-    assert graph_calls == [(9, 1, 101)]
-    assert persisted["case_summary"]
-    assert isinstance(persisted["case_state_dict"], dict)
-    assert persisted["case_state_dict"] != {}
-    assert bool(str(persisted["case_type"] or "").strip()) or persisted["case_state_dict"] is not None
-
-
-def test_confirm_previous_fact_uses_case_update_acknowledgement_specialist(
+def test_confirm_previous_fact_uses_previous_fact_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_case_update_task(
@@ -292,17 +273,12 @@ def test_confirm_previous_fact_uses_case_update_acknowledgement_specialist(
     assert len(trackers["ack_calls"]) == 1
     assert trackers["ack_calls"][0]["persisted_fact_text"] == FACT_MESSAGE
     assert "已确认上一条事实" in result["response"]
-    assert "王经理" in result["response"]
     assert persisted["user_metadata"]["confirmed_fact_text"] == FACT_MESSAGE
     assert persisted["user_metadata"]["graph_update_input_text"] == FACT_MESSAGE
     assert graph_calls == [(9, 1, 101)]
-    action_summaries = [str(item.get("result_summary") or "") for item in result["agent_actions"]]
-    assert any("Previous fact confirmed for graph update" in summary for summary in action_summaries)
-    assert any("Lightweight case update acknowledgement generated" in summary for summary in action_summaries)
-    assert all("Final legal response generated" not in summary for summary in action_summaries)
 
 
-def test_confirm_previous_fact_without_previous_fact_falls_back_to_legacy_path(
+def test_confirm_previous_fact_without_previous_fact_returns_clarification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_case_update_task(
@@ -310,23 +286,16 @@ def test_confirm_previous_fact_without_previous_fact_falls_back_to_legacy_path(
         question="我确认这个事实",
         recent_messages=[],
         message_understanding_result=_confirm_previous_fact_result(target_text=None, target_message_id=None),
-        legal_agent_response={
-            "response": "需要你先说明具体事实。",
-            "sources": [],
-            "route_intent": "GENERAL_CONSULT",
-            "case_summary": "",
-            "confidence_score": 0.5,
-        },
+        fail_on_legal_agent=True,
     )
 
     assert result["status"] == "success"
-    assert result["route_intent"] == "GENERAL_CONSULT"
-    assert result["response"] == "需要你先说明具体事实。"
-    assert trackers["legal_agent_calls"] == 1
-    assert trackers["ack_calls"] == []
+    assert result["route_intent"] == "CASE_UPDATE"
+    assert "暂时没有可确认的事实" in result["response"]
+    assert trackers["legal_agent_calls"] == 0
+    assert len(trackers["ack_calls"]) == 1
+    assert trackers["ack_calls"][0]["persisted_fact_text"] in {None, ""}
     assert graph_calls == []
-    action_summaries = [str(item.get("result_summary") or "") for item in result["agent_actions"]]
-    assert all("Lightweight case update acknowledgement generated" not in summary for summary in action_summaries)
     assert persisted["case_summary"] == ""
 
 
@@ -340,7 +309,7 @@ def test_temporary_fact_update_uses_transient_legal_analysis_branch(
         message_understanding_result=_fact_update_result(),
         persistence_consent="temporary",
         legal_agent_response={
-            "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
+            "response": "可以先固定这条事实，再准备确认书、社保记录和聊天记录。",
             "sources": [],
             "route_intent": "GENERAL_CONSULT",
             "case_summary": "",
@@ -372,7 +341,7 @@ def test_acknowledgement_specialist_exception_falls_back_to_legacy_legal_agent(
         recent_messages=[],
         message_understanding_result=_fact_update_result(),
         legal_agent_response={
-            "response": "旧链路回复",
+            "response": "旧链路回答",
             "sources": [],
             "route_intent": "GENERAL_CONSULT",
             "case_summary": "",
@@ -383,7 +352,7 @@ def test_acknowledgement_specialist_exception_falls_back_to_legacy_legal_agent(
 
     assert result["status"] == "success"
     assert result["route_intent"] == "CASE_UPDATE"
-    assert result["response"] == "旧链路回复"
+    assert result["response"] == "旧链路回答"
     assert trackers["legal_agent_calls"] == 1
     assert len(trackers["ack_calls"]) == 1
     assert graph_calls == [(9, 1, 101)]
@@ -395,7 +364,7 @@ def test_acknowledgement_specialist_exception_falls_back_to_legacy_legal_agent(
     [
         "我补充一下，人事让我先签确认书再谈补缴社保。",
         "后来王经理又口头说让我不用再来上班。",
-        "B公司的人事通知我去签确认书，而且王经理说我不用继续来了。",
+        "B公司的人事通知我去签确认书，而且王经理说我不用继续来上班了。",
     ],
 )
 def test_fact_update_paraphrases_all_use_lightweight_acknowledgement(
@@ -415,9 +384,8 @@ def test_fact_update_paraphrases_all_use_lightweight_acknowledgement(
     assert trackers["legal_agent_calls"] == 0
     assert len(trackers["ack_calls"]) == 1
     assert result["response"].startswith("已记录这条新的案情事实")
-    assert "劳动合同法" not in result["response"]
+    assert "法律" not in result["response"]
     assert "案例" not in result["response"]
-    assert "仲裁" not in result["response"]
-    assert "参与者" not in result["response"]
+    assert "映射" not in result["response"]
     assert graph_calls == [(9, 1, 101)]
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"

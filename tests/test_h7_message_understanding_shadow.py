@@ -28,8 +28,12 @@ def _install_celery_import_stubs() -> None:
     async def _refresh_case_graph(*args, **kwargs):
         return {"actions_applied": 0, "actions": []}
 
+    async def _get_case_graph(*args, **kwargs):
+        return {"query": "", "nodes": [], "edges": []}
+
     fake_graph_extractor.format_graph_memory = _format_graph_memory
     fake_graph_extractor.refresh_case_graph = _refresh_case_graph
+    fake_graph_extractor.get_case_graph = _get_case_graph
     sys.modules["app.services.graph_extractor"] = fake_graph_extractor
 
     fake_redis_mgr = ModuleType("app.memory.redis_mgr")
@@ -128,13 +132,13 @@ def test_ask_agent_task_records_message_understanding_shadow_result_for_non_subj
     )
 
     assert result["status"] == "success"
-    assert result["route_intent"] == "GENERAL_CONSULT"
+    assert result["route_intent"] == "LEGAL_QA"
     assert result["response"] == "主链路回答"
     assert result["message_understanding"]["intent"] == "legal_question"
     assert result["message_understanding"]["route_hint"] == "LEGAL_QA"
     assert result["message_understanding"]["provider"] == "openai"
     assert persisted["metadata"]["message_understanding"]["intent"] == "legal_question"
-    assert persisted["metadata"]["route_intent"] == "GENERAL_CONSULT"
+    assert persisted["metadata"]["route_intent"] == "LEGAL_QA"
     shadow_actions = [
         item for item in result["agent_actions"] if item.get("stage") == "message_understanding_shadow"
     ]

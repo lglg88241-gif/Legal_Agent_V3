@@ -39,182 +39,144 @@
           <span class="label">当前模型</span>
           <span class="value">{{ status.model || '-' }}</span>
         </div>
-        <div class="system-component-list">
-          <div
-            v-for="entry in systemComponentEntries"
-            :key="entry.key"
-            class="system-component-item"
-          >
-            <span class="label">{{ entry.label }}</span>
-            <el-tag :type="entry.status === 'connected' ? 'success' : 'info'" size="small">
-              {{ entry.status === 'connected' ? '已连接' : '加载中' }}
-            </el-tag>
-          </div>
-        </div>
       </div>
 
-      <div class="panel-section panel-section-compact">
+      <div class="panel-section">
         <div class="section-title-row">
           <div>
-            <div class="section-title section-title-tight">执行状态</div>
-            <div class="section-description">展示当前请求真实触发的关键模块和执行状态。</div>
+            <div class="section-title section-title-tight">Agent 执行过程</div>
+            <div class="section-description">展示本轮计划、工具调用、保护规则、写入动作和最终依据。</div>
           </div>
-          <span class="section-summary">{{ componentStatusSummary }}</span>
+          <span class="section-summary">{{ requestStateLabel }}</span>
         </div>
 
-        <div class="component-status-list">
-          <div
-            v-for="entry in displayedExecutionEntries"
-            :key="entry.key"
-            :class="['component-status-row', `status-${normalizeKey(entry.status)}`]"
-          >
-            <div class="component-status-copy">
-              <strong>{{ entry.label }}</strong>
-              <span>
-                {{ showExecutionDetail(entry) ? entry.detail : displayExecutionStatusQuietLabel(entry.status) }}
-              </span>
-              <span v-if="hasExecutionTrace && entry.meta" class="component-trace-meta-line">
-                {{ entry.meta }}
-              </span>
-            </div>
-            <div class="component-status-meta">
-              <span :class="['status-dot', `status-${normalizeKey(entry.status)}`]"></span>
-              <span class="component-status-badge">{{ displayExecutionStatusQuietLabel(entry.status) }}</span>
-            </div>
+        <div class="meta-grid">
+          <div class="meta-card">
+            <span>分流</span>
+            <strong>{{ routeIntentLabel }}</strong>
+          </div>
+          <div class="meta-card">
+            <span>耗时</span>
+            <strong>{{ latencyLabel }}</strong>
+          </div>
+          <div class="meta-card">
+            <span>置信度</span>
+            <strong>{{ confidenceLabel }}</strong>
+          </div>
+          <div class="meta-card">
+            <span>执行来源</span>
+            <strong>{{ hasExecutionTrace ? 'execution_trace' : 'agent_actions fallback' }}</strong>
           </div>
         </div>
 
-        <div v-if="hasExecutionTrace && executionTraceLegacyFallback.used" class="analysis-warning">
-          {{ `传统流程兜底：${executionTraceLegacyFallback.reason || '未提供原因'}。这不代表失败，只表示回退到旧链路。` }}
+        <div v-if="analysis.requestError" class="analysis-warning">
+          {{ analysis.requestError }}
         </div>
 
-        <details v-if="hasExecutionTrace && executionTraceTriggeredGuards.length" class="trace-guard-details">
-          <summary>{{ `执行保护条件（${executionTraceTriggeredGuards.length}）` }}</summary>
-          <div class="trace-guard-list">
-            <div
-              v-for="guard in executionTraceTriggeredGuards"
-              :key="guard.name"
-              class="trace-guard-item"
-            >
-              <span>{{ guard.label }}</span>
-              <el-tag size="small" type="warning" effect="plain">已生效</el-tag>
-            </div>
-          </div>
-        </details>
-
-        <div v-if="!hasExecutionTrace && secondaryExecutionEntries.length" class="component-secondary-group">
-          <div class="compact-subsection-title">更多组件状态</div>
-          <div class="component-inline-list">
-            <div
-              v-for="entry in secondaryExecutionEntries"
-              :key="`secondary-${entry.key}`"
-              :class="['component-inline-chip', `status-${normalizeKey(entry.status)}`]"
-            >
-              <span>{{ entry.label }}</span>
-              <span>{{ displayExecutionStatusQuietLabel(entry.status) }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="!hasExecutionTrace && highlightedExecutionEntries.length" class="component-note-list">
-          <div
-            v-for="entry in highlightedExecutionEntries"
-            :key="`note-${entry.key}`"
-            class="component-note"
-          >
-            <strong>{{ entry.fullLabel }}</strong>
-            <span>{{ entry.detail }}</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="panel-section analysis-section">
-        <div class="section-title-row">
-          <div>
-            <div class="section-title section-title-tight">本轮分析</div>
-            <div class="section-description">展示当前会话请求的处理过程和结果摘要。</div>
-          </div>
-        </div>
-
-        <div v-if="!hasAnalysisContent" class="analysis-empty-state">
-          <div class="analysis-empty-copy">
-            <strong>发送问题后，我会在这里展示本轮分析过程。</strong>
-            <span>系统会按请求类型自动安排处理链路，并同步关键执行状态。</span>
-          </div>
-          <div class="analysis-empty-hints">
-            <span class="analysis-empty-hint">理解案情</span>
-            <span class="analysis-empty-hint">检索依据</span>
-            <span class="analysis-empty-hint">更新图谱</span>
-          </div>
-        </div>
-
-        <template v-else>
-          <div class="analysis-meta-grid">
-            <div class="analysis-meta-card">
-              <span>请求状态</span>
-              <strong>{{ requestStateLabel }}</strong>
-            </div>
-            <div class="analysis-meta-card">
-              <span>任务分流</span>
-              <strong>{{ routeIntentLabel }}</strong>
-            </div>
-            <div class="analysis-meta-card">
-              <span>响应耗时</span>
-              <strong>{{ latencyLabel }}</strong>
-            </div>
-            <div class="analysis-meta-card">
-              <span>置信度</span>
-              <strong>{{ confidenceLabel }}</strong>
+        <template v-if="hasExecutionTrace">
+          <div class="process-block">
+            <div class="subsection-title">思考摘要</div>
+            <div class="summary-card">
+              <strong>{{ agentPlanRouteLabel }}</strong>
+              <span>{{ agentPlanSummary }}</span>
+              <small v-if="agentPlanMeta">{{ agentPlanMeta }}</small>
             </div>
           </div>
 
-          <div v-if="analysis.requestError" class="analysis-warning">
-            {{ analysis.requestError }}
-          </div>
-
-          <div v-if="analysisTimeline.length" class="timeline-list">
-            <div
-              v-for="(item, index) in analysisTimeline"
-              :key="`${item.key}-${index}`"
-              class="timeline-item"
-            >
-              <div class="timeline-header">
-                <strong>{{ item.label }}</strong>
-                <el-tag :type="displayExecutionStatusTagType(item.status)" size="small" effect="plain">
-                  {{ displayExecutionStatusLabel(item.status) }}
-                </el-tag>
+          <div v-if="toolEntries.length" class="process-block">
+            <div class="subsection-title">工具调用</div>
+            <div class="stack-list">
+              <div v-for="tool in toolEntries" :key="tool.key" class="stack-item">
+                <div class="stack-header">
+                  <strong>{{ tool.label }}</strong>
+                  <el-tag :type="statusTagType(tool.status)" size="small" effect="plain">
+                    {{ statusLabel(tool.status) }}
+                  </el-tag>
+                </div>
+                <div class="stack-body">{{ tool.summary }}</div>
+                <div v-if="tool.meta" class="stack-meta">{{ tool.meta }}</div>
               </div>
-              <div class="timeline-summary">{{ item.summary }}</div>
             </div>
           </div>
 
-          <div v-if="normalizedSources.length" class="analysis-subsection">
-            <div class="subsection-title">参考来源</div>
+          <div v-if="triggeredGuards.length" class="process-block">
+            <div class="subsection-title">保护规则</div>
             <div class="tag-list">
               <el-tag
-                v-for="source in normalizedSources"
-                :key="source"
-                size="small"
-                effect="plain"
-                type="info"
-              >
-                {{ source }}
-              </el-tag>
-            </div>
-          </div>
-
-          <div v-if="normalizedMissingInfo.length" class="analysis-subsection">
-            <div class="subsection-title">待补充信息</div>
-            <div class="tag-list">
-              <el-tag
-                v-for="item in normalizedMissingInfo"
-                :key="item"
+                v-for="guard in triggeredGuards"
+                :key="guard.name"
                 size="small"
                 effect="plain"
                 type="warning"
               >
-                {{ item }}
+                {{ guard.label }}
               </el-tag>
+            </div>
+          </div>
+
+          <div v-if="writeEntries.length" class="process-block">
+            <div class="subsection-title">写入动作</div>
+            <div class="stack-list">
+              <div v-for="write in writeEntries" :key="write.key" class="stack-item">
+                <div class="stack-header">
+                  <strong>{{ write.label }}</strong>
+                  <el-tag :type="statusTagType(write.status)" size="small" effect="plain">
+                    {{ statusLabel(write.status) }}
+                  </el-tag>
+                </div>
+                <div class="stack-body">{{ write.summary }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="finalBasis.summary" class="process-block">
+            <div class="subsection-title">最终依据</div>
+            <div class="summary-card">
+              <span>{{ finalBasis.summary }}</span>
+              <small v-if="finalBasis.source">来源：{{ finalBasis.source }}</small>
+              <div v-if="finalBasis.evidence.length" class="evidence-list">
+                <span v-for="item in finalBasis.evidence" :key="item" class="evidence-chip">{{ item }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="legacyFallback.used" class="analysis-warning">
+            传统流程兜底：{{ legacyFallback.reason || '未提供原因' }}。不代表失败，只表示回退到旧链路。
+          </div>
+
+          <div v-if="stepEntries.length" class="process-block">
+            <div class="subsection-title">执行步骤</div>
+            <div class="stack-list">
+              <div v-for="step in stepEntries" :key="step.key" class="stack-item">
+                <div class="stack-header">
+                  <strong>{{ step.label }}</strong>
+                  <el-tag :type="statusTagType(step.status)" size="small" effect="plain">
+                    {{ statusLabel(step.status) }}
+                  </el-tag>
+                </div>
+                <div class="stack-body">{{ step.summary }}</div>
+                <div v-if="step.meta" class="stack-meta">{{ step.meta }}</div>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="process-block">
+            <div class="subsection-title">执行摘要</div>
+            <div v-if="fallbackActionEntries.length" class="stack-list">
+              <div v-for="item in fallbackActionEntries" :key="item.key" class="stack-item">
+                <div class="stack-header">
+                  <strong>{{ item.label }}</strong>
+                  <el-tag :type="statusTagType(item.status)" size="small" effect="plain">
+                    {{ statusLabel(item.status) }}
+                  </el-tag>
+                </div>
+                <div class="stack-body">{{ item.summary }}</div>
+              </div>
+            </div>
+            <div v-else class="empty-state">
+              发送问题后，这里会展示本轮 Agent 的执行过程。
             </div>
           </div>
         </template>
@@ -289,29 +251,7 @@ const emit = defineEmits(['feedback', 'toggle-sidebar'])
 const rating = ref(0)
 const comment = ref('')
 
-const EXECUTION_COMPONENT_LABELS = {
-  request: '请求处理',
-  tool_router: '任务分流',
-  fact_updater: '案情理解',
-  retrieval_tools: '依据检索',
-  reflector: '风险审查',
-  legal_advisor: '法律回答生成',
-  greeting: '问候响应',
-  out_of_scope: '范围拦截',
-  graph_sync: '图谱更新',
-  dossier_intelligence: '案卷智能分析',
-  summary_update: '摘要更新',
-  participant_resolution: '主体关系确认',
-  message_understanding: '消息理解',
-  message_understanding_shadow: '消息理解影子链路',
-  message_orchestrator: '执行计划',
-  dossier_memory: '会话/案卷指代解析',
-  legal_agent_answer: '法律问答',
-  case_update_acknowledgement: '事实补充确认',
-  fact_confirmation: '上一事实确认',
-}
-
-const TRACE_STEP_LABELS = {
+const STEP_LABELS = {
   message_understanding: '消息理解',
   message_understanding_agent: '消息理解智能体',
   execution_plan: '执行计划',
@@ -326,6 +266,26 @@ const TRACE_STEP_LABELS = {
   participant_resolution: '主体关系确认',
   summary_update: '案卷摘要更新',
   legacy_fallback: '传统流程兜底',
+}
+
+const TOOL_LABELS = {
+  exact_law_lookup: '精确法条查询',
+  legal_rag_search: '法律检索',
+  case_search: '案例检索',
+  case_fact_extract: '案情事实抽取',
+  case_summary_update: '案情摘要更新',
+  conversation_graph_extract: '图谱抽取',
+  schedule_graph_update: '图谱更新调度',
+  current_conversation_graph_query: '当前会话图谱查询',
+  dossier_graph_context_query: '案卷图谱查询',
+  display_graph_build: 'Display Graph 构建',
+  dossier_intelligence_build: '案卷智能分析',
+  subject_reference_resolve: '主体指代解析',
+  participant_resolution_apply: '主体确认写入',
+  party_naming_confirm: '主体命名确认',
+  legal_answer_compose: '法律回答生成',
+  memory_answer_compose: '记忆回答生成',
+  acknowledgement_compose: '轻量确认生成',
 }
 
 const ROUTE_LABELS = {
@@ -344,6 +304,8 @@ const RESPONSE_MODE_LABELS = {
   case_analysis_without_persistence: '仅分析不持久化',
   legal_answer: '法律回答',
   dossier_memory_answer: '记忆解析回答',
+  memory_answer: '记忆解析回答',
+  clarification: '澄清',
 }
 
 const STATUS_LABELS = {
@@ -355,80 +317,33 @@ const STATUS_LABELS = {
   running: '执行中',
   pending: '待执行',
   idle: '空闲',
-  warning: '需关注',
-  error: '失败',
+  planned: '已规划',
+  blocked: '已阻断',
+  applied: '已写入',
 }
 
 const GUARD_LABELS = {
-  temporary_blocks_persistence: 'temporary 模式阻断结构化持久化',
-  legal_qa_blocks_graph: 'LEGAL_QA 阻断图谱更新',
-  missing_previous_fact: '未找到可确认的上一条事实',
+  temporary_blocks_persistence: 'temporary 阻断持久化与图谱写入',
+  legal_qa_blocks_graph: 'LEGAL_QA 阻断图谱污染',
+  missing_previous_fact: '缺少可确认的上一条事实',
   dossier_followup_question_blocks_persistence: '案卷追问阻断案情写入',
-  non_persistable_case_update: '当前 CASE_UPDATE 不满足持久化条件',
+  non_persistable_case_update: '当前 CASE_UPDATE 不满足写入条件',
 }
 
-const executionDefinitions = [
-  { key: 'tool_router', label: '任务分流', fullLabel: '任务分流' },
-  { key: 'fact_updater', label: '案情理解', fullLabel: '案情理解' },
-  { key: 'retrieval_tools', label: '依据检索', fullLabel: '依据检索' },
-  { key: 'reflector', label: '风险审查', fullLabel: '风险审查' },
-  { key: 'legal_advisor', label: '法律回答生成', fullLabel: '法律回答生成' },
-  { key: 'graph_sync', label: '图谱更新', fullLabel: '图谱更新' },
-  { key: 'dossier_intelligence', label: '案卷智能分析', fullLabel: '案卷智能分析' },
-  { key: 'summary_update', label: '摘要更新', fullLabel: '摘要更新' },
-  { key: 'participant_resolution', label: '主体关系确认', fullLabel: '主体关系确认' },
-]
-
-const coreExecutionKeys = ['fact_updater', 'retrieval_tools', 'graph_sync']
-
-const normalizedSources = computed(() =>
-  (props.analysis.sources || [])
-    .map((source) => {
-      if (typeof source === 'string') return source
-      if (source && typeof source === 'object') return source.source || source.name || ''
-      return ''
-    })
-    .filter(Boolean)
-)
-
-const normalizedMissingInfo = computed(() =>
-  (props.analysis.missingInfo || [])
-    .map((item) => String(item || '').trim())
-    .filter(Boolean)
-)
-
-const systemComponentEntries = computed(() =>
-  Object.entries(props.status.components || {}).map(([key, value]) => ({
-    key,
-    label: componentLabel(key),
-    status: value,
-  }))
-)
-
-const actionLookup = computed(() => {
-  const lookup = new Map()
-  for (const action of props.analysis.actions || []) {
-    const key = normalizeKey(action?.tool)
-    if (!key) continue
-    lookup.set(key, action)
-  }
-  return lookup
-})
-
-const routeIntentKey = computed(() => normalizeKey(props.analysis.routeIntent))
 const executionTrace = computed(() =>
   props.analysis.executionTrace && typeof props.analysis.executionTrace === 'object'
     ? props.analysis.executionTrace
-    : null
+    : null,
 )
+
 const hasExecutionTrace = computed(() => Boolean(executionTrace.value))
 
-const requestStateLabel = computed(() => displayExecutionStatusLabel(props.analysis.requestState || 'idle'))
+const requestStateLabel = computed(() => statusLabel(props.analysis.requestState || 'idle'))
 const routeIntentLabel = computed(() => routeLabel(props.analysis.routeIntent))
 
 const latencyLabel = computed(() => {
   const latency = Number(props.analysis.latencyMs)
-  return Number.isFinite(latency) && latency > 0 ? `${Math.round(latency)} ms` : '暂无'
+  return Number.isFinite(latency) && latency >= 0 ? `${Math.round(latency)} ms` : '暂无'
 })
 
 const confidenceLabel = computed(() => {
@@ -436,184 +351,129 @@ const confidenceLabel = computed(() => {
   return Number.isFinite(confidence) && confidence > 0 ? confidence.toFixed(2) : '暂无'
 })
 
-const executionComponentEntries = computed(() =>
-  executionDefinitions.map((definition) => buildExecutionEntry(definition))
+const agentPlan = computed(() =>
+  executionTrace.value?.agent_plan && typeof executionTrace.value.agent_plan === 'object'
+    ? executionTrace.value.agent_plan
+    : {},
 )
 
-const coreExecutionEntries = computed(() =>
-  executionComponentEntries.value.filter((entry) => coreExecutionKeys.includes(entry.key))
+const agentPlanSummary = computed(() =>
+  normalizeText(agentPlan.value.plan_summary) || '本轮未提供计划摘要。',
 )
 
-const secondaryExecutionEntries = computed(() =>
-  executionComponentEntries.value.filter(
-    (entry) =>
-      !coreExecutionKeys.includes(entry.key)
-      && !['idle', 'skipped'].includes(normalizeKey(entry.status))
-  )
-)
-
-const highlightedExecutionEntries = computed(() =>
-  executionComponentEntries.value
-    .filter((entry) => !['idle', 'skipped'].includes(normalizeKey(entry.status)))
-    .slice(0, 3)
-)
-
-const executionTraceLegacyFallback = computed(() => {
-  const fallback = executionTrace.value?.legacy_fallback
-  if (!fallback || typeof fallback !== 'object') {
-    return { used: false, reason: '' }
-  }
-  return {
-    used: Boolean(fallback.used),
-    reason: normalizeText(fallback.reason),
-  }
+const agentPlanRouteLabel = computed(() => {
+  const route = routeLabel(agentPlan.value.route || executionTrace.value?.execution_plan?.primary_route || props.analysis.routeIntent)
+  const mode = responseModeLabel(agentPlan.value.response_style)
+  return mode ? `${route} / ${mode}` : route
 })
 
-const executionTraceTriggeredGuards = computed(() =>
+const agentPlanMeta = computed(() => {
+  const specialist = normalizeText(agentPlan.value.specialist)
+  const tools = Array.isArray(agentPlan.value.tool_names) ? agentPlan.value.tool_names.length : 0
+  const parts = []
+  if (specialist) parts.push(`specialist: ${specialist}`)
+  if (tools) parts.push(`tools: ${tools}`)
+  return parts.join(' · ')
+})
+
+const toolEntries = computed(() =>
+  (Array.isArray(executionTrace.value?.tool_calls) ? executionTrace.value.tool_calls : []).map((tool, index) => ({
+    key: `${normalizeKey(tool.name)}-${index}`,
+    label: toolLabel(tool.name),
+    status: normalizeKey(tool.status) || 'planned',
+    summary:
+      normalizeText(tool.result_summary) ||
+      normalizeText(tool.arguments_summary) ||
+      '已登记工具调用，但未返回额外摘要。',
+    meta: [normalizeText(tool.category), normalizeText(tool.dispatch_mode), normalizeText(tool.current_implementation)]
+      .filter(Boolean)
+      .join(' · '),
+  })),
+)
+
+const triggeredGuards = computed(() =>
   (Array.isArray(executionTrace.value?.guards_applied) ? executionTrace.value.guards_applied : [])
     .filter((guard) => guard && typeof guard === 'object' && guard.triggered)
     .map((guard) => ({
       name: normalizeText(guard.name),
       label: guardLabel(guard.name),
-    }))
+    })),
 )
 
-const executionTraceEntries = computed(() => {
-  if (!hasExecutionTrace.value) return []
-  const traceValue = executionTrace.value || {}
-  const entries = []
+const writeEntries = computed(() => {
+  const requested = Array.isArray(executionTrace.value?.writes?.requested) ? executionTrace.value.writes.requested : []
+  const applied = Array.isArray(executionTrace.value?.writes?.applied) ? executionTrace.value.writes.applied : []
+  const appliedByName = new Map(applied.map((item) => [normalizeKey(item.name), item]))
 
-  const messageUnderstanding = traceValue.message_understanding || {}
-  if (messageUnderstanding && typeof messageUnderstanding === 'object' && Object.keys(messageUnderstanding).length) {
-    entries.push({
-      key: 'trace-message-understanding',
-      label: '消息理解',
-      fullLabel: '消息理解',
-      status: messageUnderstanding.fallback_used ? 'fallback' : 'success',
-      detail: `${intentLabel(messageUnderstanding.intent)} -> ${routeLabel(messageUnderstanding.route_hint)}`,
-      meta: formatTraceMeta({
-        agent: 'message_understanding_agent',
-        provider: messageUnderstanding.provider,
-        model: messageUnderstanding.model,
-        latencyMs: messageUnderstanding.latency_ms,
-      }),
-    })
-  }
+  return requested.map((item, index) => {
+    const key = normalizeKey(item.name)
+    const appliedItem = appliedByName.get(key)
+    let status = 'planned'
+    let summary = normalizeText(item.reason) || '已请求写入。'
 
-  const executionPlanValue = traceValue.execution_plan || {}
-  if (executionPlanValue && typeof executionPlanValue === 'object' && Object.keys(executionPlanValue).length) {
-    const stepNames = Array.isArray(executionPlanValue.step_names) ? executionPlanValue.step_names : []
-    const mappedSteps = stepNames.map((name) => executionTraceLabel(name))
-    const responseModeText = normalizeText(executionPlanValue.response_mode)
-      ? ` · ${responseModeLabel(executionPlanValue.response_mode)}`
-      : ''
-    entries.push({
-      key: 'trace-execution-plan',
-      label: '执行计划',
-      fullLabel: '执行计划',
-      status: executionPlanValue.actionable ? 'success' : 'fallback',
-      detail: `${routeLabel(executionPlanValue.primary_route)}${responseModeText} · ${mappedSteps.join('、') || '传统流程兜底'}`,
-      meta: formatTraceMeta({ agent: 'message_orchestrator' }),
-    })
-  }
+    if (appliedItem) {
+      status = 'applied'
+      summary = normalizeText(appliedItem.input_text)
+        ? `已写入：${normalizeText(appliedItem.input_text)}`
+        : '写入已执行。'
+    } else if (item.allowed === false) {
+      status = 'blocked'
+      const blockedBy = Array.isArray(item.blocked_by) ? item.blocked_by.map(guardLabel).join('、') : ''
+      summary = blockedBy ? `已阻断：${blockedBy}` : '写入被阻断。'
+    }
 
-  for (const step of Array.isArray(traceValue.steps) ? traceValue.steps : []) {
-    if (!step || typeof step !== 'object') continue
-    entries.push({
-      key: `trace-step-${normalizeText(step.name)}-${entries.length}`,
-      label: executionTraceLabel(step.name),
-      fullLabel: executionTraceLabel(step.name),
-      status: normalizeKey(step.status) || 'success',
-      detail: buildTraceStepDetail(step),
-      meta: formatTraceMeta({
-        agent: step.agent,
-        provider: step.provider,
-        model: step.model,
-        latencyMs: step.latency_ms,
-      }),
-    })
-  }
-
-  return entries
+    return {
+      key: `${key}-${index}`,
+      label: writeLabel(item.name),
+      status,
+      summary,
+    }
+  })
 })
 
-const displayedExecutionEntries = computed(() =>
-  hasExecutionTrace.value ? executionTraceEntries.value : coreExecutionEntries.value
+const finalBasis = computed(() => {
+  const payload = executionTrace.value?.final_basis
+  if (!payload || typeof payload !== 'object') {
+    return { summary: '', source: '', evidence: [] }
+  }
+  return {
+    summary: normalizeText(payload.summary),
+    source: normalizeText(payload.source),
+    evidence: Array.isArray(payload.evidence)
+      ? payload.evidence.map((item) => normalizeText(item)).filter(Boolean)
+      : [],
+  }
+})
+
+const legacyFallback = computed(() => {
+  const payload = executionTrace.value?.legacy_fallback
+  if (!payload || typeof payload !== 'object') {
+    return { used: false, reason: '' }
+  }
+  return {
+    used: Boolean(payload.used),
+    reason: normalizeText(payload.reason),
+  }
+})
+
+const stepEntries = computed(() =>
+  (Array.isArray(executionTrace.value?.steps) ? executionTrace.value.steps : []).map((step, index) => ({
+    key: `${normalizeKey(step.name)}-${index}`,
+    label: stepLabel(step.name),
+    status: normalizeKey(step.status) || 'success',
+    summary: buildStepSummary(step),
+    meta: buildStepMeta(step),
+  })),
 )
 
-const componentStatusSummary = computed(() => {
-  const entries = hasExecutionTrace.value ? executionTraceEntries.value : executionComponentEntries.value
-  const running = entries.filter((entry) => normalizeKey(entry.status) === 'running').length
-  const warning = entries.filter((entry) =>
-    ['warning', 'error', 'failed', 'fallback'].includes(normalizeKey(entry.status))
-  ).length
-  const success = entries.filter((entry) => normalizeKey(entry.status) === 'success').length
-
-  if (running > 0) return `${running} 个步骤执行中`
-  if (warning > 0) return `${warning} 个步骤需要关注`
-  if (success > 0) return `${success} 个步骤已完成`
-  return '等待请求触发'
-})
-
-const hasAnalysisContent = computed(() => {
-  const requestState = normalizeKey(props.analysis.requestState)
-  if (requestState && requestState !== 'idle') return true
-  if (analysisTimeline.value.length) return true
-  if (normalizeText(props.analysis.requestError)) return true
-  if (routeIntentKey.value) return true
-  if (normalizedSources.value.length || normalizedMissingInfo.value.length) return true
-
-  const latency = Number(props.analysis.latencyMs)
-  if (Number.isFinite(latency) && latency > 0) return true
-
-  const confidence = Number(props.analysis.confidenceScore)
-  return Number.isFinite(confidence) && confidence > 0
-})
-
-const analysisTimeline = computed(() => {
-  if (hasExecutionTrace.value) {
-    return executionTraceEntries.value.map((entry, index) => ({
-      key: `${entry.key}-${index}`,
-      label: entry.label,
-      status: entry.status,
-      summary: entry.meta ? `${entry.detail} · ${entry.meta}` : entry.detail,
-    }))
-  }
-
-  const items = []
-  for (const action of props.analysis.actions || []) {
-    const key = normalizeKey(action?.tool)
-    if (!key) continue
-    items.push({
-      key,
-      label: executionLabelForTool(key),
-      status: normalizeKey(action?.status) || 'success',
-      summary: normalizeText(action?.result_summary) || '本轮已完成执行',
-    })
-  }
-
-  const graphSyncStatus = normalizeKey(props.analysis.graphSyncStatus)
-  const graphSyncSummary = normalizeText(props.analysis.graphSyncSummary)
-  if (graphSyncStatus && graphSyncStatus !== 'idle') {
-    items.push({
-      key: 'graph_sync',
-      label: executionLabelForTool('graph_sync'),
-      status: graphSyncStatus,
-      summary: graphSyncSummary || '图谱同步状态已更新',
-    })
-  }
-
-  if (!items.length && normalizeKey(props.analysis.requestState) === 'running') {
-    items.push({
-      key: 'request',
-      label: '请求处理',
-      status: 'running',
-      summary: '当前请求处理中，等待后端返回执行结果。',
-    })
-  }
-
-  return items
-})
+const fallbackActionEntries = computed(() =>
+  (props.analysis.actions || []).map((action, index) => ({
+    key: `${normalizeKey(action?.tool)}-${index}`,
+    label: toolLabel(action?.tool) || unknownLabel('未知工具', action?.tool, '未知工具'),
+    status: normalizeKey(action?.status) || 'success',
+    summary: normalizeText(action?.result_summary) || '本轮已完成执行。',
+  })),
+)
 
 function normalizeText(value) {
   return String(value || '').trim()
@@ -629,247 +489,100 @@ function unknownLabel(prefix, value, emptyFallback) {
   return `${prefix}：${raw}`
 }
 
-function componentLabel(key) {
-  const labels = {
-    chroma: 'Chroma',
-    neo4j: 'Neo4j',
-    llm: 'LLM',
-    celery: 'Celery',
-  }
-  return labels[key] || unknownLabel('未知组件', key, '未知组件')
+function stepLabel(name) {
+  return STEP_LABELS[normalizeKey(name)] || unknownLabel('未知步骤', name, '未知步骤')
 }
 
-function intentLabel(value) {
-  const labels = {
-    subject_reference: '主体指代',
-    fact_update: '事实补充',
-    confirm_previous_fact: '上一事实确认',
-    legal_question: '法律问题',
-    advice_question: '维权建议',
-    document_request: '文书请求',
-    unknown: '未知意图',
-  }
-  return labels[normalizeKey(value)] || unknownLabel('未知意图', value, '未知意图')
-}
-
-function executionLabelForTool(key) {
-  return EXECUTION_COMPONENT_LABELS[normalizeKey(key)] || unknownLabel('未知组件', key, '未知组件')
-}
-
-function executionTraceLabel(name) {
-  return TRACE_STEP_LABELS[normalizeKey(name)] || unknownLabel('未知步骤', name, '未知步骤')
+function toolLabel(name) {
+  return TOOL_LABELS[normalizeKey(name)] || unknownLabel('未知工具', name, '未知工具')
 }
 
 function routeLabel(value) {
-  return ROUTE_LABELS[normalizeKey(value)] || unknownLabel('未知分流', value, '未返回')
+  return ROUTE_LABELS[normalizeKey(value)] || unknownLabel('未知分流', value, '未知分流')
 }
 
 function responseModeLabel(value) {
-  return RESPONSE_MODE_LABELS[normalizeKey(value)] || unknownLabel('未知响应模式', value, '未声明')
+  if (!normalizeText(value)) return ''
+  return RESPONSE_MODE_LABELS[normalizeKey(value)] || unknownLabel('未知响应模式', value, '未知响应模式')
 }
 
-function guardLabel(name) {
-  return GUARD_LABELS[normalizeKey(name)] || unknownLabel('未知保护', name, '未知保护')
+function statusLabel(value) {
+  return STATUS_LABELS[normalizeKey(value)] || unknownLabel('未知状态', value, '未知状态')
 }
 
-function formatTraceMeta({ agent, provider, model, latencyMs }) {
-  const parts = []
-  const normalizedAgent = normalizeText(agent)
-  const normalizedProvider = normalizeText(provider)
-  const normalizedModel = normalizeText(model)
-  const latency = Number(latencyMs)
-
-  if (normalizedAgent) parts.push(normalizedAgent)
-  if (normalizedProvider || normalizedModel) {
-    parts.push([normalizedProvider, normalizedModel].filter(Boolean).join(' / '))
-  }
-  if (Number.isFinite(latency) && latency >= 0) {
-    parts.push(`${Math.round(latency)} ms`)
-  }
-  return parts.join(' · ')
+function guardLabel(value) {
+  return GUARD_LABELS[normalizeKey(value)] || unknownLabel('未知保护规则', value, '未知保护规则')
 }
 
-function buildTraceStepDetail(step) {
-  const details = step?.details && typeof step.details === 'object' ? step.details : {}
-  const status = normalizeKey(step?.status)
-  if (status === 'skipped') {
-    return unknownLabel('跳过原因', step?.skip_reason, '已跳过')
+function writeLabel(value) {
+  const mapping = {
+    structured_case_persistence: '结构化案情写入',
+    graph_update_schedule: '图谱更新调度',
   }
-  if (status === 'fallback') {
-    return unknownLabel('兜底原因', step?.fallback_reason, '已兜底')
-  }
-  if (status === 'failed') {
-    return normalizeText(details.error) || '执行失败'
-  }
-  if (normalizeText(details.selected_scope)) {
-    return `已选择作用域：${details.selected_scope}`
-  }
-  if (normalizeText(details.task_id)) {
-    return `已调度任务：${details.task_id}`
-  }
-  if (normalizeText(details.graph_update_source)) {
-    return `图谱更新来源：${details.graph_update_source}`
-  }
-  if (normalizeText(details.input_text)) {
-    return '已写入结构化案情'
-  }
-  return '本步骤已完成'
+  return mapping[normalizeKey(value)] || unknownLabel('未知写入动作', value, '未知写入动作')
 }
 
-function displayExecutionStatusLabel(status) {
-  return STATUS_LABELS[normalizeKey(status)] || unknownLabel('未知状态', status, '未知状态')
-}
-
-function displayExecutionStatusQuietLabel(status) {
-  return STATUS_LABELS[normalizeKey(status)] || unknownLabel('未知状态', status, '未知状态')
-}
-
-function displayExecutionStatusTagType(status) {
+function statusTagType(status) {
   switch (normalizeKey(status)) {
     case 'success':
+    case 'applied':
       return 'success'
     case 'running':
-      return 'warning'
-    case 'warning':
-      return 'warning'
-    case 'error':
-    case 'failed':
-      return 'danger'
-    case 'pending':
-    case 'scheduled':
-    case 'skipped':
-      return 'info'
     case 'fallback':
       return 'warning'
+    case 'failed':
+    case 'error':
+      return 'danger'
+    case 'blocked':
+      return 'warning'
+    case 'skipped':
+    case 'pending':
+    case 'planned':
+    case 'scheduled':
+      return 'info'
     default:
       return ''
   }
 }
 
-function buildExecutionEntry(definition) {
-  const key = definition.key
-  const requestState = normalizeKey(props.analysis.requestState)
-  const routeIntent = routeIntentKey.value
-  const action = actionLookup.value.get(key)
-
-  if (key === 'graph_sync') {
-    const graphSyncStatus = normalizeKey(props.analysis.graphSyncStatus) || 'idle'
-    return {
-      key,
-      label: definition.label,
-      fullLabel: definition.fullLabel,
-      status: graphSyncStatus,
-      detail: normalizeText(props.analysis.graphSyncSummary) || defaultIdleDetail(key),
-    }
+function buildStepSummary(step) {
+  const details = step?.details && typeof step.details === 'object' ? step.details : {}
+  const status = normalizeKey(step?.status)
+  if (status === 'skipped') {
+    return unknownLabel('跳过原因', step?.skip_reason, '该步骤已跳过。')
   }
-
-  if (action) {
-    return {
-      key,
-      label: definition.label,
-      fullLabel: definition.fullLabel,
-      status: normalizeKey(action?.status) || 'success',
-      detail: normalizeText(action?.result_summary) || '本轮已完成执行',
-    }
+  if (status === 'fallback') {
+    return unknownLabel('兜底原因', step?.fallback_reason, '该步骤已兜底。')
   }
-
-  if (requestState === 'running') {
-    if (key === 'tool_router') {
-      return {
-        key,
-        label: definition.label,
-        fullLabel: definition.fullLabel,
-        status: 'running',
-        detail: '正在判断当前请求的处理路径。',
-      }
-    }
-    return {
-      key,
-      label: definition.label,
-      fullLabel: definition.fullLabel,
-      status: 'pending',
-      detail: '等待上游步骤完成。',
-    }
+  if (status === 'failed') {
+    return normalizeText(details.error) || '该步骤执行失败。'
   }
-
-  if (requestState === 'error') {
-    if (key === 'tool_router') {
-      return {
-        key,
-        label: definition.label,
-        fullLabel: definition.fullLabel,
-        status: 'failed',
-        detail: '主请求失败，未完整返回执行结果。',
-      }
-    }
-    return {
-      key,
-      label: definition.label,
-      fullLabel: definition.fullLabel,
-      status: 'idle',
-      detail: defaultIdleDetail(key),
-    }
+  if (normalizeText(details.selected_scope)) {
+    return `已选择作用域：${normalizeText(details.selected_scope)}`
   }
-
-  if (requestState === 'success') {
-    return {
-      key,
-      label: definition.label,
-      fullLabel: definition.fullLabel,
-      status: shouldSkipForRoute(key, routeIntent) ? 'skipped' : 'idle',
-      detail: skippedOrIdleDetail(key, routeIntent),
-    }
+  if (normalizeText(details.task_id)) {
+    return `已调度任务：${normalizeText(details.task_id)}`
   }
-
-  return {
-    key,
-    label: definition.label,
-    fullLabel: definition.fullLabel,
-    status: 'idle',
-    detail: defaultIdleDetail(key),
+  if (normalizeText(details.input_text)) {
+    return `写入输入：${normalizeText(details.input_text)}`
   }
+  if (normalizeText(details.graph_update_source)) {
+    return `图谱更新来源：${normalizeText(details.graph_update_source)}`
+  }
+  return '该步骤已完成。'
 }
 
-function shouldSkipForRoute(key, routeIntent) {
-  if (!routeIntent) return false
-  if (routeIntent === 'greeting' || routeIntent === 'out_of_scope') {
-    return key !== 'tool_router'
+function buildStepMeta(step) {
+  const parts = []
+  if (normalizeText(step.agent)) parts.push(normalizeText(step.agent))
+  if (normalizeText(step.provider) || normalizeText(step.model)) {
+    parts.push([normalizeText(step.provider), normalizeText(step.model)].filter(Boolean).join(' / '))
   }
-  if (routeIntent === 'general_consult') {
-    return ['fact_updater', 'reflector', 'summary_update', 'participant_resolution'].includes(key)
+  const latency = Number(step.latency_ms)
+  if (Number.isFinite(latency) && latency >= 0) {
+    parts.push(`${Math.round(latency)} ms`)
   }
-  if (routeIntent === 'case_update') {
-    return ['dossier_intelligence', 'summary_update', 'participant_resolution'].includes(key)
-  }
-  return false
-}
-
-function skippedOrIdleDetail(key, routeIntent) {
-  if (shouldSkipForRoute(key, routeIntent)) {
-    return '当前请求路径下未触发该组件。'
-  }
-  return defaultIdleDetail(key)
-}
-
-function defaultIdleDetail(key) {
-  if (key === 'dossier_intelligence') {
-    return '案卷级智能分析不属于当前会话主链路。'
-  }
-  if (key === 'summary_update') {
-    return '本轮未触发摘要更新。'
-  }
-  if (key === 'participant_resolution') {
-    return '本轮未触发主体确认写入。'
-  }
-  if (key === 'graph_sync') {
-    return '当前未触发图谱同步状态更新。'
-  }
-  return '等待当前请求触发。'
-}
-
-function showExecutionDetail(entry) {
-  const status = normalizeKey(entry?.status)
-  return ['success', 'running', 'warning', 'error', 'failed', 'pending', 'fallback', 'scheduled'].includes(status)
+  return parts.join(' · ')
 }
 
 function submit() {
@@ -947,13 +660,9 @@ function submit() {
   padding: 14px;
 }
 
-.panel-section-compact {
-  padding-bottom: 12px;
-}
-
 .graph-first {
   background:
-    radial-gradient(circle at top right, rgba(99, 102, 241, 0.12), transparent 30%),
+    radial-gradient(circle at top right, rgba(59, 130, 246, 0.14), transparent 30%),
     linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
 }
 
@@ -989,8 +698,7 @@ function submit() {
   color: #94a3b8;
 }
 
-.info-row,
-.system-component-item {
+.info-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1010,242 +718,110 @@ function submit() {
   font-size: 12px;
 }
 
-.muted,
-.subsection-empty {
-  color: #94a3b8;
-}
-
-.system-component-list,
-.timeline-list,
-.component-note-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.component-status-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.component-status-row {
-  min-width: 0;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(248, 250, 252, 0.82);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.component-status-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  min-width: 0;
-}
-
-.component-status-copy strong {
-  font-size: 12px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.component-status-copy span {
-  font-size: 11px;
-  color: #64748b;
-  line-height: 1.5;
-}
-
-.component-trace-meta-line {
-  color: #94a3b8;
-}
-
-.component-status-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: #cbd5e1;
-}
-
-.status-dot.status-success {
-  background: #22c55e;
-}
-
-.status-dot.status-running {
-  background: #f59e0b;
-}
-
-.status-dot.status-pending,
-.status-dot.status-skipped {
-  background: #93c5fd;
-}
-
-.status-dot.status-warning,
-.status-dot.status-error {
-  background: #f97316;
-}
-
-.status-dot.status-fallback {
-  background: #f59e0b;
-}
-
-.status-dot.status-failed {
-  background: #ef4444;
-}
-
-.component-status-badge {
-  font-size: 11px;
-  color: #64748b;
-  white-space: nowrap;
-}
-
-.component-secondary-group {
-  margin-top: 12px;
-}
-
-.compact-subsection-title {
-  margin-bottom: 8px;
-  font-size: 11px;
-  font-weight: 700;
-  color: #64748b;
-}
-
-.component-inline-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.component-inline-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(248, 250, 252, 0.75);
-  font-size: 11px;
-  color: #475569;
-}
-
-.component-inline-chip span:first-child {
-  color: #0f172a;
-  font-weight: 600;
-}
-
-.component-note {
-  padding: 9px 11px;
-  border-radius: 12px;
-  background: rgba(248, 250, 252, 0.72);
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.component-note strong {
-  font-size: 12px;
-  color: #0f172a;
-}
-
-.component-note span {
-  font-size: 11px;
-  color: #64748b;
-  line-height: 1.5;
-}
-
-.trace-guard-details {
-  margin-top: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 12px;
-  background: rgba(248, 250, 252, 0.72);
-  padding: 10px 12px;
-}
-
-.trace-guard-details summary {
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-  color: #334155;
-}
-
-.trace-guard-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.trace-guard-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 11px;
-  color: #475569;
-}
-
-.timeline-item {
-  padding: 10px 12px;
-  background: rgba(248, 250, 252, 0.75);
-  border-radius: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-}
-
-.timeline-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
-
-.timeline-header strong {
-  font-size: 12px;
-  color: #0f172a;
-}
-
-.timeline-summary {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #475569;
-  line-height: 1.5;
-}
-
-.analysis-meta-grid {
+.meta-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 12px;
 }
 
-.analysis-meta-card {
+.meta-card {
   padding: 10px 12px;
   border-radius: 12px;
   background: rgba(248, 250, 252, 0.72);
   border: 1px solid rgba(148, 163, 184, 0.14);
 }
 
-.analysis-meta-card span {
+.meta-card span {
   display: block;
   font-size: 11px;
   color: #64748b;
   margin-bottom: 4px;
 }
 
-.analysis-meta-card strong {
+.meta-card strong {
   font-size: 12px;
   color: #0f172a;
+}
+
+.process-block + .process-block {
+  margin-top: 14px;
+}
+
+.summary-card,
+.stack-item,
+.empty-state {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(248, 250, 252, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.summary-card strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.summary-card span,
+.summary-card small {
+  font-size: 12px;
+  color: #475569;
+  line-height: 1.6;
+}
+
+.stack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stack-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.stack-header strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.stack-body {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #475569;
+}
+
+.stack-meta {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.tag-list,
+.evidence-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.evidence-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  font-size: 11px;
+  color: #475569;
 }
 
 .analysis-warning {
@@ -1259,59 +835,10 @@ function submit() {
   line-height: 1.5;
 }
 
-.analysis-empty-state {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 14px;
-  border-radius: 14px;
-  background: rgba(248, 250, 252, 0.72);
-  border: 1px dashed rgba(148, 163, 184, 0.2);
-}
-
-.analysis-empty-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.analysis-empty-copy strong {
-  font-size: 13px;
-  color: #0f172a;
-  line-height: 1.6;
-}
-
-.analysis-empty-copy span {
+.empty-state {
   font-size: 12px;
   color: #64748b;
   line-height: 1.6;
-}
-
-.analysis-empty-hints {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.analysis-empty-hint {
-  display: inline-flex;
-  align-items: center;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.75);
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  font-size: 11px;
-  color: #475569;
-}
-
-.analysis-subsection {
-  margin-top: 14px;
-}
-
-.tag-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
 }
 
 .rating-row {

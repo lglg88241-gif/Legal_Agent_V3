@@ -289,12 +289,53 @@ def _graph_nodes_from_context(dossier_graph_context: dict[str, Any] | None) -> l
     return merged
 
 
+def _graph_nodes_from_current_conversation_graph(
+    current_conversation_graph: dict[str, Any] | None,
+    *,
+    current_conversation_id: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(current_conversation_graph, dict):
+        return []
+    nodes = current_conversation_graph.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, int, str]] = set()
+    for item in nodes:
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        if not normalized.get("conversation_id") and current_conversation_id > 0:
+            normalized["conversation_id"] = current_conversation_id
+        key = (
+            _normalize_key(
+                normalized.get("id")
+                or normalized.get("graph_node_id")
+                or normalized.get("display_label")
+                or normalized.get("label")
+            ),
+            _extract_node_conversation_id(normalized),
+            _normalize_key(
+                normalized.get("raw_label")
+                or normalized.get("label")
+                or normalized.get("display_label")
+            ),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(normalized)
+    return merged
+
+
 def _candidate_pool_for_scope(
     *,
     scope_name: str,
     subject_reference: dict[str, Any],
     dossier_context: dict[str, Any] | None,
     dossier_graph_context: dict[str, Any] | None,
+    current_conversation_graph: dict[str, Any] | None,
     recent_messages: list[dict[str, Any]] | None,
     current_conversation_id: int,
 ) -> list[dict[str, Any]]:
@@ -451,7 +492,24 @@ def _candidate_pool_for_scope(
             ],
         )
 
-    for node in _graph_nodes_from_context(dossier_graph_context):
+    graph_nodes: list[tuple[dict[str, Any], str]] = []
+    if scope_name == "current_conversation_graph":
+        graph_nodes.extend(
+            (
+                node,
+                "current_conversation_graph_node",
+            )
+            for node in _graph_nodes_from_current_conversation_graph(
+                current_conversation_graph,
+                current_conversation_id=current_conversation_id,
+            )
+        )
+    graph_nodes.extend(
+        (node, "graph_node")
+        for node in _graph_nodes_from_context(dossier_graph_context)
+    )
+
+    for node, evidence_source in graph_nodes:
         if not isinstance(node, dict):
             continue
         node_conversation_id = _extract_node_conversation_id(node)
@@ -518,7 +576,7 @@ def _candidate_pool_for_scope(
             scope_name=scope_name,
             evidence_items=[
                 {
-                    "source": "graph_node",
+                    "source": evidence_source,
                     "conversation_id": node_conversation_id,
                     "graph_node_id": _normalize_text(node.get("id") or node.get("graph_node_id")) or None,
                     "graph_node_label": _normalize_text(node.get("display_label") or node.get("label")) or None,
@@ -734,6 +792,7 @@ def build_subject_reference_response_text(
     message_understanding: dict[str, Any],
     dossier_context: dict[str, Any] | None,
     dossier_graph_context: dict[str, Any] | None,
+    current_conversation_graph: dict[str, Any] | None = None,
     recent_messages: list[dict[str, Any]] | None,
     current_conversation_id: int,
 ) -> tuple[str, float, dict[str, Any]]:
@@ -771,6 +830,9 @@ def build_subject_reference_response_text(
             dossier_context=dossier_context if isinstance(dossier_context, dict) else None,
             dossier_graph_context=(
                 dossier_graph_context if isinstance(dossier_graph_context, dict) else None
+            ),
+            current_conversation_graph=(
+                current_conversation_graph if isinstance(current_conversation_graph, dict) else None
             ),
             recent_messages=recent_messages,
             current_conversation_id=current_conversation_id,
@@ -855,6 +917,7 @@ async def answer_subject_reference_message_async(
     message_understanding: dict[str, Any],
     dossier_context: dict[str, Any] | None,
     dossier_graph_context: dict[str, Any] | None,
+    current_conversation_graph: dict[str, Any] | None = None,
     case_summary: str | None,
     recent_messages: list[dict[str, Any]] | None,
     current_conversation_id: int,
@@ -864,6 +927,7 @@ async def answer_subject_reference_message_async(
         message_understanding=message_understanding,
         dossier_context=dossier_context,
         dossier_graph_context=dossier_graph_context,
+        current_conversation_graph=current_conversation_graph,
         recent_messages=recent_messages,
         current_conversation_id=current_conversation_id,
     )

@@ -326,6 +326,7 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
             properties={
                 "question": {"type": "string"},
                 "message_understanding": {"type": "object"},
+                "current_conversation_graph": {"type": "object"},
                 "dossier_context": {"type": "object"},
                 "dossier_graph_context": {"type": "object"},
                 "recent_messages": {"type": "array"},
@@ -439,6 +440,7 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
             properties={
                 "question": {"type": "string"},
                 "message_understanding": {"type": "object"},
+                "current_conversation_graph": {"type": "object"},
                 "dossier_context": {"type": "object"},
                 "dossier_graph_context": {"type": "object"},
                 "case_summary": {"type": "string"},

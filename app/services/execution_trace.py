@@ -110,9 +110,16 @@ class ExecutionTrace:
         self.schema_version = schema_version
         self._message_understanding: dict[str, Any] = {}
         self._execution_plan: dict[str, Any] = {}
+        self._agent_plan: dict[str, Any] = {}
         self._memory_resolution: dict[str, Any] = {}
+        self._tool_calls: list[dict[str, Any]] = []
         self._steps: list[dict[str, Any]] = []
         self._guards: list[dict[str, Any]] = []
+        self._writes: dict[str, Any] = {
+            "requested": [],
+            "applied": [],
+        }
+        self._final_basis: dict[str, Any] = {}
         self._legacy_fallback: dict[str, Any] = {
             "used": False,
             "reason": None,
@@ -169,6 +176,93 @@ class ExecutionTrace:
             payload.update(resolution)
         payload.update({key: value for key, value in kwargs.items() if value is not None})
         self._memory_resolution = payload
+
+    def set_agent_plan(
+        self,
+        *,
+        intent: Any,
+        route: Any,
+        response_style: Any,
+        specialist: Any,
+        plan_summary: Any,
+        tool_names: list[str] | tuple[str, ...] | set[str],
+        writes_requested: list[dict[str, Any]] | None = None,
+    ) -> None:
+        normalized_tool_names = [
+            _normalize_text(item)
+            for item in list(tool_names)
+            if _normalize_text(item)
+        ]
+        self._agent_plan = {
+            "intent": _normalize_text(intent).lower() or "unknown",
+            "route": _normalize_text(route).upper() or "UNKNOWN",
+            "response_style": _normalize_text(response_style) or None,
+            "specialist": _normalize_text(specialist) or None,
+            "plan_summary": _normalize_text(plan_summary) or None,
+            "tool_names": normalized_tool_names,
+            "writes_requested": list(writes_requested or []),
+        }
+
+    def add_tool_call(
+        self,
+        *,
+        name: str,
+        category: str,
+        status: str,
+        dispatch_mode: str,
+        current_implementation: str | None = None,
+        planner_callable: bool | None = None,
+        migration_status: str | None = None,
+        arguments_summary: str | None = None,
+        result_summary: str | None = None,
+        blocked_reason: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self._tool_calls.append(
+            {
+                "name": _normalize_text(name),
+                "category": _normalize_text(category) or None,
+                "status": _normalize_text(status).lower() or "planned",
+                "dispatch_mode": _normalize_text(dispatch_mode) or None,
+                "current_implementation": _normalize_text(current_implementation) or None,
+                "planner_callable": (
+                    bool(planner_callable) if planner_callable is not None else None
+                ),
+                "migration_status": _normalize_text(migration_status) or None,
+                "arguments_summary": _normalize_text(arguments_summary) or None,
+                "result_summary": _normalize_text(result_summary) or None,
+                "blocked_reason": _normalize_text(blocked_reason) or None,
+                "details": details or None,
+            }
+        )
+
+    def set_writes(
+        self,
+        *,
+        requested: list[dict[str, Any]] | None = None,
+        applied: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._writes = {
+            "requested": list(requested or []),
+            "applied": list(applied or []),
+        }
+
+    def set_final_basis(
+        self,
+        *,
+        summary: str,
+        evidence: list[str] | None = None,
+        source: str | None = None,
+    ) -> None:
+        self._final_basis = {
+            "summary": _normalize_text(summary) or None,
+            "evidence": [
+                _normalize_text(item)
+                for item in list(evidence or [])
+                if _normalize_text(item)
+            ],
+            "source": _normalize_text(source) or None,
+        }
 
     def add_step(
         self,
@@ -229,9 +323,13 @@ class ExecutionTrace:
             "request_id": self.request_id,
             "message_understanding": self._message_understanding,
             "execution_plan": self._execution_plan,
+            "agent_plan": dict(self._agent_plan),
             "memory_resolution": dict(self._memory_resolution),
+            "tool_calls": list(self._tool_calls),
             "steps": list(self._steps),
             "guards_applied": list(self._guards),
+            "writes": dict(self._writes),
+            "final_basis": dict(self._final_basis),
             "legacy_fallback": dict(self._legacy_fallback),
         }
 

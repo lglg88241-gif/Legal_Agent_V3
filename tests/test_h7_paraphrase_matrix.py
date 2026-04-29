@@ -521,7 +521,7 @@ def test_legal_and_advice_paraphrase_matrix_needs_rag_without_graph_updates(
     assert result["message_understanding"]["needs_legal_rag"] is True
     assert result["message_understanding"]["needs_graph_update"] is False
     assert result["execution_plan"]["primary_route"] == route_hint
-    assert result["execution_trace"]["legacy_fallback"]["used"] is True
+    assert result["execution_trace"]["legacy_fallback"]["used"] is False
     assert trackers["legal_agent_calls"] == 1
     assert "legal_agent_answer" in steps
     assert "graph_update" not in steps

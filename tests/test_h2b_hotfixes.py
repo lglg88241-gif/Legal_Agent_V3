@@ -242,7 +242,7 @@ def test_ask_agent_task_skips_case_state_persistence_for_general_consult(
     )
 
     assert result["status"] == "success"
-    assert result["route_intent"] == "GENERAL_CONSULT"
+    assert result["route_intent"] == "LEGAL_QA"
     assert persisted["case_summary"] == ""
     assert persisted["case_state_dict"] is None
     assert persisted["case_type"] is None

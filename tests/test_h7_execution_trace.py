@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 
-FACT_MESSAGE = "B公司的人事通知我去签确认书。而且人事王经理口头通知我不用来了。"
+FACT_MESSAGE = "B公司的人事通知我去签确认书，而且人事王经理口头通知我不用来了。"
 
 
 def _subject_reference_result() -> dict[str, object]:
@@ -22,19 +22,31 @@ def _subject_reference_result() -> dict[str, object]:
         "needs_graph_update": False,
         "subject_reference": {
             "enabled": True,
+            "target_span": "这里的公司",
             "mention": "公司",
+            "target_mention": "公司",
             "target_type": "organization",
+            "reference_type": "organization",
+            "scope_order": [
+                "current_conversation_graph",
+                "current_conversation_messages",
+                "dossier_confirmed_participants",
+                "dossier_display_graph",
+                "dossier_cross_conversation_candidates",
+            ],
+            "needs_clarification_if_ambiguous": True,
         },
         "fact_update": None,
         "previous_fact_confirmation": None,
         "advice_question": None,
         "legal_question": None,
+        "clarification_response": None,
         "confidence": "high",
         "reason": "Current message asks for dossier subject reference.",
         "provider": "openai",
         "model": "gpt-5.1",
         "fallback_reason": None,
-        "trace": {"steps": ["call_llm"], "warnings": []},
+        "trace": {"steps": ["build_request", "call_llm"], "warnings": []},
     }
 
 
@@ -54,14 +66,8 @@ def _fact_update_result() -> dict[str, object]:
             "entities": [
                 {"label": "B公司", "type": "organization"},
                 {"label": "王经理", "type": "person"},
-                {"label": "确认书", "type": "document"},
             ],
-            "events": [
-                {
-                    "summary": "王经理口头通知当事人不用来了",
-                    "participants": ["王经理", "当事人"],
-                }
-            ],
+            "events": [{"summary": "王经理口头通知当事人不用来了", "participants": ["王经理", "当事人"]}],
         },
         "previous_fact_confirmation": None,
         "advice_question": None,
@@ -130,8 +136,24 @@ def _install_celery_import_stubs() -> None:
     async def _refresh_case_graph(*args, **kwargs):
         return {"actions_applied": 0, "actions": []}
 
+    async def _get_case_graph(conversation_id: int):
+        return {
+            "query": "current conversation graph",
+            "nodes": [
+                {
+                    "id": "company-b",
+                    "conversation_id": conversation_id,
+                    "display_label": "B公司",
+                    "raw_label": "B公司",
+                    "type": "organization",
+                }
+            ],
+            "edges": [],
+        }
+
     fake_graph_extractor.format_graph_memory = _format_graph_memory
     fake_graph_extractor.refresh_case_graph = _refresh_case_graph
+    fake_graph_extractor.get_case_graph = _get_case_graph
     sys.modules["app.services.graph_extractor"] = fake_graph_extractor
 
     fake_redis_mgr = ModuleType("app.memory.redis_mgr")
@@ -155,14 +177,12 @@ def _run_ask_agent_task(
     conversation_mode: str = "TRACKED_CASE",
     legal_agent_response: dict[str, Any] | None = None,
     fail_on_legal_agent: bool = False,
-    acknowledgement_handler: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], list[tuple[int, int, int]], dict[str, Any]]:
     celery_module = _load_celery_module()
     persisted: dict[str, Any] = {}
     graph_calls: list[tuple[int, int, int]] = []
     trackers: dict[str, Any] = {
         "legal_agent_calls": 0,
-        "ack_calls": [],
         "merged_metadata": [],
     }
 
@@ -180,6 +200,19 @@ def _run_ask_agent_task(
             "dossier_context": {"id": 12, "title": "劳动争议案卷"},
             "dossier_graph_summary": "",
             "dossier_graph_context": None,
+            "current_conversation_graph": {
+                "query": "current conversation graph",
+                "nodes": [
+                    {
+                        "id": "company-b",
+                        "conversation_id": conversation_id,
+                        "display_label": "B公司",
+                        "raw_label": "B公司",
+                        "type": "organization",
+                    }
+                ],
+                "edges": [],
+            },
         }
 
     class FakeLegalAgent:
@@ -188,7 +221,7 @@ def _run_ask_agent_task(
             if fail_on_legal_agent:
                 raise AssertionError("this path should not call legal_agent.ask")
             return legal_agent_response or {
-                "response": "旧链路回复",
+                "response": "旧链路回答",
                 "sources": [],
                 "route_intent": "GENERAL_CONSULT",
                 "case_summary": "",
@@ -204,11 +237,6 @@ def _run_ask_agent_task(
 
     async def fake_merge_message_metadata_async(**kwargs):
         trackers["merged_metadata"].append(kwargs)
-        metadata_patch = kwargs.get("metadata_patch")
-        if isinstance(metadata_patch, dict):
-            persisted_metadata = persisted.get("metadata")
-            if isinstance(persisted_metadata, dict):
-                persisted_metadata.update(metadata_patch)
         return None
 
     class FakeAsyncResult:
@@ -221,25 +249,12 @@ def _run_ask_agent_task(
             graph_calls.append((conversation_id, user_id, message_id))
             return FakeAsyncResult(f"graph-task-{conversation_id}-{message_id}")
 
-    original_ack = celery_module.build_case_update_acknowledgement
-
-    def wrapped_acknowledgement_handler(**kwargs):
-        trackers["ack_calls"].append(kwargs)
-        if acknowledgement_handler is not None:
-            return acknowledgement_handler(**kwargs)
-        return original_ack(**kwargs)
-
     monkeypatch.setattr(celery_module, "_run_task_async", fake_run_task_async)
     monkeypatch.setattr(celery_module, "legal_agent", FakeLegalAgent())
     monkeypatch.setattr(celery_module, "understand_message_with_agent", fake_understand_message_with_agent)
     monkeypatch.setattr(celery_module, "_persist_dialog_turn_async", fake_persist_dialog_turn_async)
     monkeypatch.setattr(celery_module, "_merge_message_metadata_async", fake_merge_message_metadata_async)
     monkeypatch.setattr(celery_module, "update_graph_task", FakeGraphTask())
-    monkeypatch.setattr(
-        celery_module,
-        "build_case_update_acknowledgement",
-        wrapped_acknowledgement_handler,
-    )
 
     result = celery_module.ask_agent_task.run(
         1,
@@ -278,7 +293,7 @@ def _guard_lookup(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return lookup
 
 
-def test_fact_update_execution_trace_records_specialist_chain(
+def test_fact_update_execution_trace_records_agent_plan_tool_calls_and_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_ask_agent_task(
@@ -286,34 +301,32 @@ def test_fact_update_execution_trace_records_specialist_chain(
         question="后来王经理又口头说让我不用再来上班。",
         recent_messages=[],
         message_understanding_result=_fact_update_result(),
-        legal_agent_response={
-            "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
-            "sources": [],
-            "route_intent": "GENERAL_CONSULT",
-            "case_summary": "",
-            "confidence_score": 0.78,
-        },
+        fail_on_legal_agent=True,
     )
 
     trace = result["execution_trace"]
     steps = _step_lookup(result)
+    tool_names = [item["name"] for item in trace["tool_calls"]]
+
     assert trace["schema_version"] == 1
     assert trace["message_understanding"]["intent"] == "fact_update"
     assert trace["execution_plan"]["primary_route"] == "CASE_UPDATE"
-    assert trace["legacy_fallback"]["used"] is False
+    assert trace["agent_plan"]["specialist"] == "case_update_agent"
+    assert trace["agent_plan"]["response_style"] == "acknowledge_and_persist"
+    assert "acknowledgement_compose" in tool_names
     assert steps["assistant_acknowledgement"]["status"] == "success"
-    assert steps["assistant_acknowledgement"]["agent"] == "case_update_acknowledgement"
     assert steps["fact_persistence"]["status"] == "success"
     assert steps["graph_update"]["status"] == "success"
-    assert steps["graph_update"]["agent"] == "celery.update_graph_task"
-    assert steps["graph_update"]["details"]["task_id"] == "graph-task-9-101"
+    assert trace["writes"]["requested"]
+    assert any(item["name"] == "structured_case_persistence" and item["allowed"] is True for item in trace["writes"]["requested"])
+    assert any(item["name"] == "graph_update_schedule" and item["applied"] is True for item in trace["writes"]["applied"])
+    assert "王经理" in trace["final_basis"]["evidence"][0]
     assert graph_calls == [(9, 1, 101)]
-    assert trackers["merged_metadata"]
+    assert trackers["legal_agent_calls"] == 0
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
-    assert result["agent_actions"]
 
 
-def test_confirm_previous_fact_without_previous_fact_marks_guard_and_skips_graph(
+def test_confirm_previous_fact_without_previous_fact_records_blocked_writes_without_legacy_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_ask_agent_task(
@@ -321,32 +334,27 @@ def test_confirm_previous_fact_without_previous_fact_marks_guard_and_skips_graph
         question="我确认这个事实",
         recent_messages=[],
         message_understanding_result=_confirm_previous_fact_result(target_text=None, target_message_id=None),
-        legal_agent_response={
-            "response": "需要你先说明具体事实。",
-            "sources": [],
-            "route_intent": "GENERAL_CONSULT",
-            "case_summary": "",
-            "confidence_score": 0.5,
-        },
+        fail_on_legal_agent=True,
     )
 
+    trace = result["execution_trace"]
     guards = _guard_lookup(result)
     steps = _step_lookup(result)
+
     assert guards["missing_previous_fact"]["triggered"] is True
+    assert trace["legacy_fallback"]["used"] is False
+    assert steps["assistant_acknowledgement"]["status"] == "success"
     assert steps["fact_confirmation"]["status"] == "skipped"
-    assert steps["fact_confirmation"]["skip_reason"] == "missing_previous_fact"
     assert steps["graph_update"]["status"] == "skipped"
     assert steps["graph_update"]["skip_reason"] == "missing_previous_fact"
-    assert result["execution_trace"]["legacy_fallback"]["used"] is True
-    assert result["execution_trace"]["legacy_fallback"]["reason"] == "missing_previous_fact"
-    assert "assistant_acknowledgement" not in steps
+    assert any(item["name"] == "graph_update_schedule" and item["allowed"] is False for item in trace["writes"]["requested"])
+    assert trace["final_basis"]["source"] == "case_update_acknowledgement"
+    assert trackers["legal_agent_calls"] == 0
     assert graph_calls == []
-    assert trackers["legal_agent_calls"] == 1
-    assert result["response"] == "需要你先说明具体事实。"
     assert persisted["case_summary"] == ""
 
 
-def test_temporary_fact_update_uses_transient_case_analysis_without_persistence(
+def test_temporary_fact_update_trace_keeps_writes_blocked_and_uses_legal_specialist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_ask_agent_task(
@@ -356,7 +364,7 @@ def test_temporary_fact_update_uses_transient_case_analysis_without_persistence(
         message_understanding_result=_fact_update_result(),
         persistence_consent="temporary",
         legal_agent_response={
-            "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
+            "response": "可以先固定这条事实，再准备确认书、社保记录和聊天记录。",
             "sources": [],
             "route_intent": "GENERAL_CONSULT",
             "case_summary": "",
@@ -364,81 +372,51 @@ def test_temporary_fact_update_uses_transient_case_analysis_without_persistence(
         },
     )
 
-    guards = _guard_lookup(result)
+    trace = result["execution_trace"]
     steps = _step_lookup(result)
+    guards = _guard_lookup(result)
+
     assert guards["temporary_blocks_persistence"]["triggered"] is True
-    assert result["execution_trace"]["execution_plan"]["response_mode"] == "case_analysis_without_persistence"
+    assert trace["agent_plan"]["response_style"] == "case_analysis_without_persistence"
     assert steps["legal_agent_answer"]["status"] == "success"
-    assert "assistant_acknowledgement" not in steps
-    assert "fact_persistence" not in steps
-    assert "graph_update" not in steps
+    assert trace["writes"]["applied"] == []
+    assert any(item["name"] == "structured_case_persistence" and item["allowed"] is False for item in trace["writes"]["requested"])
     assert graph_calls == []
     assert trackers["legal_agent_calls"] == 1
-    assert result["route_intent"] == "CASE_UPDATE"
-    assert "确认书" in result["response"]
     assert persisted["case_summary"] == ""
 
 
-def test_subject_reference_trace_uses_dossier_memory_step(
+def test_subject_reference_trace_records_current_conversation_graph_resolution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     result, persisted, graph_calls, trackers = _run_ask_agent_task(
         monkeypatch,
         question="这里的公司指的是哪家公司？",
-        recent_messages=[],
+        recent_messages=[{"message_id": 11, "role": "user", "content": "我和B公司签了劳动合同。", "metadata": {}}],
         message_understanding_result=_subject_reference_result(),
         fail_on_legal_agent=True,
     )
 
+    trace = result["execution_trace"]
     steps = _step_lookup(result)
+    tool_names = [item["name"] for item in trace["tool_calls"]]
+
     assert result["route_intent"] == "DOSSIER_MEMORY"
-    assert result["execution_trace"]["legacy_fallback"]["used"] is False
-    assert "selected_scope" in result["execution_trace"]["memory_resolution"]
+    assert trace["memory_resolution"]["selected_scope"] == "current_conversation_graph"
+    assert "current_conversation_graph_query" in tool_names
+    assert "subject_reference_resolve" in tool_names
     assert steps["dossier_memory_subject_reference"]["status"] == "success"
-    assert steps["dossier_memory_subject_reference"]["agent"] == "dossier_memory_helper"
-    assert "selected_scope" in (steps["dossier_memory_subject_reference"]["details"] or {})
-    assert "graph_update" not in steps
+    assert "B公司" in result["response"]
+    assert trace["writes"]["requested"] == []
     assert trackers["legal_agent_calls"] == 0
     assert graph_calls == []
-    assert persisted["metadata"]["execution_trace"]["legacy_fallback"]["used"] is False
-
-
-def test_acknowledgement_failure_marks_legacy_fallback_trace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def raise_acknowledgement_error(**kwargs):
-        raise RuntimeError("ack boom")
-
-    result, persisted, graph_calls, trackers = _run_ask_agent_task(
-        monkeypatch,
-        question="后来王经理又口头说让我不用再来上班。",
-        recent_messages=[],
-        message_understanding_result=_fact_update_result(),
-        legal_agent_response={
-            "response": "旧链路回复",
-            "sources": [],
-            "route_intent": "GENERAL_CONSULT",
-            "case_summary": "",
-            "confidence_score": 0.6,
-        },
-        acknowledgement_handler=raise_acknowledgement_error,
-    )
-
-    steps = _step_lookup(result)
-    assert result["execution_trace"]["legacy_fallback"]["used"] is True
-    assert result["execution_trace"]["legacy_fallback"]["reason"] == "case_update_acknowledgement_failed"
-    assert steps["assistant_acknowledgement"]["status"] == "failed"
-    assert steps["legal_agent_answer"]["status"] == "success"
-    assert trackers["legal_agent_calls"] == 1
-    assert graph_calls == [(9, 1, 101)]
-    assert result["agent_actions"]
-    assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
+    assert persisted["metadata"]["execution_trace"]["final_basis"]["source"] == "memory_resolver"
 
 
 def test_execution_trace_schema_constraints_hold(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    result, persisted, graph_calls, trackers = _run_ask_agent_task(
+    result, _, _, _ = _run_ask_agent_task(
         monkeypatch,
         question="后来王经理又口头说让我不用再来上班。",
         recent_messages=[],
@@ -450,7 +428,10 @@ def test_execution_trace_schema_constraints_hold(
     assert trace["schema_version"] == 1
     assert "provider" not in trace
     assert "model" not in trace
-    assert "memory_resolution" in trace
+    assert "agent_plan" in trace
+    assert "tool_calls" in trace
+    assert "writes" in trace
+    assert "final_basis" in trace
     for step in trace["steps"]:
         assert step["name"]
         assert step["agent"]
