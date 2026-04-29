@@ -42,6 +42,7 @@ from app.services.dossier_graph_tool import (
 )
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
+from app.services.message_understanding_agent import understand_message_with_agent
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,119 @@ def _create_celery_session_factory() -> tuple[Any, async_sessionmaker[AsyncSessi
         expire_on_commit=False,
     )
     return celery_engine, session_factory
+
+
+def _build_message_understanding_shadow_fallback(
+    *,
+    reason: str,
+    warning: str,
+) -> dict[str, Any]:
+    return {
+        "source": "message_understanding_agent",
+        "intent": "unknown",
+        "route_hint": "UNKNOWN",
+        "needs_legal_rag": False,
+        "needs_dossier_graph_context": False,
+        "needs_structured_persistence": False,
+        "needs_graph_update": False,
+        "subject_reference": None,
+        "fact_update": None,
+        "previous_fact_confirmation": None,
+        "advice_question": None,
+        "legal_question": None,
+        "confidence": "low",
+        "reason": reason,
+        "provider": "fallback",
+        "model": "message-understanding-shadow-fallback-v1",
+        "fallback_reason": reason,
+        "trace": {
+            "steps": ["shadow_mode"],
+            "warnings": [warning] if warning else [],
+        },
+    }
+
+
+async def _build_message_understanding_shadow_async(
+    *,
+    question: str,
+    recent_messages: list[dict[str, Any]] | None,
+    conversation_mode: str | None,
+    dossier_id: int | None,
+    conversation_id: int,
+    dossier_context: dict[str, Any] | None,
+    case_summary: str | None,
+) -> dict[str, Any]:
+    shadow_dossier_context = (
+        dossier_context
+        if isinstance(dossier_context, dict)
+        else {
+            "has_dossier": bool(dossier_id),
+            "dossier_id": dossier_id,
+            "conversation_id": conversation_id,
+        }
+    )
+    shadow_recent_messages = recent_messages if isinstance(recent_messages, list) else []
+
+    try:
+        result = await understand_message_with_agent(
+            message=question,
+            recent_messages=shadow_recent_messages,
+            conversation_mode=conversation_mode,
+            dossier_id=dossier_id,
+            dossier_context=shadow_dossier_context,
+            case_summary=case_summary,
+            use_llm=True,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Message understanding shadow call failed | conversation_id=%s dossier_id=%s error=%s",
+            conversation_id,
+            dossier_id,
+            exc,
+        )
+        return _build_message_understanding_shadow_fallback(
+            reason="shadow_call_failed",
+            warning=f"shadow_call_failed:{exc}",
+        )
+
+    trace = result.get("trace")
+    if not isinstance(trace, dict):
+        trace = {"steps": [], "warnings": []}
+        result["trace"] = trace
+    warnings = trace.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+        trace["warnings"] = warnings
+    if not shadow_recent_messages:
+        warnings.append("recent_messages_unavailable")
+    return result
+
+
+def _build_message_understanding_shadow_action(
+    message_understanding: dict[str, Any],
+) -> dict[str, Any]:
+    fallback_reason = str(message_understanding.get("fallback_reason") or "").strip() or None
+    provider = str(message_understanding.get("provider") or "").strip() or "fallback"
+    status = "success"
+    if provider in {"fallback", "rules"} or fallback_reason:
+        status = "fallback"
+    if fallback_reason == "shadow_call_failed":
+        status = "failed"
+    return {
+        "tool": "message_understanding_shadow",
+        "stage": "message_understanding_shadow",
+        "status": status,
+        "intent": str(message_understanding.get("intent") or "unknown"),
+        "route_hint": str(message_understanding.get("route_hint") or "UNKNOWN"),
+        "provider": provider,
+        "model": str(message_understanding.get("model") or ""),
+        "fallback_reason": fallback_reason,
+        "result_summary": (
+            f"Message understanding shadow result recorded: "
+            f"{message_understanding.get('intent', 'unknown')} -> "
+            f"{message_understanding.get('route_hint', 'UNKNOWN')}"
+        ),
+    }
 
 
 async def _load_controlled_dossier_graph_context_async(
@@ -157,6 +271,18 @@ async def _run_task_async(
                 if content:
                     latest_user_input = content
                     break
+        recent_messages = []
+        for message in messages_12:
+            content = " ".join((message.content or "").strip().split())
+            if not content:
+                continue
+            recent_messages.append(
+                {
+                    "message_id": getattr(message, "id", None),
+                    "role": message.role,
+                    "content": content,
+                }
+            )
 
         async with session_factory() as db:
             case_summary = await load_conversation_case_summary(db, conversation_id)
@@ -206,6 +332,7 @@ async def _run_task_async(
         return {
             "chat_history": chat_history,
             "latest_user_input": latest_user_input,
+            "recent_messages": recent_messages,
             "case_summary": case_summary,
             "graph_memory": graph_memory,
             "saved_case_state": saved_case_state,
@@ -427,6 +554,26 @@ def ask_agent_task(
             )
         )
 
+        message_understanding = asyncio.run(
+            _build_message_understanding_shadow_async(
+                question=question,
+                recent_messages=context.get("recent_messages"),
+                conversation_mode=conversation_mode,
+                dossier_id=dossier_id,
+                conversation_id=conversation_id,
+                dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
+                case_summary=case_summary,
+            )
+        )
+        logger.info(
+            "Message understanding shadow result | intent=%s route_hint=%s provider=%s model=%s fallback_reason=%s",
+            message_understanding.get("intent"),
+            message_understanding.get("route_hint"),
+            message_understanding.get("provider"),
+            message_understanding.get("model"),
+            message_understanding.get("fallback_reason"),
+        )
+
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)
         response_sources = answer.get("sources", []) if isinstance(answer, dict) else []
@@ -500,6 +647,7 @@ def ask_agent_task(
                 {"tool": "retrieval_tools", "result_summary": "Retrieval pipeline completed"},
                 {"tool": "legal_advisor", "result_summary": "Final legal response generated"},
             ]
+        agent_actions.append(_build_message_understanding_shadow_action(message_understanding))
 
         result = {
             "status": "success",
@@ -513,6 +661,7 @@ def ask_agent_task(
             "confidence_score": answer.get("confidence_score", 0.0) if isinstance(answer, dict) else 0.0,
             "missing_info": answer.get("missing_info", []) if isinstance(answer, dict) else [],
             "route_intent": route_intent,
+            "message_understanding": message_understanding,
             "case_summary": updated_case_summary,
             "latency_ms": latency_ms,
         }
@@ -534,6 +683,7 @@ def ask_agent_task(
                         "missing_info": result["missing_info"],
                         "latency_ms": latency_ms,
                         "route_intent": route_intent,
+                        "message_understanding": message_understanding,
                     },
                     case_summary=updated_case_summary if should_persist_structured_case else "",
                     case_state_dict=case_state_dict if should_persist_structured_case else None,
