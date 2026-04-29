@@ -12,7 +12,11 @@ from app.core.llm_provider import get_llm_router
 from app.core.security import AuthenticatedUser, get_current_user
 from app.database.mysql_db import get_db
 from app.services.case_boundary import detect_case_boundary
-from app.services.conversation_mode import detect_conversation_mode, normalize_conversation_mode
+from app.services.case_tracking_entry_agent import decide_case_tracking_entry
+from app.services.conversation_mode import (
+    normalize_conversation_mode,
+    normalize_persistence_consent,
+)
 from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
@@ -90,22 +94,29 @@ async def process_dialog(
 
         current_mode = normalize_conversation_mode(getattr(conversation, "conversation_mode", None))
         if request.mode_consent_enabled:
-            mode_result = detect_conversation_mode(
-                clean_input,
-                current_mode=current_mode,
-                case_summary=conversation.case_summary,
+            persistence_consent = normalize_persistence_consent(
+                getattr(conversation, "persistence_consent", None)
             )
-            detected_mode = str(mode_result.get("detected_mode") or "UNKNOWN")
-            requires_consent = bool(mode_result.get("requires_persistence_consent"))
-            suggested_mode = mode_result.get("suggested_mode")
-            reason = str(mode_result.get("reason") or "").strip()
+            case_tracking_decision = await decide_case_tracking_entry(
+                message_text=clean_input,
+                conversation_mode=current_mode,
+                dossier_id=getattr(conversation, "dossier_id", None),
+                recent_messages=recent_messages,
+                current_conversation_graph=current_graph_summary,
+                case_summary=conversation.case_summary,
+                persistence_consent=persistence_consent,
+            )
+            detected_mode = str(case_tracking_decision.get("detected_mode") or "UNKNOWN")
+            requires_consent = bool(case_tracking_decision.get("should_prompt"))
+            suggested_mode = "TRACKED_CASE" if requires_consent else None
+            reason = str(case_tracking_decision.get("prompt_reason") or "").strip()
 
             if detected_mode == "LEGAL_QA" and current_mode == "UNKNOWN":
                 await update_conversation_mode_state(
                     db,
                     conversation,
                     conversation_mode="LEGAL_QA",
-                    persistence_consent=getattr(conversation, "persistence_consent", "unknown"),
+                    persistence_consent=persistence_consent,
                     mode_reason=reason or "auto_detected_legal_qa",
                 )
                 await db.commit()
@@ -129,6 +140,7 @@ async def process_dialog(
                         {"label": "保存并持续跟踪", "value": "tracked"},
                     ],
                     "reason": reason,
+                    "case_tracking_decision": case_tracking_decision,
                 }
 
         task = ask_agent_task.apply_async(

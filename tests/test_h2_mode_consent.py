@@ -280,6 +280,8 @@ def test_dialog_returns_mode_consent_when_enabled_for_case_analysis(
     assert result["conversation_mode"] == "LEGAL_QA"
     assert result["suggested_mode"] == "TRACKED_CASE"
     assert result["requires_persistence_consent"] is True
+    assert result["case_tracking_decision"]["source"] == "legacy_fallback"
+    assert result["case_tracking_decision"]["fallback_used"] is True
 
 
 def test_dialog_prioritizes_suggest_new_case_over_mode_consent(

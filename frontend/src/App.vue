@@ -1802,12 +1802,12 @@
     :show-close="false"
   >
     <div class="tracked-onboarding-copy">
-      <div class="tracked-onboarding-title">为了后续持续跟踪，请确认案卷和当事人称呼。</div>
+      <div class="tracked-onboarding-title">为了后续持续跟踪，请确认案卷名称。</div>
       <div class="tracked-onboarding-subtitle">
-        你可以使用化名或角色名，不需要填写真实姓名。
+        当事人和对方称呼可以暂不填写；当前会话当事人会在图谱更新后单独确认。
       </div>
       <div class="tracked-onboarding-subtitle">
-        当前聊天记录仍会保存在会话历史中；选择持续跟踪后，系统会把案情整理为可持续维护的结构化案情。
+        责任实体会从会话图谱自动进入案卷，不需要在这里手动补全。
       </div>
     </div>
 
@@ -1821,22 +1821,22 @@
         <el-input
           v-model="trackedOnboardingForm.primary_label"
           maxlength="100"
-          placeholder="主要当事人称呼，例如：我"
+          placeholder="主要当事人称呼（可选）"
         />
         <el-input
           v-model="trackedOnboardingForm.primary_role"
           maxlength="100"
-          placeholder="主要当事人角色，例如：劳动者"
+          placeholder="主要当事人角色（可选）"
         />
         <el-input
           v-model="trackedOnboardingForm.opposing_label"
           maxlength="100"
-          placeholder="对方称呼，例如：公司"
+          placeholder="对方称呼（可选）"
         />
         <el-input
           v-model="trackedOnboardingForm.opposing_role"
           maxlength="100"
-          placeholder="对方角色，例如：用人单位"
+          placeholder="对方角色（可选）"
         />
       </div>
       <div class="tracked-onboarding-hint">
@@ -2747,10 +2747,10 @@ function resetDossierDetailForm() {
 function resetTrackedOnboardingForm(caseType = '') {
   const defaults = defaultParticipantDrafts(caseType)
   trackedOnboardingForm.title = defaults.title
-  trackedOnboardingForm.primary_label = defaults.primary_label
-  trackedOnboardingForm.primary_role = defaults.primary_role
-  trackedOnboardingForm.opposing_label = defaults.opposing_label
-  trackedOnboardingForm.opposing_role = defaults.opposing_role
+  trackedOnboardingForm.primary_label = ''
+  trackedOnboardingForm.primary_role = ''
+  trackedOnboardingForm.opposing_label = ''
+  trackedOnboardingForm.opposing_role = ''
 }
 
 function clearTrackedOnboardingState() {
@@ -5067,13 +5067,9 @@ async function handleConfirmTrackedOnboarding() {
   if (!conversationId) return
 
   const title = String(trackedOnboardingForm.title || '').trim()
-  const primaryLabel = String(trackedOnboardingForm.primary_label || '').trim()
-  const primaryRole = String(trackedOnboardingForm.primary_role || '').trim()
-  const opposingLabel = String(trackedOnboardingForm.opposing_label || '').trim()
-  const opposingRole = String(trackedOnboardingForm.opposing_role || '').trim()
 
-  if (!title || !primaryLabel || !primaryRole || !opposingLabel || !opposingRole) {
-    ElMessage.warning('请先补全案卷名称和当事人称呼')
+  if (!title) {
+    ElMessage.warning('请先填写案卷名称')
     return
   }
 
@@ -5107,11 +5103,14 @@ async function handleConfirmTrackedOnboarding() {
       }
     }
 
-    const { data: participantsData } = await updateDossierParticipants(dossierId, {
-      participant_aliases: buildParticipantAliasesPayload(trackedOnboardingForm),
-    })
-    if (participantsData?.dossier) {
-      upsertDossierLocal(participantsData.dossier)
+    const participantAliases = buildParticipantAliasesPayload(trackedOnboardingForm)
+    if (Object.keys(participantAliases).length > 0) {
+      const { data: participantsData } = await updateDossierParticipants(dossierId, {
+        participant_aliases: participantAliases,
+      })
+      if (participantsData?.dossier) {
+        upsertDossierLocal(participantsData.dossier)
+      }
     }
 
     const { data: consentData } = await setConversationModeConsent(conversationId, {
@@ -5977,18 +5976,26 @@ function isParticipantCandidateCreateOpen(candidate) {
 }
 
 function buildParticipantAliasesPayload(form) {
-  return {
-    primary_party: {
+  const primaryLabel = String(form.primary_label || '').trim()
+  const primaryRole = String(form.primary_role || '').trim()
+  const opposingLabel = String(form.opposing_label || '').trim()
+  const opposingRole = String(form.opposing_role || '').trim()
+  const payload = {}
+  if (primaryLabel && primaryRole) {
+    payload.primary_party = {
       label: String(form.primary_label || '').trim(),
       role: String(form.primary_role || '').trim(),
       party_side: 'claimant',
-    },
-    opposing_party: {
+    }
+  }
+  if (opposingLabel && opposingRole) {
+    payload.opposing_party = {
       label: String(form.opposing_label || '').trim(),
       role: String(form.opposing_role || '').trim(),
       party_side: 'opponent',
-    },
+    }
   }
+  return payload
 }
 
 function resolveTrackedOnboardingDossierSeed(conversationId) {
@@ -6003,11 +6010,13 @@ function resolveTrackedOnboardingDossierSeed(conversationId) {
   const defaults = defaultParticipantDrafts(conversation?.case_type || '')
   trackedOnboardingState.dossierId = boundDossierId
   trackedOnboardingForm.title = boundDossier?.title || defaults.title
-  applyParticipantAliasesToForm(
-    trackedOnboardingForm,
-    boundDossier?.participant_aliases || {},
-    conversation?.case_type || ''
-  )
+  const participantAliases = boundDossier?.participant_aliases || {}
+  const primary = participantAliases?.primary_party || {}
+  const opposing = participantAliases?.opposing_party || {}
+  trackedOnboardingForm.primary_label = primary.label || ''
+  trackedOnboardingForm.primary_role = primary.role || ''
+  trackedOnboardingForm.opposing_label = opposing.label || ''
+  trackedOnboardingForm.opposing_role = opposing.role || ''
 }
 
 function finalizeTrackedOnboarding(result) {
