@@ -299,7 +299,7 @@ def test_pending_identity_candidate_becomes_task() -> None:
     display_graph = _build_display_graph(raw_graph_payload)
     participant_candidates = [
         {
-            "task_type": "cross_conversation_entity_resolution",
+            "task_type": "identity",
             "task_key": "candidate:a-company",
             "suggested_label": "A公司",
             "raw_labels": ["A公司"],

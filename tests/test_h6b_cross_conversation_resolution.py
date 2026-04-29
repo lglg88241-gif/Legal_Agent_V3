@@ -21,7 +21,7 @@ def _find_cross_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, A
     return [
         candidate
         for candidate in candidates
-        if candidate.get("task_type") == "cross_conversation_entity_resolution"
+        if candidate.get("task_type") == "identity"
     ]
 
 

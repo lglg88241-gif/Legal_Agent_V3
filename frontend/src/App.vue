@@ -898,7 +898,7 @@
               当前只在案卷内确认跨会话主体关系，不会自动与其他案卷的同名实体合并。
             </div>
             <div class="dossier-participants-hint">
-              raw-label 线索和 generic 泛称仍会保留，但不会直接变成已确认主体。
+              其他任务类型线索和 generic 泛称仍会保留，但不会直接变成已确认主体。
             </div>
             <div class="dossier-participant-summary-grid">
               <div class="dossier-participant-summary-card">
@@ -1351,7 +1351,7 @@
       v-if="selectedDossierRawLabelCandidates.length"
       class="dossier-participants-hint"
     >
-      {{ `另外 ${selectedDossierRawLabelCandidates.length} 条 raw-label 线索已降级到高级/调试详情，不作为普通用户主确认任务。` }}
+      {{ `另外 ${selectedDossierRawLabelCandidates.length} 条其他主体线索已降级到高级/调试详情，不作为普通用户主确认任务。` }}
     </div>
     <div
       v-if="selectedDossierParticipantCandidates.length"
@@ -1700,7 +1700,7 @@
     <div v-else class="dossier-graph-empty">
       {{
         selectedDossierRawLabelCandidates.length
-          ? '当前没有待确认的跨会话主体关系。其他 raw-label 线索已放入高级/调试详情。'
+          ? '当前没有待确认的跨会话主体关系。其他主体线索已放入高级/调试详情。'
           : '当前没有待确认的主体线索。'
       }}
     </div>
@@ -2563,7 +2563,7 @@ function openParticipantCandidateDialog() {
   if (!selectedDossierPendingParticipantCount.value) {
     if (selectedDossierRawLabelCandidates.value.length) {
       openParticipantAdvancedPanel('participants')
-      ElMessage.info('当前没有待确认的跨会话主体关系，其他 raw-label 线索已放入高级/调试详情')
+      ElMessage.info('当前没有待确认的跨会话主体关系，其他主体线索已放入高级/调试详情')
       return
     }
     ElMessage.info('当前没有待确认的主体线索')
@@ -5269,7 +5269,7 @@ function candidateTaskType(candidate) {
 }
 
 function isCrossConversationCandidate(candidate) {
-  return candidateTaskType(candidate) === 'cross_conversation_entity_resolution'
+  return ['identity', 'cross_conversation_entity_resolution'].includes(candidateTaskType(candidate))
 }
 
 function sortParticipantCandidates(candidates) {
@@ -5277,7 +5277,7 @@ function sortParticipantCandidates(candidates) {
     const leftTaskType = candidateTaskType(left)
     const rightTaskType = candidateTaskType(right)
     if (leftTaskType !== rightTaskType) {
-      return leftTaskType === 'cross_conversation_entity_resolution' ? -1 : 1
+      return isCrossConversationCandidate(left) ? -1 : 1
     }
 
     const leftLabelKind = candidateLabelKind(left)

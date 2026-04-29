@@ -464,7 +464,6 @@ def test_build_dossier_participant_candidates_does_not_auto_confirm() -> None:
     assert company_candidate["label_kind"] == "generic"
     assert company_candidate["existing_participant_id"] is None
     assert company_candidate["can_create_new"] is False
-    return
 
     candidates = build_dossier_participant_candidates(
         graph_payload={
@@ -1054,7 +1053,7 @@ def test_build_dossier_participant_candidates_returns_generic_tasks_without_auto
     assert company_candidate["mentions"][0]["graph_node_type"] == "organization"
 
 
-def test_build_dossier_participant_candidates_skips_role_person_single_occurrence_task() -> None:
+def test_build_dossier_participant_candidates_classifies_role_person_single_occurrence_as_affiliation_relation() -> None:
     candidates = build_dossier_participant_candidates(
         graph_payload={
             "graph": {
@@ -1073,6 +1072,9 @@ def test_build_dossier_participant_candidates_skips_role_person_single_occurrenc
     assert company_candidate["label_kind"] == "specific"
     assert company_candidate["can_create_new"] is True
     assert company_candidate["existing_participant_id"] is None
+    role_candidate = next(candidate for candidate in candidates if candidate["task_type"] == "affiliation_relation")
+    assert role_candidate["can_create_new"] is False
+    assert role_candidate["can_link_existing"] is False
     assert all(candidate["raw_label"] != "王经理" for candidate in candidates)
 
 

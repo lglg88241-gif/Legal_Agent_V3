@@ -1643,6 +1643,127 @@ def is_role_person_label(
     return any(normalized_label.endswith(token) for token in role_tokens)
 
 
+def _is_organization_like_resolution_node(
+    node_record: dict[str, Any],
+    *,
+    confirmed_person_labels: set[str] | None = None,
+) -> bool:
+    raw_label = str(node_record.get("raw_label") or node_record.get("graph_node_label") or "").strip()
+    if not raw_label:
+        return False
+    if is_role_person_label(raw_label, confirmed_person_labels=confirmed_person_labels):
+        return False
+
+    entity_type = str(node_record.get("entity_type") or "unknown").strip() or "unknown"
+    if entity_type == "organization":
+        return True
+
+    graph_node_type = _normalized_resolution_graph_node_type(node_record)
+    if graph_node_type in {"organization", "company", "employer", "组织", "公司", "用人单位"}:
+        return True
+
+    return any(token in raw_label for token in ORGANIZATION_LABEL_TOKENS)
+
+
+def _build_organization_labels_by_conversation(
+    graph_node_records: list[dict[str, Any]],
+    *,
+    confirmed_person_labels: set[str] | None = None,
+) -> dict[int, list[str]]:
+    labels_by_conversation: dict[int, list[str]] = {}
+    seen_by_conversation: dict[int, set[str]] = {}
+
+    for node_record in graph_node_records:
+        conversation_id = int(node_record.get("conversation_id") or 0)
+        if conversation_id <= 0:
+            continue
+        if not _is_organization_like_resolution_node(
+            node_record,
+            confirmed_person_labels=confirmed_person_labels,
+        ):
+            continue
+
+        label = _display_label(
+            str(node_record.get("graph_node_label") or "").strip(),
+            str(node_record.get("raw_label") or "").strip(),
+        )
+        normalized_label = _normalized_label_key(label)
+        if not normalized_label:
+            continue
+
+        conversation_seen = seen_by_conversation.setdefault(conversation_id, set())
+        if normalized_label in conversation_seen:
+            continue
+        conversation_seen.add(normalized_label)
+        labels_by_conversation.setdefault(conversation_id, []).append(label)
+
+    return labels_by_conversation
+
+
+def _candidate_mentions_are_not_actionable(
+    mentions: list[dict[str, Any]],
+) -> bool:
+    mention_types = [
+        _normalized_resolution_graph_node_type(item)
+        for item in mentions
+        if _normalized_resolution_graph_node_type(item)
+    ]
+    if not mention_types:
+        return False
+    return all(node_type in PARTICIPANT_NON_RESOLVABLE_GRAPH_NODE_TYPES for node_type in mention_types)
+
+
+def _candidate_related_organization_labels(
+    mentions: list[dict[str, Any]],
+    *,
+    organization_labels_by_conversation: dict[int, list[str]] | None = None,
+) -> list[str]:
+    related_labels: list[str] = []
+    seen_labels: set[str] = set()
+    if not isinstance(organization_labels_by_conversation, dict):
+        return related_labels
+
+    for mention in mentions:
+        conversation_id = int(mention.get("conversation_id") or 0)
+        if conversation_id <= 0:
+            continue
+        for label in organization_labels_by_conversation.get(conversation_id, []):
+            normalized_label = _normalized_label_key(label)
+            if not normalized_label or normalized_label in seen_labels:
+                continue
+            seen_labels.add(normalized_label)
+            related_labels.append(label)
+
+    return related_labels
+
+
+def _classify_candidate_task_type(
+    *,
+    raw_label: str,
+    mentions: list[dict[str, Any]],
+    confirmed_person_labels: set[str] | None = None,
+    organization_labels_by_conversation: dict[int, list[str]] | None = None,
+) -> tuple[str, list[str]]:
+    normalized_label = _normalized_label_key(raw_label)
+
+    if _candidate_mentions_are_not_actionable(mentions):
+        return "not_actionable", []
+
+    if is_self_anchor_participant_label(raw_label) or normalized_label in {"当事人", "劳动者", "员工", "本人"}:
+        return "party_naming", []
+
+    if is_role_person_label(raw_label, confirmed_person_labels=confirmed_person_labels):
+        related_organization_labels = _candidate_related_organization_labels(
+            mentions,
+            organization_labels_by_conversation=organization_labels_by_conversation,
+        )
+        if any(token in raw_label for token in ORGANIZATION_LABEL_TOKENS) or len(related_organization_labels) == 1:
+            return "affiliation_relation", related_organization_labels
+        return "relation_only", related_organization_labels
+
+    return "raw_label_resolution", []
+
+
 def _display_label(value: str | None, fallback: str) -> str:
     cleaned = " ".join((value or "").strip().split())
     return cleaned or fallback
@@ -1872,11 +1993,26 @@ def _build_generic_match_candidates(
 
 def _build_candidate_reason(
     *,
+    task_type: str,
     raw_label: str,
     label_kind: str,
     exact_match_type: str | None,
     has_match_candidates: bool,
+    related_organization_labels: list[str] | None = None,
 ) -> str:
+    if task_type == "party_naming":
+        return f"“{raw_label}”是案卷中的自我指代，需要先确认它在当前案卷中的主体称呼。"
+    if task_type == "affiliation_relation":
+        if related_organization_labels:
+            return (
+                f"“{raw_label}”更像角色或职务主体，当前应优先确认它与“{related_organization_labels[0]}”"
+                "之间是否存在代表、任职或隶属关系。"
+            )
+        return f"“{raw_label}”更像角色或职务主体，应优先作为代表/隶属关系线索处理，而不是主体同一性确认。"
+    if task_type == "relation_only":
+        return f"“{raw_label}”更像关系主体或通知方线索，暂不应直接进入主体同一性确认任务。"
+    if task_type == "not_actionable":
+        return f"“{raw_label}”当前更像事实、事件或证据对象，不适合作为主体确认任务。"
     if exact_match_type == "exact_label":
         return f"“{raw_label}”与已有主体显示名精确匹配。"
     if exact_match_type == "exact_alias":
@@ -1896,19 +2032,20 @@ def _build_candidate_payload(
     participants: list[DossierParticipant],
     participant_aliases: dict[str, Any] | None = None,
     confirmed_person_labels: set[str] | None = None,
+    organization_labels_by_conversation: dict[int, list[str]] | None = None,
 ) -> dict[str, Any] | None:
     if not mentions:
-        return None
-    if is_role_person_label(raw_label, confirmed_person_labels=confirmed_person_labels):
-        logger.debug(
-            "Skipping raw_label_resolution for role-like person label | label=%s reason=role_person_excluded_from_identity",
-            raw_label,
-        )
         return None
 
     candidate_shape = _infer_candidate_shape(
         raw_label,
         participant_aliases=participant_aliases,
+    )
+    task_type, related_organization_labels = _classify_candidate_task_type(
+        raw_label=raw_label,
+        mentions=mentions,
+        confirmed_person_labels=confirmed_person_labels,
+        organization_labels_by_conversation=organization_labels_by_conversation,
     )
     exact_label_matches = _find_exact_label_matches(participants, raw_label)
     existing_participant, exact_match_type = _select_exact_candidate_participant(
@@ -1949,10 +2086,11 @@ def _build_candidate_payload(
 
     raw_labels = list(dict.fromkeys(item["raw_label"] for item in mentions if item.get("raw_label")))
     serialized_mentions = [_serialize_resolution_node_record(item) for item in mentions]
+    is_primary_resolution_task = task_type == "raw_label_resolution"
     return {
         "candidate_key": candidate_key,
         "task_key": candidate_key,
-        "task_type": "raw_label_resolution",
+        "task_type": task_type,
         "raw_label": raw_label,
         "raw_labels": raw_labels,
         "suggested_label": candidate_shape["suggested_label"],
@@ -1961,23 +2099,26 @@ def _build_candidate_payload(
         "party_side": candidate_shape["party_side"],
         "entity_type": candidate_shape["entity_type"],
         "reason": _build_candidate_reason(
+            task_type=task_type,
             raw_label=raw_label,
             label_kind=candidate_shape["label_kind"],
             exact_match_type=exact_match_type,
-            has_match_candidates=bool(match_candidates),
+            has_match_candidates=bool(match_candidates) if is_primary_resolution_task else False,
+            related_organization_labels=related_organization_labels,
         ),
         "mentions": serialized_mentions,
-        "match_candidates": match_candidates,
+        "match_candidates": match_candidates if is_primary_resolution_task else [],
         "existing_participant_id": existing_participant.id if existing_participant is not None else None,
         "existing_participant_label": existing_participant.label if existing_participant is not None else "",
         "recommended_participant_id": existing_participant.id if existing_participant is not None else None,
         "recommended_participant_label": existing_participant.label if existing_participant is not None else "",
         "confidence": None,
-        "can_create_new": candidate_shape["label_kind"] == "specific",
-        "can_link_existing": bool(participants),
-        "can_mark_non_entity": candidate_shape["label_kind"] == "generic",
+        "can_create_new": is_primary_resolution_task and candidate_shape["label_kind"] == "specific",
+        "can_link_existing": is_primary_resolution_task and bool(participants),
+        "can_mark_non_entity": is_primary_resolution_task and candidate_shape["label_kind"] == "generic",
         "can_mark_not_same": False,
         "can_skip": True,
+        "related_organization_labels": related_organization_labels,
     }
 
 
@@ -2398,7 +2539,7 @@ def _build_cross_conversation_entity_candidate(
     return {
         "candidate_key": candidate_key,
         "task_key": candidate_key,
-        "task_type": "cross_conversation_entity_resolution",
+        "task_type": "identity",
         "label_kind": label_kind,
         "raw_label": raw_label,
         "raw_labels": list(
@@ -2568,6 +2709,10 @@ def build_dossier_participant_candidates(
         if normalized_node is None:
             continue
         graph_node_records.append(normalized_node)
+    organization_labels_by_conversation = _build_organization_labels_by_conversation(
+        graph_node_records,
+        confirmed_person_labels=confirmed_person_labels,
+    )
 
     confirmed_graph_node_ids = {
         str(getattr(mention, "graph_node_id", "") or "").strip()
@@ -2623,6 +2768,7 @@ def build_dossier_participant_candidates(
             participants=participants,
             participant_aliases=normalized_aliases,
             confirmed_person_labels=confirmed_person_labels,
+            organization_labels_by_conversation=organization_labels_by_conversation,
         )
         if candidate is not None:
             task_candidates.append(candidate)
@@ -2636,9 +2782,18 @@ def build_dossier_participant_candidates(
     )
 
     combined_candidates = cross_conversation_candidates + task_candidates
+    task_type_priority = {
+        "identity": 0,
+        "party_naming": 1,
+        "affiliation_relation": 2,
+        "relation_only": 3,
+        "raw_label_resolution": 4,
+        "not_actionable": 5,
+        "cross_conversation_entity_resolution": 0,
+    }
     combined_candidates.sort(
         key=lambda item: (
-            0 if str(item.get("task_type") or "") == "cross_conversation_entity_resolution" else 1,
+            task_type_priority.get(str(item.get("task_type") or ""), 9),
             0 if str(item.get("label_kind") or "") in {"specific", "mixed"} else 1,
             str(item.get("raw_label") or ""),
         )

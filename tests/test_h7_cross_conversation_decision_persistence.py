@@ -94,7 +94,7 @@ def test_cross_conversation_not_same_decision_filters_pair_and_reverse_pair() ->
     cross_candidates = [
         candidate
         for candidate in candidates
-        if candidate.get("task_type") == "cross_conversation_entity_resolution"
+        if candidate.get("task_type") == "identity"
     ]
     assert cross_candidates == []
 
@@ -117,7 +117,7 @@ def test_cross_conversation_same_label_company_candidate_still_generates_without
     cross_candidates = [
         candidate
         for candidate in candidates
-        if candidate.get("task_type") == "cross_conversation_entity_resolution"
+        if candidate.get("task_type") == "identity"
     ]
     assert len(cross_candidates) == 1
     assert cross_candidates[0]["confidence"] == "high"
@@ -149,7 +149,7 @@ def test_self_anchor_resolution_decision_does_not_filter_cross_conversation_iden
     cross_candidates = [
         candidate
         for candidate in candidates
-        if candidate.get("task_type") == "cross_conversation_entity_resolution"
+        if candidate.get("task_type") == "identity"
     ]
     assert len(cross_candidates) == 1
 

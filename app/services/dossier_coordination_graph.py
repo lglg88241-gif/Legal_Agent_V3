@@ -835,7 +835,8 @@ def _build_pending_identity_entities_and_tasks(
     for index, candidate in enumerate(participant_candidates or [], start=1):
         if not isinstance(candidate, dict):
             continue
-        if _normalize_text(candidate.get("task_type")) != "cross_conversation_entity_resolution":
+        candidate_task_type = _normalize_text(candidate.get("task_type"))
+        if candidate_task_type not in {"identity", "cross_conversation_entity_resolution"}:
             continue
 
         source_node = candidate.get("source_node") if isinstance(candidate.get("source_node"), dict) else {}
