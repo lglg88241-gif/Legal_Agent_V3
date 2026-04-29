@@ -779,20 +779,8 @@
                   class="dossier-coordination-group dossier-coordination-task-section"
                 >
                   <div class="dossier-detail-conversations-title">待命名确认</div>
-                  <div v-if="dossierIntelligenceLoading" class="dossier-list-status">
-                    正在加载命名确认任务...
-                  </div>
                   <div
-                    v-else-if="
-                      dossierIntelligenceState.error &&
-                      !selectedDossierCoordinationPartyNamingTasks.length
-                    "
-                    class="dossier-graph-warning dossier-graph-warning-soft"
-                  >
-                    {{ dossierIntelligenceState.error }}
-                  </div>
-                  <div
-                    v-else-if="selectedDossierCoordinationPartyNamingTasks.length"
+                    v-if="selectedDossierCoordinationPartyNamingTasks.length"
                     class="dossier-intelligence-task-list"
                   >
                     <div
@@ -858,6 +846,15 @@
                         <span>确认后会写入案卷主体 overlay，并刷新实体连接和图谱预览。</span>
                       </div>
                     </div>
+                  </div>
+                  <div v-else-if="dossierIntelligenceLoading" class="dossier-list-status">
+                    正在加载命名确认任务...
+                  </div>
+                  <div
+                    v-else-if="dossierIntelligenceState.error"
+                    class="dossier-graph-warning dossier-graph-warning-soft"
+                  >
+                    {{ dossierIntelligenceState.error }}
                   </div>
                   <div v-else class="dossier-coordination-empty">暂无待处理命名任务</div>
                 </div>
@@ -1713,6 +1710,90 @@
   </el-dialog>
 
   <el-dialog
+    v-model="partyNamingModalVisible"
+    title="确认当前会话当事人"
+    width="520px"
+    :close-on-click-modal="false"
+    :close-on-press-escape="false"
+    :show-close="false"
+    @closed="handlePartyNamingModalClosed"
+  >
+    <div class="party-naming-modal">
+      <div class="party-naming-title">
+        请确认当前会话中的“{{ activePartyNamingCurrentLabel }}”是谁？
+      </div>
+      <div class="party-naming-subtitle">
+        这个确认只作用于当前会话的当事人代称，不会合并其他会话里的“我/当事人”。
+      </div>
+
+      <div class="party-naming-meta">
+        <span>当前称呼</span>
+        <div class="party-naming-tags">
+          <el-tag
+            v-for="label in activePartyNamingRawLabels"
+            :key="`party-naming-raw-${label}`"
+            size="small"
+            effect="plain"
+          >
+            {{ label }}
+          </el-tag>
+          <span v-if="!activePartyNamingRawLabels.length">未标注</span>
+        </div>
+      </div>
+
+      <div class="party-naming-meta">
+        <span>建议称呼</span>
+        <div class="party-naming-tags">
+          <el-button
+            v-for="label in activePartyNamingSuggestedLabels"
+            :key="`party-naming-suggested-${label}`"
+            size="small"
+            text
+            @click="partyNamingInput = label"
+          >
+            {{ label }}
+          </el-button>
+          <span v-if="!activePartyNamingSuggestedLabels.length">可直接填写真实姓名或代称</span>
+        </div>
+      </div>
+
+      <el-input
+        v-model="partyNamingInput"
+        maxlength="50"
+        clearable
+        placeholder="例如：张三"
+        :disabled="partyNamingSubmitting"
+        @keyup.enter="handleConfirmPartyNamingModal"
+      />
+
+      <el-alert
+        v-if="partyNamingError"
+        class="party-naming-error"
+        type="error"
+        :title="partyNamingError"
+        show-icon
+        :closable="false"
+      />
+    </div>
+
+    <template #footer>
+      <div class="party-naming-actions">
+        <el-button @click="handleDismissPartyNamingModal" :disabled="partyNamingSubmitting">
+          暂不确认
+        </el-button>
+        <el-button
+          type="primary"
+          :loading="partyNamingSubmitting"
+          :disabled="!partyNamingInput.trim()"
+          @click="handleConfirmPartyNamingModal"
+        >
+          确认
+        </el-button>
+      </div>
+    </template>
+  </el-dialog>
+
+  <el-dialog
     v-model="trackedOnboardingVisible"
     title="案卷初始化"
     width="520px"
@@ -1892,6 +1973,12 @@ const dossierCoordinationGraphLoading = ref(false)
 const dossierCoordinationSections = ref([])
 const dossierIntelligenceLoading = ref(false)
 const dossierPartyNamingSubmittingKey = ref('')
+const partyNamingModalVisible = ref(false)
+const activePartyNamingTask = ref(null)
+const partyNamingInput = ref('')
+const partyNamingSubmitting = ref(false)
+const partyNamingError = ref('')
+const dismissedPartyNamingTaskIds = ref(new Set())
 const dossierCoordinationNamingRef = ref(null)
 const dossierSelfIdentityTaskStates = reactive({})
 const trackedOnboardingVisible = ref(false)
@@ -1948,6 +2035,14 @@ const dossierCoordinationGraphState = reactive({
   error: '',
 })
 const dossierPartyNamingDrafts = reactive({})
+const PARTY_NAMING_SELF_ANCHOR_LABELS = new Set([
+  '我',
+  '本人',
+  '当事人',
+  '劳动者',
+  '申请人',
+  '我们',
+])
 const dossierForm = reactive({
   title: '',
   case_type: '',
@@ -2235,7 +2330,7 @@ const selectedDossierCoordinationPendingNamingEntities = computed(() =>
 )
 const selectedDossierCoordinationIsolatedAnchorEntities = computed(() =>
   selectedDossierCoordinationEntities.value.filter(
-    (entity) => String(entity?.status || '').trim() === 'isolated_anchor'
+    (entity) => ['isolated_anchor', 'generic_label', 'unconfirmed_label'].includes(String(entity?.status || '').trim())
   )
 )
 const selectedDossierCoordinationIsEmpty = computed(
@@ -2277,6 +2372,12 @@ const selectedDossierCoordinationPartyNamingTasks = computed(() =>
     (task) => String(task?.task_type || '').trim() === 'party_naming'
   )
 )
+const activePartyNamingRawLabels = computed(() => partyNamingTaskRawLabels(activePartyNamingTask.value))
+const activePartyNamingSuggestedLabels = computed(() => partyNamingTaskSuggestedLabels(activePartyNamingTask.value))
+const activePartyNamingCurrentLabel = computed(() => {
+  const currentLabel = String(activePartyNamingTask.value?.current_label || '').trim()
+  return currentLabel || activePartyNamingRawLabels.value[0] || '当事人'
+})
 const selectedDossierCoordinationGraphConversationCount = computed(() => {
   const statsCount = Number(selectedDossierCoordinationStats.value.boundConversations || 0)
   if (statsCount > 0) return statsCount
@@ -2417,6 +2518,27 @@ watch(dossierDrawerVisible, (visible) => {
     resetParticipantCandidateCreateDraft()
   }
 })
+
+watch(
+  [
+    currentConversationId,
+    () => currentConversationDossierId(),
+    () => selectedDossierCoordinationPartyNamingTasks.value.map((task) => dossierIntelligenceTaskKey(task)).join('|'),
+  ],
+  () => {
+    if (
+      partyNamingModalVisible.value &&
+      activePartyNamingTask.value &&
+      !partyNamingTaskSourceConversationIds(activePartyNamingTask.value).includes(Number(currentConversationId.value || 0))
+    ) {
+      partyNamingModalVisible.value = false
+      activePartyNamingTask.value = null
+      partyNamingInput.value = ''
+      partyNamingError.value = ''
+    }
+    detectPendingPartyNamingForCurrentConversation()
+  }
+)
 
 function componentLabel(value) {
   return value === 'connected' ? '已连接' : '加载中'
@@ -2725,6 +2847,11 @@ function resetDossierIntelligenceState() {
   dossierIntelligenceState.traceWarnings = []
   dossierIntelligenceState.error = ''
   dossierPartyNamingSubmittingKey.value = ''
+  partyNamingModalVisible.value = false
+  activePartyNamingTask.value = null
+  partyNamingInput.value = ''
+  partyNamingSubmitting.value = false
+  partyNamingError.value = ''
   clearPartyNamingDrafts()
   clearSelfIdentityTaskStates()
 }
@@ -2755,6 +2882,7 @@ function applyDossierIntelligencePayload(dossierId, payload) {
   dossierIntelligenceState.error = ''
   syncPartyNamingDrafts(dossierIntelligenceState.confirmationTasks)
   syncSelfIdentityTaskStates(dossierIntelligenceState.confirmationTasks)
+  detectPendingPartyNamingForCurrentConversation()
 }
 
 function dossierIntelligenceTaskKey(task) {
@@ -2789,6 +2917,97 @@ function dossierIntelligenceTaskKey(task) {
     .join(':')
 
   return base || 'intelligence-task:party-naming'
+}
+
+function partyNamingTaskEvidence(task) {
+  return task?.evidence && typeof task.evidence === 'object' ? task.evidence : {}
+}
+
+function partyNamingTaskSourceConversationIds(task) {
+  const evidence = partyNamingTaskEvidence(task)
+  const values = [
+    ...(Array.isArray(task?.source_conversation_ids) ? task.source_conversation_ids : []),
+    ...(Array.isArray(evidence.source_conversation_ids) ? evidence.source_conversation_ids : []),
+  ]
+  return [...new Set(
+    values
+      .map((item) => Number(item || 0))
+      .filter((item) => Number.isInteger(item) && item > 0)
+  )]
+}
+
+function partyNamingTaskRawLabels(task) {
+  const evidence = partyNamingTaskEvidence(task)
+  const labels = [
+    String(task?.current_label || '').trim(),
+    ...(Array.isArray(task?.raw_labels) ? task.raw_labels : []),
+    ...(Array.isArray(evidence.raw_labels) ? evidence.raw_labels : []),
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+  return labels.filter((label, index) => labels.indexOf(label) === index)
+}
+
+function partyNamingTaskSuggestedLabels(task) {
+  const labels = [
+    ...(Array.isArray(task?.suggested_names) ? task.suggested_names : []),
+    ...(Array.isArray(task?.suggested_labels) ? task.suggested_labels : []),
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+  return labels.filter((label, index) => labels.indexOf(label) === index)
+}
+
+function isPendingSelfAnchorPartyNamingTask(task) {
+  const taskType = String(task?.task_type || task?.type || '').trim()
+  if (taskType !== 'party_naming') return false
+
+  const status = String(task?.status || 'pending').trim() || 'pending'
+  if (status !== 'pending') return false
+
+  const subject = String(task?.subject || 'self_anchor').trim() || 'self_anchor'
+  if (subject !== 'self_anchor') return false
+
+  const labels = partyNamingTaskRawLabels(task)
+  return labels.some((label) => PARTY_NAMING_SELF_ANCHOR_LABELS.has(label))
+}
+
+function currentConversationDossierId() {
+  return Number(currentConversation.value?.dossier_id || 0)
+}
+
+function findPendingPartyNamingTaskForCurrentConversation() {
+  const conversationId = Number(currentConversationId.value || 0)
+  const dossierId = currentConversationDossierId()
+  if (conversationId <= 0 || dossierId <= 0) return null
+  if (Number(dossierIntelligenceState.dossierId || 0) !== dossierId) return null
+
+  return selectedDossierCoordinationPartyNamingTasks.value.find((task) => {
+    if (!isPendingSelfAnchorPartyNamingTask(task)) return false
+    if (dismissedPartyNamingTaskIds.value.has(dossierIntelligenceTaskKey(task))) return false
+    return partyNamingTaskSourceConversationIds(task).includes(conversationId)
+  }) || null
+}
+
+function detectPendingPartyNamingForCurrentConversation() {
+  if (partyNamingSubmitting.value || partyNamingModalVisible.value) return
+
+  const task = findPendingPartyNamingTaskForCurrentConversation()
+  if (!task) return
+
+  const taskKey = dossierIntelligenceTaskKey(task)
+  activePartyNamingTask.value = task
+  const existingDraft = String(dossierPartyNamingDrafts[taskKey] || '').trim()
+  const rawLabels = partyNamingTaskRawLabels(task)
+  const suggestedLabels = partyNamingTaskSuggestedLabels(task)
+  partyNamingInput.value =
+    existingDraft &&
+    !rawLabels.includes(existingDraft) &&
+    !suggestedLabels.includes(existingDraft)
+      ? existingDraft
+      : ''
+  partyNamingError.value = ''
+  partyNamingModalVisible.value = true
 }
 
 function dossierSelfIdentityTaskKey(task) {
@@ -2922,22 +3141,22 @@ function canSubmitPartyNaming(task) {
 
 function buildPartyNamingConfirmPayload(task, displayLabel) {
   const evidence = task?.evidence && typeof task.evidence === 'object' ? task.evidence : {}
+  const rawLabels = partyNamingTaskRawLabels(task)
+  const conversationIds = partyNamingTaskSourceConversationIds(task)
+  const rawNodeIds = [
+    ...(Array.isArray(task?.raw_node_ids) ? task.raw_node_ids : []),
+    ...(Array.isArray(evidence.raw_node_ids) ? evidence.raw_node_ids : []),
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
   return {
     display_label: String(displayLabel || '').trim(),
     source_task: {
       subject: String(task?.subject || 'self_anchor').trim() || 'self_anchor',
       evidence: {
-        raw_labels: Array.isArray(evidence.raw_labels)
-          ? evidence.raw_labels.map((item) => String(item || '').trim()).filter(Boolean)
-          : [],
-        source_conversation_ids: Array.isArray(evidence.source_conversation_ids)
-          ? evidence.source_conversation_ids
-            .map((item) => Number(item || 0))
-            .filter((item) => Number.isInteger(item) && item > 0)
-          : [],
-        raw_node_ids: Array.isArray(evidence.raw_node_ids)
-          ? evidence.raw_node_ids.map((item) => String(item || '').trim()).filter(Boolean)
-          : [],
+        raw_labels: rawLabels,
+        source_conversation_ids: conversationIds,
+        raw_node_ids: rawNodeIds.filter((item, index) => rawNodeIds.indexOf(item) === index),
       },
     },
   }
@@ -3137,7 +3356,22 @@ function stopGraphRefreshPolling(options = {}) {
   }
   if (options?.status) {
     setGraphSyncState(options.status, options.summary || '')
+    if (options.status !== 'error' && options.refreshDossierAfterGraph !== false) {
+      void refreshCurrentDossierAfterGraphSync()
+    }
   }
+}
+
+async function refreshCurrentDossierAfterGraphSync() {
+  const dossierId = currentConversationDossierId()
+  if (dossierId <= 0) return
+
+  selectedDossierId.value = dossierId
+  await Promise.allSettled([
+    loadSelectedDossierCoordinationGraph(dossierId, { silent: true }),
+    loadSelectedDossierIntelligence(dossierId),
+  ])
+  detectPendingPartyNamingForCurrentConversation()
 }
 
 function buildMessageViewModel(message, index = 0) {
@@ -3574,26 +3808,67 @@ function selfIdentityTaskErrorMessage(error, fallback = '确认失败') {
   )
 }
 
-async function handleConfirmPartyNaming(task) {
-  const dossierId = Number(selectedDossierId.value || 0)
+function partyNamingErrorMessage(error, fallback = '确认主体名称失败') {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (Array.isArray(detail) && detail.length) {
+    return detail
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object') return item.msg || item.message || ''
+        return ''
+      })
+      .filter(Boolean)
+      .join('；') || fallback
+  }
+  return error?.message || fallback
+}
+
+async function submitPartyNamingTask(task, displayLabel, options = {}) {
+  const dossierId = Number(dossierIntelligenceState.dossierId || selectedDossierId.value || currentConversationDossierId() || 0)
   if (dossierId <= 0) {
-    ElMessage.error('当前案卷不可用')
-    return
+    const message = '当前案卷不可用'
+    if (options.showInlineError) partyNamingError.value = message
+    ElMessage.error(message)
+    return false
   }
 
   const taskKey = dossierIntelligenceTaskKey(task)
-  const displayLabel = String(dossierPartyNamingDrafts[taskKey] || '').trim()
-  if (!displayLabel) {
-    ElMessage.warning('请输入该主体在本案中的名称或代称')
-    return
+  const normalizedLabel = String(displayLabel || '').trim()
+  if (!normalizedLabel) {
+    const message = '请输入该主体在本案中的名称或代称'
+    if (options.showInlineError) partyNamingError.value = message
+    ElMessage.warning(message)
+    return false
   }
 
   dossierPartyNamingSubmittingKey.value = taskKey
+  partyNamingSubmitting.value = true
   try {
-    await confirmDossierPartyNaming(
+    const { data } = await confirmDossierPartyNaming(
       dossierId,
-      buildPartyNamingConfirmPayload(task, displayLabel),
+      buildPartyNamingConfirmPayload(task, normalizedLabel),
     )
+
+    if (data?.status && data.status !== 'success') {
+      throw new Error(data.message || '确认主体名称失败')
+    }
+
+    if (options.dismissTaskOnSuccess !== false) {
+      const nextDismissed = new Set(dismissedPartyNamingTaskIds.value)
+      nextDismissed.add(taskKey)
+      dismissedPartyNamingTaskIds.value = nextDismissed
+    }
+
+    dossierPartyNamingSubmittingKey.value = ''
+    partyNamingSubmitting.value = false
+
+    if (options.closeModalOnSuccess) {
+      partyNamingModalVisible.value = false
+      activePartyNamingTask.value = null
+      partyNamingInput.value = ''
+      partyNamingError.value = ''
+    }
 
     const refreshed = await refreshSelectedDossierAfterPartyNaming(dossierId)
     if (refreshed) {
@@ -3601,15 +3876,51 @@ async function handleConfirmPartyNaming(task) {
     } else {
       ElMessage.warning('已确认主体名称，部分视图刷新失败，请手动刷新')
     }
+    return true
   } catch (error) {
     console.error('Failed to confirm dossier party naming:', error)
-    const detail =
-      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
-        ? error.response.data.detail
-        : '确认主体名称失败'
+    const detail = partyNamingErrorMessage(error)
+    if (options.showInlineError) partyNamingError.value = detail
     ElMessage.error(detail)
+    return false
   } finally {
     dossierPartyNamingSubmittingKey.value = ''
+    partyNamingSubmitting.value = false
+  }
+}
+
+async function handleConfirmPartyNaming(task) {
+  const taskKey = dossierIntelligenceTaskKey(task)
+  const displayLabel = String(dossierPartyNamingDrafts[taskKey] || '').trim()
+  await submitPartyNamingTask(task, displayLabel)
+}
+
+async function handleConfirmPartyNamingModal() {
+  if (!activePartyNamingTask.value) return
+  partyNamingError.value = ''
+  await submitPartyNamingTask(activePartyNamingTask.value, partyNamingInput.value, {
+    closeModalOnSuccess: true,
+    showInlineError: true,
+  })
+}
+
+function handleDismissPartyNamingModal() {
+  if (activePartyNamingTask.value) {
+    const nextDismissed = new Set(dismissedPartyNamingTaskIds.value)
+    nextDismissed.add(dossierIntelligenceTaskKey(activePartyNamingTask.value))
+    dismissedPartyNamingTaskIds.value = nextDismissed
+  }
+  partyNamingModalVisible.value = false
+  activePartyNamingTask.value = null
+  partyNamingInput.value = ''
+  partyNamingError.value = ''
+}
+
+function handlePartyNamingModalClosed() {
+  if (!partyNamingSubmitting.value && !partyNamingModalVisible.value) {
+    activePartyNamingTask.value = null
+    partyNamingInput.value = ''
+    partyNamingError.value = ''
   }
 }
 
@@ -3709,6 +4020,25 @@ function coordinationEntitySourceLabelText(entity) {
   return labels.length ? labels.join(' / ') : '暂无来源称呼'
 }
 
+function coordinationEntitySourceConversations(entity) {
+  const items = Array.isArray(entity?.source_conversations) ? entity.source_conversations : []
+  return items
+    .map((item) => {
+      const conversationId = Number(item?.conversation_id || 0)
+      return {
+        conversation_id: conversationId,
+        title: String(item?.title || '').trim() || formatGraphConversationLabel(conversationId),
+        source_labels: Array.isArray(item?.source_labels)
+          ? item.source_labels.map((label) => String(label || '').trim()).filter(Boolean)
+          : [],
+        fact_count: Number(item?.fact_count || 0),
+        relation_count: Number(item?.relation_count || 0),
+        is_best: Boolean(item?.is_best),
+      }
+    })
+    .filter((item) => item.conversation_id > 0)
+}
+
 function coordinationEntityStatusLabel(status) {
   switch (String(status || '').trim()) {
     case 'confirmed':
@@ -3719,6 +4049,10 @@ function coordinationEntityStatusLabel(status) {
       return '待命名主体'
     case 'isolated_anchor':
       return '未连接主体锚点'
+    case 'generic_label':
+      return '泛化称呼'
+    case 'unconfirmed_label':
+      return '未确认称呼'
     default:
       return '其他节点'
   }
@@ -3858,10 +4192,14 @@ function coordinationSupplementStatusLabel(node) {
 function buildCoordinationEntityGraphNode(entity) {
   const sourceConversationIds = normalizeGraphConversationIds(entity?.source_conversation_ids)
   const sourceLabels = coordinationEntitySourceLabels(entity)
+  const sourceConversations = coordinationEntitySourceConversations(entity)
   const rawNodeIds = coordinationEntityRawNodeIds(entity)
   const participantId = Number(entity?.participant_id || 0)
   const detailConversationId = coordinationEntityDetailConversationId(entity)
   const status = String(entity?.status || '').trim()
+  const aliases = Array.isArray(entity?.aliases)
+    ? entity.aliases.map((item) => String(item || '').trim()).filter(Boolean)
+    : sourceLabels.filter((item) => item !== String(entity?.label || '').trim())
   const reason =
     coordinationEntityIdentityReason(entity) ||
     String(entity?.best_conversation_reason || '').trim() ||
@@ -3873,6 +4211,7 @@ function buildCoordinationEntityGraphNode(entity) {
     category: status || 'other',
     categoryLabel: coordinationEntityStatusLabel(status),
     labels: sourceLabels,
+    sourceConversations,
     properties: {
       entity_type: entity?.entity_type,
       participant_id: participantId || undefined,
@@ -3887,15 +4226,18 @@ function buildCoordinationEntityGraphNode(entity) {
           ? formatGraphConversationListLabel(sourceConversationIds)
           : '会话未标注',
       },
+      ...(aliases.length ? [{ key: '别名', value: aliases.join(' / ') }] : []),
       ...(sourceLabels.length ? [{ key: '原始标签', value: sourceLabels.join(' / ') }] : []),
-      ...(rawNodeIds.length ? [{ key: 'raw_node_ids', value: rawNodeIds.join(' / ') }] : []),
-      ...(participantId > 0 ? [{ key: 'participant_id', value: String(participantId) }] : []),
       ...(detailConversationId > 0
-        ? [{ key: '详细对话', value: formatGraphConversationLabel(detailConversationId) }]
+        ? [{ key: '最佳会话', value: formatGraphConversationLabel(detailConversationId) }]
         : []),
       ...(reason ? [{ key: '说明', value: reason }] : []),
     ],
-    actionLabel: detailConversationId > 0 ? '查看详细对话' : '',
+    debugRows: [
+      ...(rawNodeIds.length ? [{ key: 'raw_node_ids', value: rawNodeIds.join(' / ') }] : []),
+      ...(participantId > 0 ? [{ key: 'participant_id', value: String(participantId) }] : []),
+    ],
+    actionLabel: detailConversationId > 0 ? '查看信息最多的会话' : '',
     actionDisabled: detailConversationId <= 0,
     actionConversationId: detailConversationId,
   }
@@ -3958,6 +4300,8 @@ function buildCoordinationGraphLegendItems(nodes) {
     { category: 'pending_identity', label: '待确认主体', color: '#f59e0b' },
     { category: 'pending_naming', label: '待命名主体', color: '#7c3aed' },
     { category: 'isolated_anchor', label: '未连接主体锚点', color: '#64748b' },
+    { category: 'generic_label', label: '泛化称呼', color: '#94a3b8' },
+    { category: 'unconfirmed_label', label: '未确认称呼', color: '#94a3b8' },
     { category: 'other', label: '其他节点', color: '#475569' },
   ]
   const usedCategories = new Set(
@@ -7684,6 +8028,50 @@ body,
   color: #92400e;
   background: #fffbeb;
   border: 1px solid #fde68a;
+}
+
+.party-naming-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.party-naming-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.party-naming-subtitle {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #6b7280;
+}
+
+.party-naming-meta {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  font-size: 12px;
+  color: #475569;
+}
+
+.party-naming-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.party-naming-error {
+  margin-top: 2px;
+}
+
+.party-naming-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .tracked-onboarding-copy {

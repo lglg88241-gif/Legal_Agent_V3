@@ -238,11 +238,20 @@ def test_responsible_coordination_graph_filters_fact_nodes_and_derives_subject_e
     assert zhangsan["source_conversation_ids"] == [101, 102]
     assert zhangsan["raw_node_ids"] == ["zhangsan-101", "zhangsan-102"]
     assert zhangsan["best_conversation_id"] == 101
+    assert zhangsan["best_conversation_reason"] == "该会话包含该实体最多的相关关系"
     assert zhangsan["edge_count_by_conversation"] == {"101": 3, "102": 1}
+    assert [item["conversation_id"] for item in zhangsan["source_conversations"]] == [101, 102]
+    assert zhangsan["source_conversations"][0]["relation_count"] == 3
+    assert zhangsan["source_conversations"][0]["fact_count"] == 3
+    assert zhangsan["source_conversations"][0]["is_best"] is True
+    assert zhangsan["source_conversations"][1]["relation_count"] == 1
+    assert zhangsan["source_conversations"][1]["is_best"] is False
 
     assert company["status"] == "confirmed"
     assert company["source_conversation_ids"] == [101, 102]
     assert company["raw_node_ids"] == ["company-101", "company-102"]
+    assert company["source_conversations"][0]["conversation_id"] == 101
+    assert "source_labels" in company["source_conversations"][0]
 
     assert hr_role["status"] == "isolated_anchor"
     assert hr_role["entity_type"] == "role"
@@ -385,3 +394,153 @@ def test_party_naming_task_becomes_pending_naming_task() -> None:
     assert entity["raw_node_ids"] == ["self-301"]
     assert entity["suggested_action"] == "name_party"
     assert task["reason"] == "检测到泛称主体，需要用户确认其在本案中的名称。"
+
+
+def test_single_conversation_responsible_entities_enter_without_forced_naming() -> None:
+    raw_graph = {
+        "nodes": [
+            {"id": "self-501", "label": "我", "type": "person", "conversation_id": 501},
+            {"id": "company-501", "label": "B公司", "type": "organization", "conversation_id": 501},
+            {"id": "manager-501", "label": "王经理", "type": "person", "conversation_id": 501},
+            {"id": "contract-501", "label": "劳动合同", "type": "document", "conversation_id": 501},
+            {"id": "notice-501", "label": "通知不用来了", "type": "event", "conversation_id": 501},
+        ],
+        "edges": [
+            {
+                "id": "edge-501-self-contract",
+                "source": "self-501",
+                "target": "contract-501",
+                "label": "签订",
+                "properties": {"conversation_id": 501},
+            },
+            {
+                "id": "edge-501-company-contract",
+                "source": "company-501",
+                "target": "contract-501",
+                "label": "签约方",
+                "properties": {"conversation_id": 501},
+            },
+            {
+                "id": "edge-501-manager-notice",
+                "source": "manager-501",
+                "target": "notice-501",
+                "label": "口头通知",
+                "properties": {"conversation_id": 501},
+            },
+            {
+                "id": "edge-501-notice-self",
+                "source": "notice-501",
+                "target": "self-501",
+                "label": "通知",
+                "properties": {"conversation_id": 501},
+            },
+        ],
+    }
+    raw_graph_payload = _make_raw_graph_payload(raw_graph)
+    display_graph = _build_display_graph(raw_graph_payload)
+    party_naming_task = {
+        "task_type": "party_naming",
+        "current_label": "我",
+        "reason": "检测到当前会话当事人代称，需要用户确认名称。",
+        "evidence": {
+            "source_conversation_ids": [501],
+            "raw_node_ids": ["self-501"],
+            "raw_labels": ["我"],
+        },
+    }
+
+    result = build_dossier_coordination_graph(
+        raw_graph_payload=raw_graph_payload,
+        display_graph=display_graph,
+        participant_candidates=[],
+        intelligence_payload={"confirmation_tasks": [party_naming_task]},
+        bound_conversation_ids=[501],
+        conversation_summaries=[{"id": 501, "title": "王经理通知不用来了"}],
+    )
+
+    labels = {entity["label"] for entity in result["entities"]}
+    assert {"B公司", "王经理"}.issubset(labels)
+    assert {
+        entity["label"]
+        for entity in result["entities"]
+        if entity["status"] == "pending_naming"
+    } == {"我"}
+    assert all(
+        entity["status"] != "pending_naming"
+        for entity in result["entities"]
+        if entity["label"] in {"B公司", "王经理"}
+    )
+
+    company = _find_entity_by_label(result, "B公司")
+    assert company["source_conversations"][0]["conversation_id"] == 501
+    assert company["source_conversations"][0]["title"] == "王经理通知不用来了"
+    assert company["source_conversations"][0]["source_labels"] == ["B公司"]
+    assert company["source_conversations"][0]["relation_count"] >= 1
+    assert company["best_conversation_id"] == 501
+
+
+def test_confirmed_self_alias_becomes_named_entity_without_duplicate_anchor() -> None:
+    raw_graph = {
+        "nodes": [
+            {"id": "self-601", "label": "当事人", "type": "person", "conversation_id": 601},
+            {"id": "company-601", "label": "B公司", "type": "organization", "conversation_id": 601},
+        ],
+        "edges": [
+            {
+                "id": "edge-601-1",
+                "source": "self-601",
+                "target": "company-601",
+                "label": "签订劳动合同",
+                "properties": {"conversation_id": 601},
+            }
+        ],
+    }
+    confirmed_participants = [
+        {"id": 21, "label": "张三", "entity_type": "person", "party_side": "claimant"},
+    ]
+    participant_mappings = [
+        {
+            "participant_id": 21,
+            "participant_label": "张三",
+            "participant_entity_type": "person",
+            "conversation_id": 601,
+            "raw_label": "当事人",
+            "graph_node_id": "self-601",
+            "graph_node_label": "当事人",
+            "graph_node_type": "person",
+        }
+    ]
+    raw_graph_payload = _make_raw_graph_payload(
+        raw_graph,
+        confirmed_participants=confirmed_participants,
+        participant_mappings=participant_mappings,
+    )
+    display_graph = _build_display_graph(raw_graph_payload)
+
+    result = build_dossier_coordination_graph(
+        raw_graph_payload=raw_graph_payload,
+        display_graph=display_graph,
+        participant_candidates=[],
+        intelligence_payload={"confirmation_tasks": []},
+        bound_conversation_ids=[601],
+        conversation_summaries=[{"id": 601, "title": "劳动合同和社保问题"}],
+    )
+
+    zhangsan = _find_entity_by_label(result, "张三")
+    labels = [entity["label"] for entity in result["entities"]]
+    assert zhangsan["status"] == "confirmed"
+    assert zhangsan["participant_id"] == 21
+    assert "当事人" in zhangsan["aliases"]
+    assert {"张三", "当事人"}.issubset(set(zhangsan["source_labels"]))
+    assert "当事人" not in [label for label in labels if label != "张三"]
+    assert zhangsan["source_conversations"] == [
+        {
+            "conversation_id": 601,
+            "title": "劳动合同和社保问题",
+            "source_labels": ["当事人"],
+            "raw_node_ids": ["self-601"],
+            "fact_count": 0,
+            "relation_count": 1,
+            "is_best": True,
+        }
+    ]

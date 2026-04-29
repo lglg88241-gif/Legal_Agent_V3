@@ -59,6 +59,25 @@ def test_coordination_graph_owner_can_access(
                         "entity_type": "person",
                         "source_conversation_ids": [696, 697],
                         "source_labels": ["张三", "当事人"],
+                        "aliases": ["当事人"],
+                        "source_conversations": [
+                            {
+                                "conversation_id": 696,
+                                "title": "劳动合同和社保问题",
+                                "source_labels": ["当事人"],
+                                "fact_count": 1,
+                                "relation_count": 1,
+                                "is_best": False,
+                            },
+                            {
+                                "conversation_id": 697,
+                                "title": "王经理通知不用来了",
+                                "source_labels": ["张三"],
+                                "fact_count": 2,
+                                "relation_count": 2,
+                                "is_best": True,
+                            },
+                        ],
                         "raw_node_ids": ["raw-696-self", "raw-697-self"],
                         "participant_id": 11,
                         "best_conversation_id": 697,
@@ -151,6 +170,14 @@ def test_coordination_graph_owner_can_access(
         for entity in result["coordination_graph"]["entities"]
     )
     assert result["coordination_graph"]["edges"]
+    zhangsan = next(
+        entity
+        for entity in result["coordination_graph"]["entities"]
+        if entity["label"] == "张三"
+    )
+    assert zhangsan["aliases"] == ["当事人"]
+    assert zhangsan["source_conversations"][1]["conversation_id"] == 697
+    assert zhangsan["source_conversations"][1]["is_best"] is True
     assert result["coordination_graph"]["trace"]["model"] == "dossier-coordination-rules-v1"
     assert (
         result["coordination_graph"]["trace"]["fallback_reason"]

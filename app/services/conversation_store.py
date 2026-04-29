@@ -484,7 +484,7 @@ def _normalized_label_key(label: str | None) -> str:
     return " ".join((label or "").strip().split()).lower()
 
 
-SELF_ANCHOR_PARTICIPANT_LABELS = {"我"}
+SELF_ANCHOR_PARTICIPANT_LABELS = {"我", "本人", "当事人", "劳动者", "申请人", "我们"}
 GENERIC_PARTICIPANT_LABELS = {
     "当事人",
     "双方",

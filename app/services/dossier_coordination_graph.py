@@ -42,6 +42,8 @@ _SELF_ANCHOR_LABELS = {
     "当事人",
     "我",
     "本人",
+    "劳动者",
+    "申请人",
     "自己",
     "用户",
     "我们",
@@ -657,6 +659,79 @@ def _edge_count_by_conversation(
     return {str(key): counts[key] for key in sorted(counts)}
 
 
+def _entity_conversation_metrics(
+    *,
+    raw_node_ids: list[str],
+    raw_indexes: dict[str, Any],
+) -> dict[str, Any]:
+    entity_raw_ids = {
+        _normalize_text(raw_node_id)
+        for raw_node_id in raw_node_ids
+        if _normalize_text(raw_node_id)
+    }
+    node_lookup = raw_indexes.get("node_lookup", {})
+    node_conversation_lookup = raw_indexes.get("node_conversation_lookup", {})
+    relation_count_by_conversation: dict[int, int] = {}
+    fact_node_ids_by_conversation: dict[int, set[str]] = defaultdict(set)
+    labels_by_conversation: dict[int, set[str]] = defaultdict(set)
+    raw_node_ids_by_conversation: dict[int, set[str]] = defaultdict(set)
+
+    for raw_node_id in entity_raw_ids:
+        node = node_lookup.get(raw_node_id, {})
+        conversation_id = (
+            _raw_node_conversation_id(node)
+            if isinstance(node, dict)
+            else _positive_int(node_conversation_lookup.get(raw_node_id))
+        )
+        if conversation_id <= 0:
+            continue
+        raw_node_ids_by_conversation[conversation_id].add(raw_node_id)
+        if isinstance(node, dict):
+            label = _raw_node_label(node)
+            if label:
+                labels_by_conversation[conversation_id].add(label)
+
+    for edge in raw_indexes.get("edges", []):
+        if not isinstance(edge, dict):
+            continue
+        source_raw_id = _normalize_text(edge.get("source"))
+        target_raw_id = _normalize_text(edge.get("target"))
+        if source_raw_id not in entity_raw_ids and target_raw_id not in entity_raw_ids:
+            continue
+
+        conversation_id = _infer_edge_conversation_id(
+            edge,
+            node_conversation_lookup=node_conversation_lookup,
+            entity_raw_ids=entity_raw_ids,
+        )
+        if conversation_id <= 0:
+            continue
+        relation_count_by_conversation[conversation_id] = (
+            relation_count_by_conversation.get(conversation_id, 0) + 1
+        )
+
+        other_raw_id = ""
+        if source_raw_id in entity_raw_ids and target_raw_id not in entity_raw_ids:
+            other_raw_id = target_raw_id
+        elif target_raw_id in entity_raw_ids and source_raw_id not in entity_raw_ids:
+            other_raw_id = source_raw_id
+        if not other_raw_id:
+            continue
+        other_node = node_lookup.get(other_raw_id, {})
+        if isinstance(other_node, dict) and _is_fact_object(
+            _raw_node_label(other_node),
+            _raw_node_type(other_node),
+        ):
+            fact_node_ids_by_conversation[conversation_id].add(other_raw_id)
+
+    return {
+        "relation_count_by_conversation": relation_count_by_conversation,
+        "fact_node_ids_by_conversation": fact_node_ids_by_conversation,
+        "labels_by_conversation": labels_by_conversation,
+        "raw_node_ids_by_conversation": raw_node_ids_by_conversation,
+    }
+
+
 def _best_conversation_for_entity(
     *,
     raw_node_ids: list[str],
@@ -667,17 +742,36 @@ def _best_conversation_for_entity(
         raw_node_ids=raw_node_ids,
         raw_indexes=raw_indexes,
     )
-    if edge_count_by_conversation:
+    metrics = _entity_conversation_metrics(
+        raw_node_ids=raw_node_ids,
+        raw_indexes=raw_indexes,
+    )
+    fact_count_by_conversation = {
+        conversation_id: len(fact_node_ids)
+        for conversation_id, fact_node_ids in metrics.get("fact_node_ids_by_conversation", {}).items()
+    }
+    candidate_ids = set(_sorted_unique_ints(source_conversation_ids))
+    candidate_ids.update(int(conversation_id) for conversation_id in edge_count_by_conversation)
+    candidate_ids.update(fact_count_by_conversation)
+
+    if candidate_ids:
         best_conversation_id = max(
-            (
-                (int(conversation_id), count)
-                for conversation_id, count in edge_count_by_conversation.items()
+            candidate_ids,
+            key=lambda conversation_id: (
+                edge_count_by_conversation.get(str(conversation_id), 0),
+                fact_count_by_conversation.get(conversation_id, 0),
+                -conversation_id,
             ),
-            key=lambda item: (item[1], -item[0]),
-        )[0]
+        )
+        if edge_count_by_conversation.get(str(best_conversation_id), 0) > 0:
+            best_reason = "该会话包含该实体最多的相关关系"
+        elif fact_count_by_conversation.get(best_conversation_id, 0) > 0:
+            best_reason = "该会话包含该实体最多的相关事实"
+        else:
+            best_reason = "该会话是该实体最早出现的来源会话"
         return (
             best_conversation_id,
-            "该会话包含该主体最多的关系边",
+            best_reason,
             edge_count_by_conversation,
         )
 
@@ -685,10 +779,73 @@ def _best_conversation_for_entity(
     if source_ids:
         return (
             source_ids[0],
-            "回退到该主体的首个来源会话",
+            "该会话是该实体最早出现的来源会话",
             edge_count_by_conversation,
         )
     return (None, "当前未找到可用会话来源", edge_count_by_conversation)
+
+
+def _conversation_title_lookup(conversation_summaries: list[dict[str, Any]] | None) -> dict[int, str]:
+    lookup: dict[int, str] = {}
+    for item in conversation_summaries or []:
+        if isinstance(item, dict):
+            conversation_id = _positive_int(item.get("id") or item.get("conversation_id"))
+            title = _normalize_text(item.get("title"))
+        else:
+            conversation_id = _positive_int(getattr(item, "id", None))
+            title = _normalize_text(getattr(item, "title", ""))
+        if conversation_id <= 0:
+            continue
+        lookup[conversation_id] = title or f"会话 {conversation_id}"
+    return lookup
+
+
+def _source_conversations_for_entity(
+    entity: dict[str, Any],
+    *,
+    raw_indexes: dict[str, Any],
+    conversation_titles: dict[int, str],
+) -> list[dict[str, Any]]:
+    raw_node_ids = _sorted_unique_strings(entity.get("raw_node_ids") or [])
+    source_ids = set(_sorted_unique_ints(entity.get("source_conversation_ids") or []))
+    metrics = _entity_conversation_metrics(
+        raw_node_ids=raw_node_ids,
+        raw_indexes=raw_indexes,
+    )
+    relation_count_by_conversation: dict[int, int] = metrics.get("relation_count_by_conversation", {})
+    fact_node_ids_by_conversation: dict[int, set[str]] = metrics.get("fact_node_ids_by_conversation", {})
+    labels_by_conversation: dict[int, set[str]] = metrics.get("labels_by_conversation", {})
+    raw_node_ids_by_conversation: dict[int, set[str]] = metrics.get("raw_node_ids_by_conversation", {})
+    source_ids.update(relation_count_by_conversation)
+    source_ids.update(fact_node_ids_by_conversation)
+    source_ids.update(labels_by_conversation)
+
+    best_conversation_id = _positive_int(entity.get("best_conversation_id"))
+    fallback_labels = _sorted_unique_strings(
+        entity.get("raw_labels") or entity.get("source_labels") or [entity.get("label")]
+    )
+    details: list[dict[str, Any]] = []
+    for conversation_id in sorted(source_ids):
+        source_labels = _sorted_unique_strings(list(labels_by_conversation.get(conversation_id, set())))
+        if not source_labels and len(source_ids) == 1:
+            source_labels = fallback_labels
+        if not source_labels:
+            source_labels = _sorted_unique_strings([entity.get("label")])
+
+        details.append(
+            {
+                "conversation_id": conversation_id,
+                "title": conversation_titles.get(conversation_id) or f"会话 {conversation_id}",
+                "source_labels": source_labels,
+                "raw_node_ids": _sorted_unique_strings(
+                    list(raw_node_ids_by_conversation.get(conversation_id, set()))
+                ),
+                "fact_count": len(fact_node_ids_by_conversation.get(conversation_id, set())),
+                "relation_count": int(relation_count_by_conversation.get(conversation_id, 0) or 0),
+                "is_best": conversation_id == best_conversation_id,
+            }
+        )
+    return details
 
 
 def _candidate_node_label(node: dict[str, Any]) -> str:
@@ -750,6 +907,12 @@ def _entity_payload(
     display_label = _entity_display_label(label)
     normalized_entity_type = entity_type if entity_type in _TYPE_DISPLAY_LABELS else "unknown"
     normalized_labels = _sorted_unique_strings(raw_labels)
+    source_labels = _sorted_unique_strings(normalized_labels + ([display_label] if display_label else []))
+    aliases = [
+        item
+        for item in normalized_labels
+        if _normalize_key(item) != _normalize_key(display_label)
+    ]
     return {
         "id": entity_id,
         "label": display_label,
@@ -759,7 +922,8 @@ def _entity_payload(
         "source_conversation_ids": _sorted_unique_ints(source_conversation_ids),
         "raw_node_ids": _sorted_unique_strings(raw_node_ids),
         "raw_labels": normalized_labels,
-        "source_labels": normalized_labels,
+        "source_labels": source_labels,
+        "aliases": aliases,
         "participant_id": participant_id,
         "best_conversation_id": best_conversation_id,
         "best_conversation_reason": best_reason,
@@ -782,7 +946,7 @@ def _build_confirmed_entities(
         if not isinstance(node, dict):
             continue
         source_conversation_ids = _source_conversation_ids_from_node(node)
-        if not bool(node.get("confirmed")) or len(source_conversation_ids) < 2:
+        if not bool(node.get("confirmed")) or not source_conversation_ids:
             continue
 
         raw_node_ids = _raw_node_ids_from_node(node)
@@ -1107,12 +1271,18 @@ def _build_isolated_anchor_entities(
             best_reason = "当前仅来源于该会话，作为孤立主体锚点展示"
         elif not edge_count_map:
             best_reason = "当前仅作为案卷中的补充责任主体展示"
+        status = (
+            "generic_label"
+            if is_generic_participant_label(str(anchor["label"]))
+            and not _looks_like_self_anchor(str(anchor["label"]))
+            else "isolated_anchor"
+        )
 
         isolated_entities.append(
             _entity_payload(
                 entity_id=group_key,
                 label=str(anchor["label"]),
-                status="isolated_anchor",
+                status=status,
                 entity_type=str(anchor["entity_type"]),
                 source_conversation_ids=source_conversation_ids,
                 raw_node_ids=raw_node_ids,
@@ -1144,6 +1314,7 @@ def _build_responsible_entity_graph_agent_input(
     participant_candidates: list[dict[str, Any]] | None,
     intelligence_payload: dict[str, Any] | None,
     bound_conversation_ids: list[int] | None,
+    conversation_summaries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "raw_graph_payload": raw_graph_payload or {},
@@ -1151,6 +1322,7 @@ def _build_responsible_entity_graph_agent_input(
         "participant_candidates": participant_candidates or [],
         "intelligence_payload": intelligence_payload or {},
         "bound_conversation_ids": _sorted_unique_ints(bound_conversation_ids or []),
+        "conversation_summaries": conversation_summaries or [],
         "agent_prompt": {
             "system": "构建案卷责任主体连接图，只保留责任主体节点，把事实对象降级为边证据。",
             "mode": _TRACE_MODE,
@@ -1643,10 +1815,47 @@ def _validate_responsible_entity_graph_output(payload: dict[str, Any]) -> dict[s
         validated_entity["entity_type"] = entity_type if entity_type in _TYPE_DISPLAY_LABELS else "unknown"
         validated_entity["source_conversation_ids"] = _sorted_unique_ints(entity.get("source_conversation_ids") or [])
         validated_entity["raw_node_ids"] = _sorted_unique_strings(entity.get("raw_node_ids") or [])
-        validated_entity["raw_labels"] = _sorted_unique_strings(
+        raw_labels = _sorted_unique_strings(
             entity.get("raw_labels") or entity.get("source_labels") or []
         )
-        validated_entity["source_labels"] = validated_entity["raw_labels"]
+        source_labels = _sorted_unique_strings(
+            list(entity.get("source_labels") or []) + raw_labels + [label]
+        )
+        aliases = _sorted_unique_strings(
+            entity.get("aliases")
+            or [
+                item
+                for item in raw_labels
+                if _normalize_key(item) != _normalize_key(label)
+            ]
+        )
+        source_conversations: list[dict[str, Any]] = []
+        raw_source_conversations = (
+            entity.get("source_conversations")
+            if isinstance(entity.get("source_conversations"), list)
+            else []
+        )
+        for source_conversation in raw_source_conversations:
+            if not isinstance(source_conversation, dict):
+                continue
+            conversation_id = _positive_int(source_conversation.get("conversation_id"))
+            if conversation_id <= 0:
+                continue
+            source_conversations.append(
+                {
+                    "conversation_id": conversation_id,
+                    "title": _normalize_text(source_conversation.get("title")) or f"会话 {conversation_id}",
+                    "source_labels": _sorted_unique_strings(source_conversation.get("source_labels") or []),
+                    "raw_node_ids": _sorted_unique_strings(source_conversation.get("raw_node_ids") or []),
+                    "fact_count": max(_positive_int(source_conversation.get("fact_count")), 0),
+                    "relation_count": max(_positive_int(source_conversation.get("relation_count")), 0),
+                    "is_best": bool(source_conversation.get("is_best")),
+                }
+            )
+        validated_entity["raw_labels"] = raw_labels
+        validated_entity["source_labels"] = source_labels
+        validated_entity["aliases"] = aliases
+        validated_entity["source_conversations"] = source_conversations
         entity_ids.add(entity_id)
         validated_entities.append(validated_entity)
 
@@ -1709,9 +1918,13 @@ def _build_responsible_entity_graph_rules(
     participant_candidates = agent_input.get("participant_candidates")
     intelligence_payload = agent_input.get("intelligence_payload")
     bound_conversation_ids = agent_input.get("bound_conversation_ids")
+    conversation_summaries = agent_input.get("conversation_summaries")
 
     raw_indexes = _raw_indexes(raw_graph_payload)
     participant_indexes = _graph_participant_indexes(raw_graph_payload)
+    conversation_titles = _conversation_title_lookup(
+        conversation_summaries if isinstance(conversation_summaries, list) else []
+    )
     covered_conversation_ids: set[int] = set()
     covered_raw_node_ids: set[str] = set()
 
@@ -1748,6 +1961,12 @@ def _build_responsible_entity_graph_rules(
         + pending_naming_entities
         + isolated_anchor_entities
     )
+    for entity in entities:
+        entity["source_conversations"] = _source_conversations_for_entity(
+            entity,
+            raw_indexes=raw_indexes,
+            conversation_titles=conversation_titles,
+        )
     edges = _derive_subject_relation_edges(entities, raw_indexes)
     tasks = pending_identity_tasks + pending_naming_tasks
     warnings: list[str] = []
@@ -1783,6 +2002,7 @@ def build_dossier_coordination_graph(
     participant_candidates: list[dict[str, Any]] | None,
     intelligence_payload: dict[str, Any] | None,
     bound_conversation_ids: list[int] | None = None,
+    conversation_summaries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     agent_input = _build_responsible_entity_graph_agent_input(
         raw_graph_payload=raw_graph_payload,
@@ -1790,6 +2010,7 @@ def build_dossier_coordination_graph(
         participant_candidates=participant_candidates,
         intelligence_payload=intelligence_payload,
         bound_conversation_ids=bound_conversation_ids,
+        conversation_summaries=conversation_summaries,
     )
     rules_output = _build_responsible_entity_graph_rules(agent_input)
     return _validate_responsible_entity_graph_output(rules_output)
@@ -1860,6 +2081,14 @@ async def build_dossier_coordination_graph_for_user(
         participant_candidates=participant_candidates,
         intelligence_payload={"confirmation_tasks": confirmation_tasks},
         bound_conversation_ids=conversation_ids,
+        conversation_summaries=[
+            {
+                "id": conversation.id,
+                "title": getattr(conversation, "title", "") or f"会话 {conversation.id}",
+            }
+            for conversation in conversations
+            if isinstance(getattr(conversation, "id", None), int) and conversation.id > 0
+        ],
     )
     return {
         "coordination_graph": coordination_graph,

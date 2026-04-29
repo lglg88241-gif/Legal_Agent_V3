@@ -91,9 +91,50 @@
         <span class="detail-key">{{ entry.key }}</span>
         <span class="detail-value">{{ entry.value }}</span>
       </div>
+      <div v-if="selectedSourceConversations.length" class="source-conversation-list">
+        <div class="source-conversation-title">来源会话</div>
+        <div
+          v-for="conversation in selectedSourceConversations"
+          :key="conversation.conversation_id"
+          class="source-conversation-item"
+        >
+          <div class="source-conversation-main">
+            <span class="source-conversation-name">
+              {{ conversation.title || `会话 ${conversation.conversation_id}` }}
+            </span>
+            <el-tag v-if="conversation.is_best" size="small" type="success" effect="plain">
+              最佳会话
+            </el-tag>
+          </div>
+          <div class="source-conversation-meta">
+            <span>{{ `原始标签：${conversation.source_labels.length ? conversation.source_labels.join(' / ') : '未标注'}` }}</span>
+            <span>{{ `相关关系：${conversation.relation_count}` }}</span>
+            <span>{{ `相关事实：${conversation.fact_count}` }}</span>
+          </div>
+          <el-button
+            size="small"
+            type="primary"
+            text
+            @click="$emit('node-action', { ...selectedNode, actionConversationId: conversation.conversation_id })"
+          >
+            查看该会话
+          </el-button>
+        </div>
+      </div>
       <div v-if="selectedNode.detailNote" class="detail-note">
         {{ selectedNode.detailNote }}
       </div>
+      <details v-if="selectedDebugRows.length" class="node-debug-detail">
+        <summary>高级详情</summary>
+        <div
+          v-for="entry in selectedDebugRows"
+          :key="entry.key"
+          class="detail-row"
+        >
+          <span class="detail-key">{{ entry.key }}</span>
+          <span class="detail-value">{{ entry.value }}</span>
+        </div>
+      </details>
       <div v-if="selectedNode.actionLabel" class="node-detail-actions">
         <el-button
           size="small"
@@ -206,6 +247,39 @@ const selectedDetailRows = computed(() => {
       key,
       value: `${value}`.slice(0, 160),
     }))
+})
+
+const selectedDebugRows = computed(() => {
+  const debugRows = Array.isArray(selectedNode.value?.debugRows) ? selectedNode.value.debugRows : []
+  return debugRows
+    .map((entry) => ({
+      key: String(entry?.key || '').trim(),
+      value: String(entry?.value || '').trim(),
+    }))
+    .filter((entry) => entry.key && entry.value)
+})
+
+const selectedSourceConversations = computed(() => {
+  const items = Array.isArray(selectedNode.value?.sourceConversations)
+    ? selectedNode.value.sourceConversations
+    : Array.isArray(selectedNode.value?.source_conversations)
+      ? selectedNode.value.source_conversations
+      : []
+  return items
+    .map((item) => {
+      const conversationId = Number(item?.conversation_id || 0)
+      return {
+        conversation_id: conversationId,
+        title: String(item?.title || '').trim(),
+        source_labels: Array.isArray(item?.source_labels)
+          ? item.source_labels.map((label) => String(label || '').trim()).filter(Boolean)
+          : [],
+        fact_count: Number(item?.fact_count || 0),
+        relation_count: Number(item?.relation_count || 0),
+        is_best: Boolean(item?.is_best),
+      }
+    })
+    .filter((item) => item.conversation_id > 0)
 })
 
 watch(
@@ -553,6 +627,60 @@ function buildForceLayout(nodes, edges, categoryAnchors) {
   font-size: 12px;
   color: #6b7280;
   line-height: 1.6;
+}
+
+.source-conversation-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source-conversation-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.source-conversation-item {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 8px;
+  background: #f8fafc;
+}
+
+.source-conversation-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.source-conversation-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.source-conversation-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 5px;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.5;
+}
+
+.node-debug-detail {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.node-debug-detail summary {
+  cursor: pointer;
+  color: #6b7280;
 }
 
 .node-detail-actions {

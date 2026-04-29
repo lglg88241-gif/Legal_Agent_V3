@@ -103,6 +103,8 @@ _SELF_ANCHOR_LABEL_PRIORITY = (
     "\u5f53\u4e8b\u4eba",
     "\u6211",
     "\u672c\u4eba",
+    "\u52b3\u52a8\u8005",
+    "\u7533\u8bf7\u4eba",
     "\u81ea\u5df1",
     "\u7528\u6237",
     "\u6211\u4eec",
@@ -115,6 +117,7 @@ _SELF_NAMING_EXPLICIT_LABELS = {
     "\u81ea\u5df1",
     "\u6211\u4eec",
     "\u54b1\u4eec",
+    "\u52b3\u52a8\u8005",
     "\u52b3\u52a8\u8005\u672c\u4eba",
     "\u6211\u65b9\u5f53\u4e8b\u4eba",
     "\u7533\u8bf7\u4eba",
@@ -616,14 +619,21 @@ def _build_party_naming_task(
         return None
     if _is_organization_like_label(current_label) or is_role_person_label(current_label):
         return None
+    suggested_labels = list(_SELF_NAMING_SUGGESTED_LABELS)
     return {
+        "type": "party_naming",
         "task_type": "party_naming",
+        "status": "pending",
         "subject": "self_anchor",
         "current_label": current_label,
-        "suggested_labels": list(_SELF_NAMING_SUGGESTED_LABELS),
+        "suggested_labels": suggested_labels,
+        "suggested_names": suggested_labels,
         "reason": _SELF_NAMING_REASON,
         "requires_user_confirmation": True,
         "source": "dossier_intelligence_rules",
+        "source_conversation_ids": evidence.get("source_conversation_ids", []),
+        "raw_labels": evidence.get("raw_labels", []),
+        "raw_node_ids": evidence.get("raw_node_ids", []),
         "evidence": evidence,
     }
 

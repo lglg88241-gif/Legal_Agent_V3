@@ -175,6 +175,8 @@ _SELF_ANCHOR_LABELS = {
     "当事人",
     "我",
     "本人",
+    "劳动者",
+    "申请人",
     "自己",
     "用户",
     "我们",
@@ -433,6 +435,24 @@ def _build_party_naming_mentions_payload(
         )
 
     return mentions
+
+
+def _party_naming_aliases_from_evidence(
+    evidence: PartyNamingEvidenceRequest | None,
+) -> list[str]:
+    if evidence is None:
+        return []
+
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for item in evidence.raw_labels:
+        label = _normalize_text(item)
+        key = _normalize_key(label)
+        if not label or key in seen:
+            continue
+        seen.add(key)
+        aliases.append(label)
+    return aliases
 
 
 def _serialize_dossier_with_participants(
@@ -1022,8 +1042,13 @@ async def confirm_dossier_party_naming(
     for mention in mentions:
         await db.refresh(mention)
     participant_lookup = {participant.id: participant}
+    aliases = _party_naming_aliases_from_evidence(payload.source_task.evidence)
     return {
         "status": "success",
+        "participant_id": participant.id,
+        "display_name": participant.label,
+        "aliases": aliases,
+        "updated": True,
         "participant": serialize_dossier_participant(participant),
         "mentions": [
             serialize_dossier_participant_mention(mention, participant_lookup)

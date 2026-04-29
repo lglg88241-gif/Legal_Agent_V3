@@ -193,6 +193,10 @@ def test_party_naming_confirm_owner_creates_self_participant_and_mentions(
     )
 
     assert result["status"] == "success"
+    assert result["participant_id"] == 100
+    assert result["display_name"] == "劳动者本人"
+    assert result["aliases"] == ["当事人", "我"]
+    assert result["updated"] is True
     assert result["participant"]["label"] == "劳动者本人"
     assert result["participant"]["party_side"] == "claimant"
     assert result["participant"]["entity_type"] == "person"
@@ -320,6 +324,10 @@ def test_party_naming_confirm_updates_existing_self_participant_without_creating
     )
 
     assert result["status"] == "success"
+    assert result["participant_id"] == 88
+    assert result["display_name"] == "张三"
+    assert result["aliases"] == []
+    assert result["updated"] is True
     assert result["participant"]["id"] == 88
     assert result["participant"]["label"] == "张三"
     assert result["mentions"] == []
