@@ -1054,7 +1054,7 @@ def test_build_dossier_participant_candidates_returns_generic_tasks_without_auto
     assert company_candidate["mentions"][0]["graph_node_type"] == "organization"
 
 
-def test_build_dossier_participant_candidates_returns_single_occurrence_specific_task() -> None:
+def test_build_dossier_participant_candidates_skips_role_person_single_occurrence_task() -> None:
     candidates = build_dossier_participant_candidates(
         graph_payload={
             "graph": {
@@ -1070,12 +1070,10 @@ def test_build_dossier_participant_candidates_returns_single_occurrence_specific
     )
 
     company_candidate = next(candidate for candidate in candidates if candidate["raw_label"] == "A公司")
-    manager_candidate = next(candidate for candidate in candidates if candidate["raw_label"] == "王经理")
     assert company_candidate["label_kind"] == "specific"
     assert company_candidate["can_create_new"] is True
     assert company_candidate["existing_participant_id"] is None
-    assert manager_candidate["label_kind"] == "specific"
-    assert manager_candidate["can_create_new"] is True
+    assert all(candidate["raw_label"] != "王经理" for candidate in candidates)
 
 
 def test_build_dossier_participant_candidates_does_not_use_side_type_unique_match_for_specific_labels() -> None:

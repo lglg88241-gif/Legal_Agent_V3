@@ -1808,6 +1808,7 @@ import {
   clearConversationMessages,
   confirmDossierPartyNaming,
   confirmDossierSelfIdentity,
+  decideDossierCrossConversationResolution,
   createConversation,
   createDossier,
   createDossierParticipant,
@@ -4506,11 +4507,48 @@ function handleMarkNonEntityCandidate(candidate) {
   })
 }
 
-function handleRejectCrossConversationCandidate(candidate) {
-  handleIgnoreParticipantCandidate(candidate, {
-    // TODO: persist cross-conversation not_same decisions when backend supports negative links.
-    message: `已将「${formatGraphNodeLabel(candidate?.source_node)} / ${formatGraphNodeLabel(candidate?.target_node)}」标记为暂不同主体`,
-  })
+async function handleRejectCrossConversationCandidate(candidate) {
+  if (!selectedDossierId.value) return
+
+  const sourceNode = candidate?.source_node
+  const targetNode = candidate?.target_node
+  if (!sourceNode?.graph_node_id || !targetNode?.graph_node_id) {
+    ElMessage.error('拒绝失败，请稍后再试')
+    return
+  }
+
+  dossierParticipantActionLoading.value = true
+  try {
+    await decideDossierCrossConversationResolution(selectedDossierId.value, {
+      subject: 'cross_conversation_identity',
+      decision: 'not_same',
+      source_node: {
+        conversation_id: Number(sourceNode.conversation_id || 0),
+        graph_node_id: String(sourceNode.graph_node_id || '').trim(),
+        raw_label: String(sourceNode.raw_label || '').trim(),
+        graph_node_label: String(sourceNode.graph_node_label || '').trim() || null,
+        graph_node_type: String(sourceNode.graph_node_type || '').trim() || null,
+      },
+      target_node: {
+        conversation_id: Number(targetNode.conversation_id || 0),
+        graph_node_id: String(targetNode.graph_node_id || '').trim(),
+        raw_label: String(targetNode.raw_label || '').trim(),
+        graph_node_label: String(targetNode.graph_node_label || '').trim() || null,
+        graph_node_type: String(targetNode.graph_node_type || '').trim() || null,
+      },
+      candidate_key: candidateKey(candidate),
+      task_key: candidate?.task_key || candidateKey(candidate),
+      reason: 'user_marked_not_same',
+    })
+    handleIgnoreParticipantCandidate(candidate, {
+      message: `已将「${formatGraphNodeLabel(candidate?.source_node)} / ${formatGraphNodeLabel(candidate?.target_node)}」标记为不是同一个主体`,
+    })
+  } catch (error) {
+    console.error('Failed to reject cross-conversation participant candidate:', error)
+    ElMessage.error('拒绝失败，请稍后再试')
+  } finally {
+    dossierParticipantActionLoading.value = false
+  }
 }
 
 function handleUseMatchCandidate(candidate, participantId) {

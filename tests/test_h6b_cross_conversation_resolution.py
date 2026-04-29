@@ -129,6 +129,47 @@ def test_cross_conversation_does_not_pair_person_with_organization() -> None:
     _assert_no_internal_node_reference_keys(candidates)
 
 
+def test_cross_conversation_role_person_nodes_do_not_enter_identity_candidates() -> None:
+    participant = DossierParticipant(
+        id=7,
+        dossier_id=5,
+        user_id=9,
+        label="张三",
+        role="劳动者",
+        party_side="claimant",
+        entity_type="person",
+        confirmed_by_user=True,
+    )
+    confirmed_mention = DossierParticipantMention(
+        id=102,
+        dossier_id=5,
+        participant_id=7,
+        conversation_id=11,
+        raw_label="张三",
+        source="graph_node",
+        graph_node_id="p1",
+        graph_node_label="张三",
+        graph_node_type="person",
+    )
+
+    candidates = build_dossier_participant_candidates(
+        graph_payload={
+            "graph": {
+                "nodes": [
+                    {"id": "p1", "label": "张三", "type": "person", "conversation_id": 11},
+                    {"id": "p2", "label": "王经理", "type": "person", "conversation_id": 12},
+                ]
+            }
+        },
+        participants=[participant],
+        confirmed_mentions=[confirmed_mention],
+        participant_aliases={},
+    )
+
+    assert _find_cross_candidates(candidates) == []
+    _assert_no_internal_node_reference_keys(candidates)
+
+
 def test_cross_conversation_candidates_are_not_generated_within_same_conversation() -> None:
     candidates = build_dossier_participant_candidates(
         graph_payload={

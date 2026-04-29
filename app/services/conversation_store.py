@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -22,6 +24,8 @@ from app.services.conversation_mode import (
     normalize_persistence_consent,
 )
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_CONVERSATION_TITLE = ""
 DEFAULT_FALLBACK_TITLE = "默认会话"
 
@@ -40,8 +44,31 @@ VALID_PARTICIPANT_MENTION_SOURCES = {
     "party_naming",
     "self_identity_confirmation",
 }
-VALID_ENTITY_RESOLUTION_DECISION_TYPES = {"same", "not_same"}
-VALID_ENTITY_RESOLUTION_SUBJECTS = {"self_anchor"}
+VALID_ENTITY_RESOLUTION_DECISION_TYPES = {"same", "not_same", "skip", "not_actionable"}
+VALID_ENTITY_RESOLUTION_SUBJECTS = {"self_anchor", "cross_conversation_identity"}
+ROLE_PERSON_LABELS = {
+    "经理",
+    "总经理",
+    "副经理",
+    "项目经理",
+    "人事",
+    "hr",
+    "hrbp",
+    "主管",
+    "主任",
+    "组长",
+    "队长",
+    "经办人",
+    "联系人",
+    "法务",
+    "律师",
+    "上级",
+    "领导",
+    "老板",
+    "财务",
+    "会计",
+    "前台",
+}
 PARTICIPANT_RESOLVABLE_ENTITY_TYPES = {
     "person",
     "organization",
@@ -936,7 +963,7 @@ def serialize_dossier_participant_mention(
 def serialize_dossier_entity_resolution_decision(
     decision: DossierEntityResolutionDecision,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "id": decision.id,
         "dossier_id": decision.dossier_id,
         "user_id": decision.user_id,
@@ -957,6 +984,42 @@ def serialize_dossier_entity_resolution_decision(
         "new_display_label": getattr(decision, "new_display_label", None),
         "created_at": decision.created_at.isoformat() if decision.created_at else None,
     }
+    if payload["subject"] == "cross_conversation_identity":
+        payload["pair_key"] = payload["source_graph_node_id"]
+        payload["pair_hash"] = payload["target_participant_id"]
+    return payload
+
+
+def _cross_conversation_decision_type_index(
+    resolution_decisions: list[DossierEntityResolutionDecision] | list[dict[str, Any]] | None,
+) -> dict[str, str]:
+    index: dict[str, str] = {}
+    for decision in resolution_decisions or []:
+        try:
+            if isinstance(decision, DossierEntityResolutionDecision):
+                subject = normalize_entity_resolution_subject(
+                    getattr(decision, "subject", "self_anchor")
+                )
+                decision_type = normalize_entity_resolution_decision_type(
+                    getattr(decision, "decision_type", "same")
+                )
+                pair_key = _normalize_optional_text(getattr(decision, "source_graph_node_id", ""))
+            elif isinstance(decision, dict):
+                subject = normalize_entity_resolution_subject(decision.get("subject"))
+                decision_type = normalize_entity_resolution_decision_type(
+                    decision.get("decision_type")
+                )
+                pair_key = _normalize_optional_text(
+                    decision.get("pair_key") or decision.get("source_graph_node_id")
+                )
+            else:
+                continue
+        except ValueError:
+            continue
+        if subject != "cross_conversation_identity" or not pair_key:
+            continue
+        index[pair_key] = decision_type
+    return index
 
 
 async def list_dossier_participants(
@@ -1527,6 +1590,59 @@ def _normalized_label_key(label: str | None) -> str:
     return " ".join((label or "").strip().split()).lower()
 
 
+def _normalized_role_person_tokens() -> set[str]:
+    return {token.strip().lower() for token in ROLE_PERSON_LABELS if token and token.strip()}
+
+
+def build_cross_conversation_resolution_pair_key(
+    left_graph_node_id: str | None,
+    right_graph_node_id: str | None,
+) -> str:
+    left = _normalize_optional_text(left_graph_node_id)
+    right = _normalize_optional_text(right_graph_node_id)
+    if not left or not right:
+        raise ValueError("Cross-conversation resolution graph_node_id is required")
+    ordered = sorted((left, right))
+    return f"{ordered[0]}::{ordered[1]}"
+
+
+def build_cross_conversation_resolution_pair_hash(pair_key: str | None) -> int:
+    normalized_pair_key = _normalize_optional_text(pair_key)
+    if not normalized_pair_key:
+        raise ValueError("Cross-conversation resolution pair_key is required")
+    digest = hashlib.sha1(normalized_pair_key.encode("utf-8")).hexdigest()
+    return (int(digest[:8], 16) % 2_147_483_647) + 1
+
+
+def _build_confirmed_specific_person_label_set(
+    participants: list[DossierParticipant],
+) -> set[str]:
+    confirmed_labels: set[str] = set()
+    for participant in participants:
+        entity_type = str(getattr(participant, "entity_type", "unknown") or "unknown").strip()
+        label = str(getattr(participant, "label", "") or "").strip()
+        if entity_type != "person" or not label or not is_specific_participant_label(label):
+            continue
+        confirmed_labels.add(_normalized_label_key(label))
+    return confirmed_labels
+
+
+def is_role_person_label(
+    label: str | None,
+    *,
+    confirmed_person_labels: set[str] | None = None,
+) -> bool:
+    normalized_label = _normalized_label_key(label)
+    if not normalized_label:
+        return False
+    if normalized_label in (confirmed_person_labels or set()):
+        return False
+    role_tokens = _normalized_role_person_tokens()
+    if normalized_label in role_tokens:
+        return True
+    return any(normalized_label.endswith(token) for token in role_tokens)
+
+
 def _display_label(value: str | None, fallback: str) -> str:
     cleaned = " ".join((value or "").strip().split())
     return cleaned or fallback
@@ -1779,8 +1895,15 @@ def _build_candidate_payload(
     mentions: list[dict[str, Any]],
     participants: list[DossierParticipant],
     participant_aliases: dict[str, Any] | None = None,
+    confirmed_person_labels: set[str] | None = None,
 ) -> dict[str, Any] | None:
     if not mentions:
+        return None
+    if is_role_person_label(raw_label, confirmed_person_labels=confirmed_person_labels):
+        logger.debug(
+            "Skipping raw_label_resolution for role-like person label | label=%s reason=role_person_excluded_from_identity",
+            raw_label,
+        )
         return None
 
     candidate_shape = _infer_candidate_shape(
@@ -2184,7 +2307,22 @@ def _build_cross_conversation_entity_candidate(
     target_participant_ids: set[int],
     participants: list[DossierParticipant],
     participant_aliases: dict[str, Any] | None = None,
+    confirmed_person_labels: set[str] | None = None,
 ) -> dict[str, Any] | None:
+    if is_role_person_label(
+        source_node.get("raw_label"),
+        confirmed_person_labels=confirmed_person_labels,
+    ) or is_role_person_label(
+        target_node.get("raw_label"),
+        confirmed_person_labels=confirmed_person_labels,
+    ):
+        logger.debug(
+            "Skipping cross-conversation identity candidate for role-like person node | source=%s target=%s reason=role_person_excluded_from_identity",
+            source_node.get("raw_label"),
+            target_node.get("raw_label"),
+        )
+        return None
+
     source_kind = str(source_node.get("label_kind") or "specific")
     target_kind = str(target_node.get("label_kind") or "specific")
     source_label = _normalized_label_key(source_node.get("raw_label"))
@@ -2300,10 +2438,13 @@ def _build_cross_conversation_entity_candidates(
     participants: list[DossierParticipant],
     confirmed_mentions: list[DossierParticipantMention],
     participant_aliases: dict[str, Any] | None = None,
+    resolution_decisions: list[DossierEntityResolutionDecision] | list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if len(graph_node_records) < 2:
         return []
 
+    confirmed_person_labels = _build_confirmed_specific_person_label_set(participants)
+    suppressed_pair_decisions = _cross_conversation_decision_type_index(resolution_decisions)
     confirmed_participant_ids_by_graph_node_id = _build_confirmed_participant_ids_by_graph_node_id(
         confirmed_mentions
     )
@@ -2356,6 +2497,21 @@ def _build_cross_conversation_entity_candidates(
             else:
                 source_participant_ids = right_participant_ids
                 target_participant_ids = left_participant_ids
+            try:
+                pair_key = build_cross_conversation_resolution_pair_key(
+                    source_node.get("graph_node_id"),
+                    target_node.get("graph_node_id"),
+                )
+            except ValueError:
+                continue
+            suppressed_decision_type = suppressed_pair_decisions.get(pair_key)
+            if suppressed_decision_type in {"same", "not_same", "skip", "not_actionable"}:
+                logger.debug(
+                    "Skipping cross-conversation identity candidate due to persisted decision | pair_key=%s decision=%s",
+                    pair_key,
+                    suppressed_decision_type,
+                )
+                continue
 
             candidate = _build_cross_conversation_entity_candidate(
                 source_node=source_node,
@@ -2364,6 +2520,7 @@ def _build_cross_conversation_entity_candidates(
                 target_participant_ids=target_participant_ids,
                 participants=participants,
                 participant_aliases=participant_aliases,
+                confirmed_person_labels=confirmed_person_labels,
             )
             if candidate is None:
                 continue
@@ -2381,15 +2538,26 @@ def build_dossier_participant_candidates(
     participants: list[DossierParticipant],
     confirmed_mentions: list[DossierParticipantMention],
     participant_aliases: dict[str, Any] | None = None,
+    resolution_decisions: list[DossierEntityResolutionDecision] | list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     graph = graph_payload.get("graph") if isinstance(graph_payload, dict) else {}
     nodes = graph.get("nodes") if isinstance(graph, dict) else []
     if not isinstance(nodes, list):
         return []
+    effective_resolution_decisions = (
+        resolution_decisions
+        if resolution_decisions is not None
+        else (
+            graph_payload.get("entity_resolution_decisions")
+            if isinstance(graph_payload, dict)
+            else None
+        )
+    )
 
     normalized_aliases = _normalize_participant_aliases(
         participant_aliases if isinstance(participant_aliases, dict) else None
     )
+    confirmed_person_labels = _build_confirmed_specific_person_label_set(participants)
 
     graph_node_records: list[dict[str, Any]] = []
     for node in nodes:
@@ -2434,6 +2602,7 @@ def build_dossier_participant_candidates(
             participants=participants,
             confirmed_mentions=confirmed_mentions,
             participant_aliases=normalized_aliases,
+            resolution_decisions=effective_resolution_decisions,
         )
 
     task_candidates: list[dict[str, Any]] = []
@@ -2453,6 +2622,7 @@ def build_dossier_participant_candidates(
             mentions=mentions,
             participants=participants,
             participant_aliases=normalized_aliases,
+            confirmed_person_labels=confirmed_person_labels,
         )
         if candidate is not None:
             task_candidates.append(candidate)
@@ -2462,6 +2632,7 @@ def build_dossier_participant_candidates(
         participants=participants,
         confirmed_mentions=confirmed_mentions,
         participant_aliases=normalized_aliases,
+        resolution_decisions=effective_resolution_decisions,
     )
 
     combined_candidates = cross_conversation_candidates + task_candidates

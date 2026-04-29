@@ -13,9 +13,11 @@ from app.services.conversation_store import (
     get_dossier_for_user,
     is_generic_participant_label,
     list_dossier_conversations,
+    list_dossier_entity_resolution_decisions,
     list_dossier_participant_mentions,
     list_dossier_participants,
     serialize_dossier,
+    serialize_dossier_entity_resolution_decision,
     serialize_dossier_participant,
     serialize_dossier_participant_mention,
 )
@@ -1813,6 +1815,7 @@ async def build_dossier_coordination_graph_for_user(
     participants = await list_dossier_participants(db, user_id, dossier.id)
     mentions = await list_dossier_participant_mentions(db, user_id, dossier.id)
     participant_lookup = build_dossier_participant_lookup(participants)
+    decisions = await list_dossier_entity_resolution_decisions(db, user_id, dossier.id)
 
     raw_graph_payload = await get_dossier_graph_payload(
         user_id=user_id,
@@ -1828,6 +1831,10 @@ async def build_dossier_coordination_graph_for_user(
             for mention in mentions
         ],
     )
+    raw_graph_payload["entity_resolution_decisions"] = [
+        serialize_dossier_entity_resolution_decision(decision)
+        for decision in decisions
+    ]
     display_graph = build_dossier_display_graph(
         raw_graph=raw_graph_payload.get("graph"),
         confirmed_participants=raw_graph_payload.get("confirmed_participants"),
@@ -1838,6 +1845,7 @@ async def build_dossier_coordination_graph_for_user(
         participants=participants,
         confirmed_mentions=mentions,
         participant_aliases=participant_aliases,
+        resolution_decisions=decisions,
     )
 
     confirmation_tasks: list[dict[str, Any]] = []

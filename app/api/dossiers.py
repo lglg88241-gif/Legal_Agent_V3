@@ -11,6 +11,8 @@ from app.database.mysql_db import get_db
 from app.services.conversation_store import (
     DEFAULT_DOSSIER_STATUS,
     archive_dossier_record,
+    build_cross_conversation_resolution_pair_hash,
+    build_cross_conversation_resolution_pair_key,
     build_dossier_participant_candidates,
     build_dossier_participant_lookup,
     create_dossier_entity_resolution_decision,
@@ -33,6 +35,7 @@ from app.services.conversation_store import (
     serialize_dossier_detail,
     serialize_dossier_participant,
     serialize_dossier_participant_mention,
+    touch_dossier,
     update_dossier_auto_summary,
     update_dossier_fields,
     update_dossier_participant_aliases,
@@ -132,6 +135,14 @@ class SelfIdentitySourceNodeRequest(BaseModel):
     graph_node_type: str | None = Field(default=None, max_length=100)
 
 
+class CrossConversationDecisionNodeRequest(BaseModel):
+    conversation_id: int = Field(..., gt=0)
+    raw_label: str = Field(..., min_length=1, max_length=100)
+    graph_node_id: str = Field(..., min_length=1, max_length=255)
+    graph_node_label: str | None = Field(default=None, max_length=255)
+    graph_node_type: str | None = Field(default=None, max_length=100)
+
+
 class SelfIdentityConfirmRequest(BaseModel):
     action: str = Field(..., min_length=1, max_length=32)
     source_node: SelfIdentitySourceNodeRequest
@@ -139,7 +150,18 @@ class SelfIdentityConfirmRequest(BaseModel):
     new_display_label: str | None = Field(default=None, max_length=50)
 
 
+class CrossConversationResolutionDecisionRequest(BaseModel):
+    subject: str = Field(..., min_length=1, max_length=64)
+    decision: str = Field(..., min_length=1, max_length=32)
+    source_node: CrossConversationDecisionNodeRequest
+    target_node: CrossConversationDecisionNodeRequest
+    reason: str | None = Field(default=None, max_length=1000)
+    candidate_key: str | None = Field(default=None, max_length=255)
+    task_key: str | None = Field(default=None, max_length=255)
+
+
 _SELF_ANCHOR_SUBJECT = "self_anchor"
+_CROSS_CONVERSATION_IDENTITY_SUBJECT = "cross_conversation_identity"
 _PARTY_NAMING_ROLE = "当事人"
 _PARTY_NAMING_MENTION_SOURCE = "party_naming"
 _PARTY_NAMING_GRAPH_NODE_TYPE = "person"
@@ -148,6 +170,7 @@ _SELF_IDENTITY_CONFIRM_ACTION_SAME = "confirm_same"
 _SELF_IDENTITY_CONFIRM_ACTION_DIFFERENT = "confirm_different"
 _SELF_IDENTITY_DECISION_SAME = "same"
 _SELF_IDENTITY_DECISION_NOT_SAME = "not_same"
+_CROSS_CONVERSATION_DECISION_TYPES = {"same", "not_same", "skip", "not_actionable"}
 _SELF_ANCHOR_LABELS = {
     "当事人",
     "我",
@@ -302,6 +325,65 @@ def _validate_self_anchor_source_node(source_node: SelfIdentitySourceNodeRequest
             detail="self identity confirmation only supports self anchor labels",
         )
     return conversation_id, raw_label, graph_node_id
+
+
+def _normalize_cross_conversation_subject(value: Any) -> str:
+    normalized = _normalize_key(value)
+    if normalized != _CROSS_CONVERSATION_IDENTITY_SUBJECT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported cross conversation resolution subject",
+        )
+    return normalized
+
+
+def _normalize_cross_conversation_decision(value: Any) -> str:
+    normalized = _normalize_key(value)
+    if normalized not in _CROSS_CONVERSATION_DECISION_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported cross conversation resolution decision",
+        )
+    return normalized
+
+
+def _validate_cross_conversation_node(
+    node: CrossConversationDecisionNodeRequest,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    conversation_id = _positive_int(node.conversation_id)
+    raw_label = _normalize_text(node.raw_label)
+    graph_node_id = _normalize_text(node.graph_node_id)
+    if conversation_id <= 0 or not raw_label or not graph_node_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} conversation_id, raw_label, and graph_node_id are required",
+        )
+    return {
+        "conversation_id": conversation_id,
+        "raw_label": raw_label,
+        "graph_node_id": graph_node_id,
+        "graph_node_label": _normalize_text(node.graph_node_label) or raw_label,
+        "graph_node_type": _normalize_text(node.graph_node_type) or None,
+    }
+
+
+def _find_cross_conversation_resolution_decision(
+    decisions: list[Any],
+    *,
+    pair_key: str,
+    pair_hash: int,
+) -> Any | None:
+    for decision in decisions:
+        if _normalize_key(getattr(decision, "subject", "")) != _CROSS_CONVERSATION_IDENTITY_SUBJECT:
+            continue
+        if _normalize_text(getattr(decision, "source_graph_node_id", "")) != pair_key:
+            continue
+        if _positive_int(getattr(decision, "target_participant_id", 0)) != pair_hash:
+            continue
+        return decision
+    return None
 
 
 def _build_party_naming_mentions_payload(
@@ -709,11 +791,17 @@ async def get_dossier_participant_candidates(
         mentions=mentions,
         participant_lookup=participant_lookup,
     )
+    decisions = await list_dossier_entity_resolution_decisions(
+        db,
+        current_user.user_id,
+        dossier.id,
+    )
     candidates = build_dossier_participant_candidates(
         graph_payload=graph_payload,
         participants=participants,
         confirmed_mentions=mentions,
         participant_aliases=participant_aliases,
+        resolution_decisions=decisions,
     )
     return {
         "status": "success",
@@ -1142,6 +1230,101 @@ async def confirm_dossier_self_identity(
             if decision is not None
             else None
         ),
+    }
+
+
+@router.post("/{dossier_id}/participants/cross-conversation/decide")
+async def decide_cross_conversation_participant_resolution(
+    dossier_id: int,
+    payload: CrossConversationResolutionDecisionRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+    _ensure_dossier_participant_write_allowed(dossier)
+
+    subject = _normalize_cross_conversation_subject(payload.subject)
+    decision_type = _normalize_cross_conversation_decision(payload.decision)
+    source_node = _validate_cross_conversation_node(payload.source_node, field_name="source_node")
+    target_node = _validate_cross_conversation_node(payload.target_node, field_name="target_node")
+
+    try:
+        pair_key = build_cross_conversation_resolution_pair_key(
+            source_node["graph_node_id"],
+            target_node["graph_node_id"],
+        )
+        pair_hash = build_cross_conversation_resolution_pair_hash(pair_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    if source_node["graph_node_id"] == target_node["graph_node_id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="cross conversation resolution requires two different graph nodes",
+        )
+
+    ordered_nodes = sorted(
+        [source_node, target_node],
+        key=lambda item: str(item.get("graph_node_id") or ""),
+    )
+    primary_node = ordered_nodes[0]
+    secondary_node = ordered_nodes[1]
+
+    decisions = await list_dossier_entity_resolution_decisions(
+        db,
+        current_user.user_id,
+        dossier.id,
+    )
+    decision = _find_cross_conversation_resolution_decision(
+        decisions,
+        pair_key=pair_key,
+        pair_hash=pair_hash,
+    )
+
+    if decision is None:
+        try:
+            decision = await create_dossier_entity_resolution_decision(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                decision_type=decision_type,
+                subject=subject,
+                source_conversation_id=primary_node["conversation_id"],
+                source_graph_node_id=pair_key,
+                source_raw_label=primary_node["raw_label"],
+                target_participant_id=pair_hash,
+                target_display_label=secondary_node["raw_label"],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    else:
+        decision.decision_type = decision_type
+        decision.source_conversation_id = primary_node["conversation_id"]
+        decision.source_graph_node_id = pair_key
+        decision.source_raw_label = primary_node["raw_label"]
+        decision.target_participant_id = pair_hash
+        decision.target_display_label = secondary_node["raw_label"]
+        db.add(decision)
+        await db.flush()
+        await touch_dossier(db, dossier=dossier)
+
+    await db.commit()
+    await db.refresh(decision)
+
+    return {
+        "status": "success",
+        "decision": {
+            **serialize_dossier_entity_resolution_decision(decision),
+            "pair_key": pair_key,
+            "source_node": source_node,
+            "target_node": target_node,
+            "reason": _normalize_text(payload.reason) or None,
+            "candidate_key": _normalize_text(payload.candidate_key) or None,
+            "task_key": _normalize_text(payload.task_key) or None,
+        },
     }
 
 
