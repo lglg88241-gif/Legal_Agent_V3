@@ -39,7 +39,7 @@ from app.services.case_update_acknowledgement import build_case_update_acknowled
 from app.services.agentic_hard_guards import evaluate_agentic_hard_guards
 from app.services.agentic_planner import build_agentic_plan
 from app.services.agentic_request_context import build_agentic_request_context
-from app.services.agentic_tool_executor import execute_agentic_tool
+from app.services.agentic_tool_executor import execute_agentic_plan_tools
 from app.services.dossier_graph import build_dossier_graph_summary_for_conversation
 from app.services.dossier_graph_tool import (
     load_dossier_graph_context_for_conversation,
@@ -48,7 +48,6 @@ from app.services.dossier_graph_tool import (
 from app.services.execution_trace import ExecutionTrace
 from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
-from app.services.memory_resolver import answer_subject_reference_message_async
 from app.services.message_orchestrator import build_execution_plan_from_message_understanding
 from app.services.message_understanding_agent import understand_message_with_agent
 
@@ -372,6 +371,92 @@ def _record_agentic_tool_call(
         blocked_reason=blocked_reason,
         details=details,
     )
+
+
+def _record_agentic_plan_tool_results(
+    execution_trace: ExecutionTrace,
+    tool_results: list[dict[str, Any]] | None,
+) -> None:
+    for tool_result in list(tool_results or []):
+        if not isinstance(tool_result, dict):
+            continue
+        contract = tool_result.get("contract")
+        execution_trace.add_tool_call(
+            name=str(tool_result.get("tool_name") or ""),
+            category=str(tool_result.get("registry_category") or getattr(contract, "category", "") or ""),
+            status=str(tool_result.get("status") or "success"),
+            dispatch_mode=str(tool_result.get("dispatch_mode") or ""),
+            current_implementation=str(getattr(contract, "current_implementation", "") or ""),
+            planner_callable=tool_result.get("planner_callable"),
+            migration_status=str(getattr(contract, "migration_status", "") or ""),
+            input_summary=tool_result.get("input_summary"),
+            output_summary=tool_result.get("output_summary"),
+            latency_ms=tool_result.get("latency_ms"),
+            error=tool_result.get("error"),
+            side_effect=tool_result.get("side_effect"),
+            arguments_summary=tool_result.get("input_summary"),
+            result_summary=tool_result.get("result_summary"),
+            blocked_reason=tool_result.get("blocked_reason"),
+            details=tool_result.get("details") if isinstance(tool_result.get("details"), dict) else None,
+        )
+
+
+def _build_agentic_executor_context(
+    *,
+    user_id: int,
+    conversation_id: int,
+    session_id: str,
+    question: str,
+    dossier_id: int | None,
+    message_understanding: dict[str, Any],
+    recent_messages: list[dict[str, Any]] | None,
+    dossier_context: dict[str, Any] | None,
+    dossier_graph_context: dict[str, Any] | None,
+    current_conversation_graph: dict[str, Any] | None,
+    case_summary: str,
+    chat_history: str,
+    graph_memory: str,
+    persistence_consent: str | None,
+    execution_plan: dict[str, Any],
+    graph_update_scheduled: bool,
+    graph_update_actions: list[Any] | None,
+    persisted_fact_text: str | None,
+    saved_case_state: dict[str, Any] | None,
+    is_precise_mode: bool,
+    proactive_graph_mode: bool,
+    advisor_dossier_context: dict[str, Any] | None = None,
+    advisor_dossier_graph_summary: str | None = None,
+    advisor_dossier_graph_context: dict[str, Any] | None = None,
+    fallback_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "session_id": session_id,
+        "question": question,
+        "conversation_id": conversation_id,
+        "dossier_id": dossier_id,
+        "message_understanding": message_understanding,
+        "recent_messages": recent_messages or [],
+        "dossier_context": dossier_context,
+        "dossier_graph_context": dossier_graph_context,
+        "current_conversation_graph": current_conversation_graph,
+        "case_summary": case_summary,
+        "chat_history": chat_history,
+        "graph_memory": graph_memory,
+        "persistence_consent": persistence_consent,
+        "execution_plan": execution_plan,
+        "graph_update_scheduled": graph_update_scheduled,
+        "graph_update_actions": graph_update_actions,
+        "persisted_fact_text": persisted_fact_text,
+        "saved_case_state": saved_case_state,
+        "is_precise_mode": is_precise_mode,
+        "proactive_graph_mode": proactive_graph_mode,
+        "advisor_dossier_context": advisor_dossier_context,
+        "advisor_dossier_graph_summary": advisor_dossier_graph_summary,
+        "advisor_dossier_graph_context": advisor_dossier_graph_context,
+        "legal_answer_handler": legal_agent.ask,
+        "fallback_reason": fallback_reason,
+    }
 
 
 def _agentic_write_allowed(
@@ -1527,15 +1612,14 @@ def ask_agent_task(
                 name="dossier_memory_subject_reference",
                 agent="dossier_memory_helper",
             ) as subject_reference_step:
-                for tool_call in agentic_tool_calls:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    tool_name = str(tool_call.get("tool_name") or "").strip()
-                    tool_result = asyncio.run(
-                        execute_agentic_tool(
-                            tool_name,
-                            question=question,
+                plan_execution = asyncio.run(
+                    execute_agentic_plan_tools(
+                        agentic_plan,
+                        _build_agentic_executor_context(
+                            user_id=user_id,
                             conversation_id=conversation_id,
+                            session_id=session_id,
+                            question=question,
                             dossier_id=dossier_id,
                             message_understanding=message_understanding,
                             recent_messages=context.get("recent_messages"),
@@ -1544,40 +1628,37 @@ def ask_agent_task(
                             current_conversation_graph=current_conversation_graph,
                             case_summary=case_summary,
                             chat_history=chat_history,
+                            graph_memory=graph_memory,
                             persistence_consent=persistence_consent,
                             execution_plan=execution_plan,
                             graph_update_scheduled=False,
                             graph_update_actions=None,
                             persisted_fact_text=None,
-                        )
+                            saved_case_state=context.get("saved_case_state"),
+                            is_precise_mode=is_precise_mode,
+                            proactive_graph_mode=proactive_graph_mode,
+                        ),
                     )
-                    if tool_name == "current_conversation_graph_query" and isinstance(tool_result.get("result"), dict):
-                        current_conversation_graph = tool_result.get("result")
-                    _record_agentic_tool_call(
-                        execution_trace,
-                        tool_call,
-                        status=str(tool_result.get("status") or "success"),
-                        result_summary=str(tool_result.get("result_summary") or ""),
-                        details=tool_result.get("details") if isinstance(tool_result.get("details"), dict) else None,
-                    )
-                    if tool_name != "subject_reference_resolve":
-                        continue
-                    answer = tool_result.get("result") if isinstance(tool_result.get("result"), dict) else {}
-                if not isinstance(answer, dict):
-                    answer = asyncio.run(
-                        answer_subject_reference_message_async(
-                            question=question,
-                            message_understanding=message_understanding,
-                            dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
-                            dossier_graph_context=raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None,
-                            current_conversation_graph=current_conversation_graph,
-                            case_summary=case_summary,
-                            recent_messages=context.get("recent_messages"),
-                            current_conversation_id=conversation_id,
-                        )
-                    )
+                )
+                _record_agentic_plan_tool_results(
+                    execution_trace,
+                    plan_execution.get("tool_results") if isinstance(plan_execution, dict) else [],
+                )
+                if isinstance(plan_execution, dict) and isinstance(plan_execution.get("current_conversation_graph"), dict):
+                    current_conversation_graph = plan_execution.get("current_conversation_graph")
+                answer = (
+                    plan_execution.get("final_result")
+                    if isinstance(plan_execution, dict) and isinstance(plan_execution.get("final_result"), dict)
+                    else {}
+                )
                 resolution_trace = (
-                    answer.get("resolution_trace") if isinstance(answer, dict) else None
+                    plan_execution.get("memory_resolution")
+                    if isinstance(plan_execution, dict) and isinstance(plan_execution.get("memory_resolution"), dict)
+                    else (
+                        answer.get("resolution_trace")
+                        if isinstance(answer, dict) and isinstance(answer.get("resolution_trace"), dict)
+                        else None
+                    )
                 )
                 if isinstance(resolution_trace, dict):
                     execution_trace.set_memory_resolution(resolution_trace)
@@ -1645,17 +1726,6 @@ def ask_agent_task(
                             dossier_graph_context=advisor_dossier_graph_context,
                         )
                     )
-                for tool_call in agentic_tool_calls:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    tool_name = str(tool_call.get("tool_name") or "").strip()
-                    if tool_name == "legal_answer_compose":
-                        _record_agentic_tool_call(
-                            execution_trace,
-                            tool_call,
-                            status="success",
-                            result_summary="Handled by legal_agent.ask specialist",
-                        )
                 final_basis_summary = "事实补充按 temporary 模式进入仅分析路径，未执行结构化写入或图谱更新。"
                 final_basis_evidence = ["guard=temporary_blocks_persistence", "specialist=legal_agent"]
                 final_basis_source = "legal_agent"
@@ -1667,23 +1737,14 @@ def ask_agent_task(
                         provider="rules",
                         model="case-update-ack-rules-v1",
                     ) as acknowledgement_step:
-                        for tool_call in agentic_tool_calls:
-                            if not isinstance(tool_call, dict):
-                                continue
-                            tool_name = str(tool_call.get("tool_name") or "").strip()
-                            if tool_name != "acknowledgement_compose":
-                                _record_agentic_tool_call(
-                                    execution_trace,
-                                    tool_call,
-                                    status="planned",
-                                    result_summary="Reserved for future specialist/tool execution",
-                                )
-                                continue
-                            tool_result = asyncio.run(
-                                execute_agentic_tool(
-                                    tool_name,
-                                    question=question,
+                        plan_execution = asyncio.run(
+                            execute_agentic_plan_tools(
+                                agentic_plan,
+                                _build_agentic_executor_context(
+                                    user_id=user_id,
                                     conversation_id=conversation_id,
+                                    session_id=session_id,
+                                    question=question,
                                     dossier_id=dossier_id,
                                     message_understanding=message_understanding,
                                     recent_messages=context.get("recent_messages"),
@@ -1692,6 +1753,7 @@ def ask_agent_task(
                                     current_conversation_graph=current_conversation_graph,
                                     case_summary=case_summary,
                                     chat_history=chat_history,
+                                    graph_memory=graph_memory,
                                     persistence_consent=persistence_consent,
                                     execution_plan=acknowledgement_plan,
                                     graph_update_scheduled=case_update_graph_update_planned,
@@ -1701,54 +1763,32 @@ def ask_agent_task(
                                         if agentic_intent == "confirm_previous_fact"
                                         else (effective_persistence_text if effective_persistence_text else None)
                                     ),
-                                )
+                                    saved_case_state=context.get("saved_case_state"),
+                                    is_precise_mode=is_precise_mode,
+                                    proactive_graph_mode=proactive_graph_mode,
+                                    fallback_reason=(
+                                        str(execution_plan_trace.get("fallback_reason") or "").strip() or None
+                                    ),
+                                ),
                             )
-                            case_update_acknowledgement_result = (
-                                tool_result.get("result") if isinstance(tool_result.get("result"), dict) else None
-                            )
+                        )
+                        _record_agentic_plan_tool_results(
+                            execution_trace,
+                            plan_execution.get("tool_results") if isinstance(plan_execution, dict) else [],
+                        )
+                        case_update_acknowledgement_result = (
+                            plan_execution.get("final_result")
+                            if isinstance(plan_execution, dict) and isinstance(plan_execution.get("final_result"), dict)
+                            else None
+                        )
+                        if isinstance(case_update_acknowledgement_result, dict):
                             acknowledgement_step.set_details(
-                                tool_result.get("details") if isinstance(tool_result.get("details"), dict) else None
+                                case_update_acknowledgement_result.get("trace")
+                                if isinstance(case_update_acknowledgement_result.get("trace"), dict)
+                                else None
                             )
-                            _record_agentic_tool_call(
-                                execution_trace,
-                                tool_call,
-                                status=str(tool_result.get("status") or "success"),
-                                result_summary=str(tool_result.get("result_summary") or ""),
-                                details=tool_result.get("details") if isinstance(tool_result.get("details"), dict) else None,
-                            )
-                        if not isinstance(case_update_acknowledgement_result, dict):
-                            case_update_acknowledgement_result = build_case_update_acknowledgement(
-                                plan=acknowledgement_plan,
-                                intent=str(agentic_intent or execution_plan.get("intent") or ""),
-                                user_message_text=question,
-                                graph_update_scheduled=case_update_graph_update_planned,
-                                graph_update_actions=None,
-                                dossier_id=dossier_id,
-                                conversation_id=conversation_id,
-                                persistence_consent=persistence_consent,
-                                route_intent="CASE_UPDATE",
-                                persisted_fact_text=(
-                                    confirm_previous_fact_text
-                                    if agentic_intent == "confirm_previous_fact"
-                                    else effective_persistence_text
-                                ),
-                                fallback_reason=(
-                                    str(execution_plan_trace.get("fallback_reason") or "").strip() or None
-                                ),
-                            )
-                            acknowledgement_step.set_details(case_update_acknowledgement_result.get("trace"))
-                            _record_agentic_tool_call(
-                                execution_trace,
-                                {
-                                    "tool_name": "acknowledgement_compose",
-                                    "dispatch_mode": "specialist_owned",
-                                    "arguments": {"intent": agentic_intent},
-                                    "contract": None,
-                                },
-                                status="success",
-                                result_summary=_normalize_agentic_text(case_update_acknowledgement_result.get("text")),
-                                details=case_update_acknowledgement_result.get("trace") if isinstance(case_update_acknowledgement_result.get("trace"), dict) else None,
-                            )
+                        else:
+                            raise RuntimeError("acknowledgement_compose did not return a final result")
                     execution_trace.mark_legacy_fallback(used=False, reason=None)
                     answer = {
                         "response": str(case_update_acknowledgement_result.get("text") or ""),
@@ -1807,77 +1847,115 @@ def ask_agent_task(
                     final_basis_evidence = [f"fallback_reason={legacy_fallback_reason}"]
                     final_basis_source = "legacy_fallback"
             elif legal_answer_plan_active:
-                execution_trace.mark_legacy_fallback(used=False, reason=None)
-                retrieval_summaries: list[str] = []
-                for tool_call in agentic_tool_calls:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    tool_name = str(tool_call.get("tool_name") or "").strip()
-                    if tool_name in {"exact_law_lookup", "legal_rag_search"}:
-                        tool_result = asyncio.run(
-                            execute_agentic_tool(
-                                tool_name,
-                                question=question,
-                                conversation_id=conversation_id,
-                                dossier_id=dossier_id,
-                                message_understanding=message_understanding,
-                                recent_messages=context.get("recent_messages"),
-                                dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
-                                dossier_graph_context=raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None,
-                                current_conversation_graph=current_conversation_graph,
-                                case_summary=case_summary,
-                                chat_history=chat_history,
-                                persistence_consent=persistence_consent,
-                                execution_plan=execution_plan,
-                                graph_update_scheduled=False,
-                                graph_update_actions=None,
-                                persisted_fact_text=None,
+                try:
+                    with execution_trace.step_context(
+                        name="legal_agent_answer",
+                        agent="legal_agent",
+                    ) as legal_answer_step:
+                        plan_execution = asyncio.run(
+                            execute_agentic_plan_tools(
+                                agentic_plan,
+                                _build_agentic_executor_context(
+                                    user_id=user_id,
+                                    conversation_id=conversation_id,
+                                    session_id=session_id,
+                                    question=question,
+                                    dossier_id=dossier_id,
+                                    message_understanding=message_understanding,
+                                    recent_messages=context.get("recent_messages"),
+                                    dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
+                                    dossier_graph_context=raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None,
+                                    current_conversation_graph=current_conversation_graph,
+                                    case_summary=case_summary,
+                                    chat_history=chat_history,
+                                    graph_memory=graph_memory,
+                                    persistence_consent=persistence_consent,
+                                    execution_plan=execution_plan,
+                                    graph_update_scheduled=False,
+                                    graph_update_actions=None,
+                                    persisted_fact_text=None,
+                                    saved_case_state=context.get("saved_case_state"),
+                                    is_precise_mode=is_precise_mode,
+                                    proactive_graph_mode=proactive_graph_mode,
+                                    advisor_dossier_context=advisor_dossier_context,
+                                    advisor_dossier_graph_summary=advisor_dossier_graph_summary,
+                                    advisor_dossier_graph_context=advisor_dossier_graph_context,
+                                ),
                             )
                         )
-                        retrieval_summary = str(tool_result.get("result_summary") or "")
-                        retrieval_summaries.append(retrieval_summary)
-                        _record_agentic_tool_call(
+                        _record_agentic_plan_tool_results(
                             execution_trace,
-                            tool_call,
-                            status=str(tool_result.get("status") or "success"),
-                            result_summary=retrieval_summary,
-                            details=tool_result.get("details") if isinstance(tool_result.get("details"), dict) else None,
+                            plan_execution.get("tool_results") if isinstance(plan_execution, dict) else [],
                         )
-                with execution_trace.step_context(
-                    name="legal_agent_answer",
-                    agent="legal_agent",
-                ):
-                    answer = asyncio.run(
-                        legal_agent.ask(
-                            user_id,
-                            session_id,
-                            question,
-                            chat_history=chat_history,
-                            case_summary=case_summary,
-                            graph_memory=graph_memory,
-                            is_precise_mode=is_precise_mode,
-                            proactive_graph_mode=proactive_graph_mode,
-                            conversation_id=conversation_id,
-                            saved_case_state=context.get("saved_case_state"),
-                            dossier_context=advisor_dossier_context,
-                            dossier_graph_summary=advisor_dossier_graph_summary,
-                            dossier_graph_context=advisor_dossier_graph_context,
+                        answer = (
+                            plan_execution.get("final_result")
+                            if isinstance(plan_execution, dict) and isinstance(plan_execution.get("final_result"), dict)
+                            else None
                         )
+                        if not isinstance(answer, dict):
+                            raise RuntimeError("legal_answer_compose did not return a final result")
+                        legal_answer_step.set_details(
+                            {
+                                "tool_count": len(
+                                    plan_execution.get("tool_results")
+                                    if isinstance(plan_execution.get("tool_results"), list)
+                                    else []
+                                ),
+                                "specialist": "legal_answer_compose",
+                            }
+                        )
+                    execution_trace.mark_legacy_fallback(used=False, reason=None)
+                    retrieval_summaries = [
+                        str(item.get("result_summary") or "").strip()
+                        for item in (
+                            plan_execution.get("tool_results")
+                            if isinstance(plan_execution, dict) and isinstance(plan_execution.get("tool_results"), list)
+                            else []
+                        )
+                        if isinstance(item, dict)
+                        and str(item.get("tool_name") or "").strip() in {"exact_law_lookup", "legal_rag_search"}
+                        and str(item.get("result_summary") or "").strip()
+                    ]
+                    final_basis_summary = "Legal answer composed through agentic retrieval plus legacy legal specialist without case writes."
+                    final_basis_evidence = retrieval_summaries or ["specialist=legal_answer_compose"]
+                    final_basis_source = "legal_agent"
+                except Exception as exc:
+                    logger.exception(
+                        "Legal answer compose failed, falling back to legacy legal agent | conversation_id=%s user_id=%s error=%s",
+                        conversation_id,
+                        user_id,
+                        exc,
                     )
-                for tool_call in agentic_tool_calls:
-                    if not isinstance(tool_call, dict):
-                        continue
-                    tool_name = str(tool_call.get("tool_name") or "").strip()
-                    if tool_name == "legal_answer_compose":
-                        _record_agentic_tool_call(
-                            execution_trace,
-                            tool_call,
-                            status="success",
-                            result_summary="Handled by legal_agent.ask specialist",
+                    legacy_fallback_reason = "legal_answer_compose_failed"
+                    execution_trace.mark_legacy_fallback(
+                        used=True,
+                        reason=legacy_fallback_reason,
+                    )
+                    with execution_trace.step_context(
+                        name="legal_agent_answer",
+                        agent="legal_agent",
+                    ):
+                        answer = asyncio.run(
+                            legal_agent.ask(
+                                user_id,
+                                session_id,
+                                question,
+                                chat_history=chat_history,
+                                case_summary=case_summary,
+                                graph_memory=graph_memory,
+                                is_precise_mode=is_precise_mode,
+                                proactive_graph_mode=proactive_graph_mode,
+                                conversation_id=conversation_id,
+                                saved_case_state=context.get("saved_case_state"),
+                                dossier_context=advisor_dossier_context,
+                                dossier_graph_summary=advisor_dossier_graph_summary,
+                                dossier_graph_context=advisor_dossier_graph_context,
+                            )
                         )
+                    final_basis_summary = "Agentic legal composition failed and fell back to the legacy legal specialist."
+                    final_basis_evidence = [f"fallback_reason={legacy_fallback_reason}"]
+                    final_basis_source = "legacy_fallback"
                 final_basis_summary = "已按法律问答链路处理当前请求，不会写入案情或图谱。"
-                final_basis_evidence = retrieval_summaries or ["specialist=legal_agent"]
-                final_basis_source = "legal_agent"
             else:
                 if execution_plan_uses_legacy_fallback:
                     legacy_fallback_reason = (
@@ -1916,7 +1994,18 @@ def ask_agent_task(
                 final_basis_summary = "未形成可执行的 Agent 计划，已回退到旧链路。"
                 final_basis_evidence = [f"fallback_reason={legacy_fallback_reason}"]
                 final_basis_source = "legacy_fallback"
-
+        if legal_answer_plan_active:
+            if final_basis_source == "legal_agent":
+                final_basis_summary = (
+                    "Legal answer composed through agentic retrieval plus legacy legal specialist without case writes."
+                )
+            elif (
+                final_basis_source == "legacy_fallback"
+                and legacy_fallback_reason == "legal_answer_compose_failed"
+            ):
+                final_basis_summary = (
+                    "Agentic legal composition failed and fell back to the legacy legal specialist."
+                )
 
         latency_ms = int((time.time() - start_time) * 1000)
         response_text = answer["response"] if isinstance(answer, dict) else str(answer)

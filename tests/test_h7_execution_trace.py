@@ -307,6 +307,7 @@ def test_fact_update_execution_trace_records_agent_plan_tool_calls_and_writes(
     trace = result["execution_trace"]
     steps = _step_lookup(result)
     tool_names = [item["name"] for item in trace["tool_calls"]]
+    ack_tool = next(item for item in trace["tool_calls"] if item["name"] == "acknowledgement_compose")
 
     assert trace["schema_version"] == 1
     assert trace["message_understanding"]["intent"] == "fact_update"
@@ -321,6 +322,10 @@ def test_fact_update_execution_trace_records_agent_plan_tool_calls_and_writes(
     assert any(item["name"] == "structured_case_persistence" and item["allowed"] is True for item in trace["writes"]["requested"])
     assert any(item["name"] == "graph_update_schedule" and item["applied"] is True for item in trace["writes"]["applied"])
     assert "王经理" in trace["final_basis"]["evidence"][0]
+    assert ack_tool["input_summary"] is not None
+    assert ack_tool["output_summary"] is not None
+    assert isinstance(ack_tool["latency_ms"], int)
+    assert ack_tool["side_effect"] is None
     assert graph_calls == [(9, 1, 101)]
     assert trackers["legal_agent_calls"] == 0
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
