@@ -117,7 +117,10 @@ class ExecutionTrace:
         self._guards: list[dict[str, Any]] = []
         self._writes: dict[str, Any] = {
             "requested": [],
+            "allowed": [],
+            "blocked": [],
             "applied": [],
+            "results": [],
         }
         self._final_basis: dict[str, Any] = {}
         self._legacy_fallback: dict[str, Any] = {
@@ -250,11 +253,17 @@ class ExecutionTrace:
         self,
         *,
         requested: list[dict[str, Any]] | None = None,
+        allowed: list[dict[str, Any]] | None = None,
+        blocked: list[dict[str, Any]] | None = None,
         applied: list[dict[str, Any]] | None = None,
+        results: list[dict[str, Any]] | None = None,
     ) -> None:
         self._writes = {
             "requested": list(requested or []),
+            "allowed": list(allowed or []),
+            "blocked": list(blocked or []),
             "applied": list(applied or []),
+            "results": list(results or []),
         }
 
     def set_final_basis(
@@ -313,13 +322,35 @@ class ExecutionTrace:
                 step["fallback_reason"] = "fallback"
         self._append_step(step)
 
-    def add_guard(self, *, name: str, triggered: bool) -> None:
+    def add_guard(
+        self,
+        *,
+        name: str,
+        triggered: bool,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         normalized_name = _normalize_text(name)
         for item in self._guards:
             if item.get("name") == normalized_name:
                 item["triggered"] = bool(triggered)
+                if isinstance(details, dict) and details:
+                    item["details"] = details
                 return
-        self._guards.append({"name": normalized_name, "triggered": bool(triggered)})
+        payload = {"name": normalized_name, "triggered": bool(triggered)}
+        if isinstance(details, dict) and details:
+            payload["details"] = details
+        self._guards.append(payload)
+
+    def set_guards(self, guards: list[dict[str, Any]] | None) -> None:
+        self._guards = []
+        for guard in list(guards or []):
+            if not isinstance(guard, dict):
+                continue
+            self.add_guard(
+                name=guard.get("name") or "",
+                triggered=bool(guard.get("triggered")),
+                details=guard.get("details") if isinstance(guard.get("details"), dict) else None,
+            )
 
     def mark_legacy_fallback(self, *, used: bool, reason: str | None) -> None:
         self._legacy_fallback = {

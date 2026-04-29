@@ -40,6 +40,7 @@ from app.services.agentic_hard_guards import evaluate_agentic_hard_guards
 from app.services.agentic_planner import build_agentic_plan
 from app.services.agentic_request_context import build_agentic_request_context
 from app.services.agentic_tool_executor import execute_agentic_plan_tools
+from app.services.agentic_write_gateway import execute_agentic_writes
 from app.services.dossier_graph import build_dossier_graph_summary_for_conversation
 from app.services.dossier_graph_tool import (
     load_dossier_graph_context_for_conversation,
@@ -401,6 +402,82 @@ def _record_agentic_plan_tool_results(
         )
 
 
+def _record_agentic_guard_results(
+    execution_trace: ExecutionTrace,
+    guard_eval: dict[str, Any] | None,
+) -> None:
+    for guard in (
+        guard_eval.get("guards_applied")
+        if isinstance(guard_eval, dict) and isinstance(guard_eval.get("guards_applied"), list)
+        else []
+    ):
+        if not isinstance(guard, dict):
+            continue
+        execution_trace.add_guard(
+            name=str(guard.get("name") or ""),
+            triggered=bool(guard.get("triggered")),
+            details=guard.get("details") if isinstance(guard.get("details"), dict) else None,
+        )
+
+
+def _record_agentic_write_results(
+    execution_trace: ExecutionTrace,
+    write_results: list[dict[str, Any]] | None,
+) -> None:
+    for write_result in list(write_results or []):
+        if not isinstance(write_result, dict):
+            continue
+        status = _normalize_agentic_text(write_result.get("status")).lower() or "success"
+        step_name = _normalize_agentic_text(write_result.get("step_name")) or "write"
+        agent = _normalize_agentic_text(write_result.get("agent")) or "agentic_write_gateway"
+        latency_ms = write_result.get("latency_ms")
+        details = (
+            write_result.get("details")
+            if isinstance(write_result.get("details"), dict)
+            else {}
+        )
+        if write_result.get("input_summary"):
+            details["input_summary"] = write_result.get("input_summary")
+        if write_result.get("output_summary"):
+            details["output_summary"] = write_result.get("output_summary")
+
+        if status == "success":
+            execution_trace.add_step(
+                name=step_name,
+                agent=agent,
+                status="success",
+                latency_ms=latency_ms if isinstance(latency_ms, int) else 0,
+                details=details or None,
+            )
+            continue
+
+        if status in {"blocked", "skipped"}:
+            execution_trace.add_step(
+                name=step_name,
+                agent=agent,
+                status="skipped",
+                latency_ms=latency_ms if isinstance(latency_ms, int) else 0,
+                skip_reason=(
+                    _normalize_agentic_text(write_result.get("skip_reason"))
+                    or _normalize_agentic_text(write_result.get("output_summary"))
+                    or "blocked"
+                ),
+                details=details or None,
+            )
+            continue
+
+        execution_trace.add_step(
+            name=step_name,
+            agent=agent,
+            status="failed",
+            latency_ms=latency_ms if isinstance(latency_ms, int) else 0,
+            details={
+                **details,
+                "error": write_result.get("error"),
+            },
+        )
+
+
 def _build_agentic_executor_context(
     *,
     user_id: int,
@@ -467,6 +544,64 @@ def _agentic_write_allowed(
         if _normalize_agentic_text(item.get("name")) == name:
             return bool(item.get("allowed"))
     return False
+
+
+def _build_structured_write_requests(
+    *,
+    input_text: str,
+    persist_reason: str,
+    graph_reason: str,
+) -> list[dict[str, Any]]:
+    normalized_input = _normalize_agentic_text(input_text)
+    return [
+        {
+            "name": "structured_case_persistence",
+            "tool_name": "case_summary_update",
+            "requested": True,
+            "input_text": normalized_input,
+            "reason": persist_reason,
+        },
+        {
+            "name": "graph_update_schedule",
+            "tool_name": "schedule_graph_update",
+            "requested": True,
+            "input_text": normalized_input,
+            "reason": graph_reason,
+        },
+    ]
+
+
+def _build_agentic_write_context(
+    *,
+    user_id: int,
+    conversation_id: int,
+    question: str,
+    response_text: str,
+    assistant_metadata: dict[str, Any],
+    user_message_metadata: dict[str, Any] | None,
+    updated_case_summary: str,
+    case_state_dict: dict[str, Any] | None,
+    case_type: str | None,
+    graph_update_input_text: str | None,
+    graph_update_source: str,
+    persist_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "conversation_id": conversation_id,
+        "user_content": question,
+        "assistant_content": response_text,
+        "assistant_metadata": assistant_metadata,
+        "user_metadata": user_message_metadata if isinstance(user_message_metadata, dict) else {},
+        "updated_case_summary": updated_case_summary,
+        "case_state_dict": case_state_dict if isinstance(case_state_dict, dict) else None,
+        "case_type": case_type,
+        "graph_update_input_text": graph_update_input_text,
+        "graph_update_source": graph_update_source,
+        "structured_persistence_handler": _persist_dialog_turn_async,
+        "graph_update_scheduler": update_graph_task,
+        "persist_result": persist_result if isinstance(persist_result, dict) else {},
+    }
 
 
 def _normalize_subject_reference_text(value: Any) -> str:
@@ -1536,8 +1671,11 @@ def ask_agent_task(
         )
         guard_eval = evaluate_agentic_hard_guards(
             agentic_plan=agentic_plan,
+            request_context=request_context,
+            message_understanding=message_understanding,
             persistence_consent=persistence_consent,
             conversation_mode=conversation_mode,
+            previous_factual_user_message=request_context.previous_factual_user_message,
             missing_previous_fact=missing_previous_fact,
         )
         evaluated_writes = (
@@ -1545,13 +1683,24 @@ def ask_agent_task(
             if isinstance(guard_eval.get("writes_requested"), list)
             else []
         )
-        for guard_item in guard_eval.get("guards_applied", []):
-            if isinstance(guard_item, dict):
-                execution_trace.add_guard(
-                    name=guard_item.get("name") or "",
-                    triggered=bool(guard_item.get("triggered")),
-                )
-        execution_trace.set_writes(requested=evaluated_writes, applied=[])
+        writes_allowed = (
+            guard_eval.get("writes_allowed")
+            if isinstance(guard_eval.get("writes_allowed"), list)
+            else []
+        )
+        writes_blocked = (
+            guard_eval.get("writes_blocked")
+            if isinstance(guard_eval.get("writes_blocked"), list)
+            else []
+        )
+        _record_agentic_guard_results(execution_trace, guard_eval)
+        execution_trace.set_writes(
+            requested=evaluated_writes,
+            allowed=writes_allowed,
+            blocked=writes_blocked,
+            applied=[],
+            results=[],
+        )
         acknowledgement_plan = execution_plan
         if isinstance(execution_plan, dict) and "assistant_acknowledgement" not in execution_plan_step_names:
             acknowledgement_plan = dict(execution_plan)
@@ -1592,7 +1741,9 @@ def ask_agent_task(
         case_update_graph_update_planned = (
             case_update_acknowledgement_active and graph_update_write_allowed
         )
+        legacy_structured_write_active = False
         applied_writes: list[dict[str, Any]] = []
+        write_results: list[dict[str, Any]] = []
         final_basis_summary = ""
         final_basis_evidence: list[str] = []
         final_basis_source = ""
@@ -2048,15 +2199,16 @@ def ask_agent_task(
                     status="skipped",
                     skip_reason="missing_previous_fact",
                 )
-        execution_trace.add_guard(
-            name="dossier_followup_question_blocks_persistence",
-            triggered=bool(
-                route_intent == "CASE_UPDATE"
-                and dossier_followup_question
-                and not message_is_fact_update
-                and not case_update_plan_active
-            ),
-        )
+        if not case_update_plan_active:
+            execution_trace.add_guard(
+                name="dossier_followup_question_blocks_persistence",
+                triggered=bool(
+                    route_intent == "CASE_UPDATE"
+                    and dossier_followup_question
+                    and not message_is_fact_update
+                    and not case_update_plan_active
+                ),
+            )
         if (
             route_intent == "CASE_UPDATE"
             and dossier_followup_question
@@ -2092,20 +2244,21 @@ def ask_agent_task(
                 conversation_mode=conversation_mode,
                 has_dossier_context=has_dossier_context,
             )
-        execution_trace.add_guard(
-            name="non_persistable_case_update",
-            triggered=bool(
-                route_intent == "CASE_UPDATE"
-                and not should_persist_structured_case
-                and persistence_consent != "temporary"
-                and not case_update_blocked_by_legal_qa
-                and not (
-                    dossier_followup_question
-                    and not message_is_fact_update
-                    and not case_update_plan_active
-                )
-            ),
-        )
+        if not case_update_plan_active:
+            execution_trace.add_guard(
+                name="non_persistable_case_update",
+                triggered=bool(
+                    route_intent == "CASE_UPDATE"
+                    and not should_persist_structured_case
+                    and persistence_consent != "temporary"
+                    and not case_update_blocked_by_legal_qa
+                    and not (
+                        dossier_followup_question
+                        and not message_is_fact_update
+                        and not case_update_plan_active
+                    )
+                ),
+            )
         if should_persist_structured_case:
             updated_case_summary = build_structured_case_summary(
                 current_summary=context.get("case_summary"),
@@ -2126,42 +2279,6 @@ def ask_agent_task(
                     user_id,
                     original_route_intent,
                 )
-        elif case_update_plan_active and (
-            "fact_persistence" in execution_plan_step_names or "graph_update" in execution_plan_step_names
-        ):
-            skip_reason = "case_update_not_persisted"
-            if persistence_consent == "temporary":
-                skip_reason = "temporary"
-            elif case_update_blocked_by_legal_qa:
-                skip_reason = "legal_qa"
-            if "fact_persistence" in execution_plan_step_names:
-                execution_trace.add_step(
-                    name="fact_persistence",
-                    agent="conversation_store",
-                    status="skipped",
-                    skip_reason=skip_reason,
-                )
-            if "graph_update" in execution_plan_step_names:
-                execution_trace.add_step(
-                    name="graph_update",
-                    agent="celery.update_graph_task",
-                    status="skipped",
-                    skip_reason=skip_reason,
-                )
-        elif missing_previous_fact:
-            execution_trace.add_step(
-                name="fact_persistence",
-                agent="conversation_store",
-                status="skipped",
-                skip_reason="missing_previous_fact",
-            )
-            execution_trace.add_step(
-                name="graph_update",
-                agent="celery.update_graph_task",
-                status="skipped",
-                skip_reason="missing_previous_fact",
-            )
-
         if route_intent == "GREETING":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Greeting route selected"},
@@ -2243,17 +2360,53 @@ def ask_agent_task(
             }
 
         if route_intent != "GREETING":
-            if case_update_plan_active and should_persist_structured_case:
-                with execution_trace.step_context(
-                    name="fact_persistence",
-                    agent="conversation_store",
-                ) as fact_persistence_step:
-                    fact_persistence_step.set_details(
-                        {
-                            "persistence_mode": "structured_case",
-                            "input_text": effective_persistence_text,
-                        }
+            if case_update_plan_active:
+                if structured_case_write_allowed:
+                    write_gateway_execution = asyncio.run(
+                        execute_agentic_writes(
+                            writes_requested=evaluated_writes,
+                            writes_allowed=writes_allowed,
+                            writes_blocked=writes_blocked,
+                            context=_build_agentic_write_context(
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                                question=question,
+                                response_text=response_text,
+                                assistant_metadata=assistant_metadata,
+                                user_message_metadata=user_message_metadata,
+                                updated_case_summary=updated_case_summary,
+                                case_state_dict=case_state_dict,
+                                case_type=case_type,
+                                graph_update_input_text=(
+                                    graph_update_input_text or effective_persistence_text
+                                ),
+                                graph_update_source=(
+                                    "confirmed_previous_fact"
+                                    if confirm_previous_fact_active
+                                    else "current_message"
+                                ),
+                            ),
+                        )
                     )
+                    persist_result = (
+                        write_gateway_execution.get("persist_result")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("persist_result"), dict)
+                        else persist_result
+                    )
+                    write_results = (
+                        write_gateway_execution.get("write_results")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("write_results"), list)
+                        else []
+                    )
+                    applied_writes = (
+                        write_gateway_execution.get("applied_writes")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("applied_writes"), list)
+                        else []
+                    )
+                else:
                     persist_result = asyncio.run(
                         _persist_dialog_turn_async(
                             user_id=user_id,
@@ -2262,136 +2415,163 @@ def ask_agent_task(
                             assistant_content=response_text,
                             metadata=assistant_metadata,
                             user_metadata=user_message_metadata,
-                            case_summary=updated_case_summary if should_persist_structured_case else "",
-                            case_state_dict=case_state_dict if should_persist_structured_case else None,
-                            case_type=case_type if should_persist_structured_case else None,
+                            case_summary="",
+                            case_state_dict=None,
+                            case_type=None,
                         )
                     )
-                applied_writes.append(
-                    {
-                        "name": "structured_case_persistence",
-                        "applied": True,
-                        "input_text": effective_persistence_text,
-                        "source": "conversation_store",
-                    }
-                )
-            else:
-                persist_result = asyncio.run(
-                    _persist_dialog_turn_async(
-                        user_id=user_id,
-                        conversation_id=conversation_id,
-                        user_content=question,
-                        assistant_content=response_text,
-                        metadata=assistant_metadata,
-                        user_metadata=user_message_metadata,
-                        case_summary=updated_case_summary if should_persist_structured_case else "",
-                        case_state_dict=case_state_dict if should_persist_structured_case else None,
-                        case_type=case_type if should_persist_structured_case else None,
-                    )
-                )
-
-        if should_persist_structured_case:
-            user_message_id = persist_result.get("user_message_id")
-            if user_message_id:
-                with execution_trace.step_context(
-                    name="graph_update",
-                    agent="celery.update_graph_task",
-                ) as graph_update_step:
-                    async_result = update_graph_task.delay(conversation_id, user_id, user_message_id)
-                    graph_task_id = str(getattr(async_result, "id", "") or "").strip()
-                    if not graph_task_id:
-                        graph_task_id = f"scheduled:{conversation_id}:{user_message_id}"
-                    graph_update_step.set_details(
-                        {
-                            "task_id": graph_task_id,
-                            "graph_update_source": (
-                                "confirmed_previous_fact"
-                                if confirm_previous_fact_active
-                                else "current_message"
+                    write_gateway_execution = asyncio.run(
+                        execute_agentic_writes(
+                            writes_requested=evaluated_writes,
+                            writes_allowed=writes_allowed,
+                            writes_blocked=writes_blocked,
+                            context=_build_agentic_write_context(
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                                question=question,
+                                response_text=response_text,
+                                assistant_metadata=assistant_metadata,
+                                user_message_metadata=user_message_metadata,
+                                updated_case_summary=updated_case_summary,
+                                case_state_dict=case_state_dict,
+                                case_type=case_type,
+                                graph_update_input_text=(
+                                    graph_update_input_text or effective_persistence_text
+                                ),
+                                graph_update_source=(
+                                    "confirmed_previous_fact"
+                                    if confirm_previous_fact_active
+                                    else "current_message"
+                                ),
+                                persist_result=persist_result,
                             ),
-                        }
+                        )
                     )
-                if confirm_previous_fact_active:
-                    agent_actions.append(_build_graph_sync_action())
-                applied_writes.append(
-                    {
-                        "name": "graph_update_schedule",
-                        "applied": True,
-                        "input_text": graph_update_input_text or effective_persistence_text,
-                        "source": "celery.update_graph_task",
-                        "task_id": graph_task_id,
-                    }
-                )
+                    write_results = (
+                        write_gateway_execution.get("write_results")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("write_results"), list)
+                        else []
+                    )
+                    applied_writes = (
+                        write_gateway_execution.get("applied_writes")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("applied_writes"), list)
+                        else []
+                    )
             else:
-                execution_trace.add_step(
-                    name="graph_update",
-                    agent="celery.update_graph_task",
-                    status="skipped",
-                    skip_reason="missing_user_message_id",
-                )
-                logger.warning(
-                    "Skip graph update because persisted user message id is missing | conversation_id=%s user_id=%s",
-                    conversation_id,
-                    user_id,
-                )
-        elif route_intent == "CASE_UPDATE":
-            if persistence_consent == "temporary":
-                logger.info(
-                    "Structured case persistence skipped due to temporary consent | conversation_id=%s user_id=%s route_intent=%s",
-                    conversation_id,
-                    user_id,
-                    route_intent,
-                )
-                logger.info(
-                    "Graph update skipped due to temporary consent | conversation_id=%s user_id=%s",
-                    conversation_id,
-                    user_id,
-                )
-            elif case_update_blocked_by_legal_qa:
-                logger.info(
-                    "Structured case persistence skipped because CASE_UPDATE execution plan arrived in LEGAL_QA mode | conversation_id=%s user_id=%s",
-                    conversation_id,
-                    user_id,
-                )
-                logger.info(
-                    "Graph update skipped because CASE_UPDATE execution plan arrived in LEGAL_QA mode | conversation_id=%s user_id=%s",
-                    conversation_id,
-                    user_id,
-                )
-            elif dossier_followup_question and not message_is_fact_update:
-                logger.info(
-                    "Structured case persistence skipped because message is dossier follow-up question | conversation_id=%s user_id=%s route_intent=%s message_is_fact_update=%s",
-                    conversation_id,
-                    user_id,
-                    route_intent,
-                    message_is_fact_update,
-                )
-                logger.info(
-                    "Graph update skipped because message is dossier follow-up question | conversation_id=%s user_id=%s message_is_fact_update=%s",
-                    conversation_id,
-                    user_id,
-                    message_is_fact_update,
-                )
-            else:
-                logger.info(
-                    "Structured case persistence skipped because CASE_UPDATE message was not classified as a persistable factual update | conversation_id=%s user_id=%s route_intent=%s message_is_fact_update=%s dossier_followup_question=%s",
-                    conversation_id,
-                    user_id,
-                    route_intent,
-                    message_is_fact_update,
-                    dossier_followup_question,
-                )
-                logger.info(
-                    "Graph update skipped because CASE_UPDATE message was not classified as a persistable factual update | conversation_id=%s user_id=%s message_is_fact_update=%s dossier_followup_question=%s",
-                    conversation_id,
-                    user_id,
-                    message_is_fact_update,
-                    dossier_followup_question,
-                )
+                if should_persist_structured_case:
+                    legacy_structured_write_active = True
+                    legacy_guard_eval = evaluate_agentic_hard_guards(
+                        agentic_plan={
+                            "intent": (
+                                agentic_intent
+                                or ("fact_update" if message_is_fact_update else "unknown")
+                            ),
+                            "route": route_intent,
+                            "writes_requested": _build_structured_write_requests(
+                                input_text=effective_persistence_text,
+                                persist_reason=(
+                                    "Legacy factual fallback still requires structured case persistence."
+                                ),
+                                graph_reason=(
+                                    "Legacy factual fallback still requires graph update scheduling."
+                                ),
+                            ),
+                        },
+                        request_context=request_context,
+                        message_understanding=message_understanding,
+                        persistence_consent=persistence_consent,
+                        conversation_mode=conversation_mode,
+                        previous_factual_user_message=request_context.previous_factual_user_message,
+                    )
+                    evaluated_writes = (
+                        legacy_guard_eval.get("writes_requested")
+                        if isinstance(legacy_guard_eval.get("writes_requested"), list)
+                        else []
+                    )
+                    writes_allowed = (
+                        legacy_guard_eval.get("writes_allowed")
+                        if isinstance(legacy_guard_eval.get("writes_allowed"), list)
+                        else []
+                    )
+                    writes_blocked = (
+                        legacy_guard_eval.get("writes_blocked")
+                        if isinstance(legacy_guard_eval.get("writes_blocked"), list)
+                        else []
+                    )
+                    _record_agentic_guard_results(execution_trace, legacy_guard_eval)
+                    write_gateway_execution = asyncio.run(
+                        execute_agentic_writes(
+                            writes_requested=evaluated_writes,
+                            writes_allowed=writes_allowed,
+                            writes_blocked=writes_blocked,
+                            context=_build_agentic_write_context(
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                                question=question,
+                                response_text=response_text,
+                                assistant_metadata=assistant_metadata,
+                                user_message_metadata=user_message_metadata,
+                                updated_case_summary=updated_case_summary,
+                                case_state_dict=case_state_dict,
+                                case_type=case_type,
+                                graph_update_input_text=effective_persistence_text,
+                                graph_update_source="current_message",
+                            ),
+                        )
+                    )
+                    persist_result = (
+                        write_gateway_execution.get("persist_result")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("persist_result"), dict)
+                        else persist_result
+                    )
+                    write_results = (
+                        write_gateway_execution.get("write_results")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("write_results"), list)
+                        else []
+                    )
+                    applied_writes = (
+                        write_gateway_execution.get("applied_writes")
+                        if isinstance(write_gateway_execution, dict)
+                        and isinstance(write_gateway_execution.get("applied_writes"), list)
+                        else []
+                    )
+                else:
+                    # TODO(h8-2c): migrate remaining non-structured legacy message persistence
+                    # through the write gateway once generic dialog storage is split from
+                    # structured case-state writes.
+                    persist_result = asyncio.run(
+                        _persist_dialog_turn_async(
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            user_content=question,
+                            assistant_content=response_text,
+                            metadata=assistant_metadata,
+                            user_metadata=user_message_metadata,
+                            case_summary="",
+                            case_state_dict=None,
+                            case_type=None,
+                        )
+                    )
+        if case_update_plan_active or legacy_structured_write_active:
+            _record_agentic_write_results(execution_trace, write_results)
+            if confirm_previous_fact_active and any(
+                isinstance(item, dict)
+                and str(item.get("write_type") or "").strip() == "graph_update_schedule"
+                and str(item.get("status") or "").strip().lower() == "success"
+                for item in write_results
+            ):
+                agent_actions.append(_build_graph_sync_action())
 
         execution_trace.set_writes(
             requested=evaluated_writes,
+            allowed=writes_allowed,
+            blocked=writes_blocked,
             applied=applied_writes,
+            results=write_results,
         )
         if final_basis_summary:
             execution_trace.set_final_basis(

@@ -160,7 +160,10 @@ def test_exact_law_question_uses_exact_lookup_without_case_writes(monkeypatch) -
     assert "legal_answer_compose" in tool_names
     assert trace["agent_plan"]["specialist"] == "legal_qa_agent"
     assert trace["writes"]["requested"] == []
+    assert trace["writes"]["allowed"] == []
+    assert trace["writes"]["blocked"] == []
     assert trace["writes"]["applied"] == []
+    assert trace["writes"]["results"] == []
     assert trace["legacy_fallback"]["used"] is False
     assert trace["final_basis"]["source"] == "legal_agent"
     assert persisted["case_summary"] == ""

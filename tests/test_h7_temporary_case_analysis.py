@@ -151,12 +151,26 @@ def test_temporary_fact_update_runs_legal_analysis_without_persistence(
     assert trackers["ack_calls"] == 0
     assert trace["execution_plan"]["response_mode"] == "case_analysis_without_persistence"
     assert "legal_agent_answer" in step_names
-    assert "fact_persistence" not in step_names
-    assert "graph_update" not in step_names
+    assert "fact_persistence" in step_names
+    assert "graph_update" in step_names
+    assert any(
+        step["name"] == "fact_persistence" and step["status"] == "skipped"
+        for step in trace["steps"]
+    )
+    assert any(
+        step["name"] == "graph_update" and step["status"] == "skipped"
+        for step in trace["steps"]
+    )
     assert any(
         guard["name"] == "temporary_blocks_persistence" and guard["triggered"] is True
         for guard in trace["guards_applied"]
     )
+    assert trace["writes"]["allowed"] == []
+    assert [item["name"] for item in trace["writes"]["blocked"]] == [
+        "structured_case_persistence",
+        "graph_update_schedule",
+    ]
+    assert [item["status"] for item in trace["writes"]["results"]] == ["blocked", "blocked"]
     assert graph_calls == []
     assert persisted["case_summary"] == ""
     assert persisted["case_state_dict"] is None

@@ -319,8 +319,18 @@ def test_fact_update_execution_trace_records_agent_plan_tool_calls_and_writes(
     assert steps["fact_persistence"]["status"] == "success"
     assert steps["graph_update"]["status"] == "success"
     assert trace["writes"]["requested"]
+    assert [item["name"] for item in trace["writes"]["allowed"]] == [
+        "structured_case_persistence",
+        "graph_update_schedule",
+    ]
+    assert trace["writes"]["blocked"] == []
     assert any(item["name"] == "structured_case_persistence" and item["allowed"] is True for item in trace["writes"]["requested"])
     assert any(item["name"] == "graph_update_schedule" and item["applied"] is True for item in trace["writes"]["applied"])
+    assert [item["write_type"] for item in trace["writes"]["results"]] == [
+        "structured_case_persistence",
+        "graph_update_schedule",
+    ]
+    assert all(item["status"] == "success" for item in trace["writes"]["results"])
     assert "王经理" in trace["final_basis"]["evidence"][0]
     assert ack_tool["input_summary"] is not None
     assert ack_tool["output_summary"] is not None
@@ -329,6 +339,14 @@ def test_fact_update_execution_trace_records_agent_plan_tool_calls_and_writes(
     assert graph_calls == [(9, 1, 101)]
     assert trackers["legal_agent_calls"] == 0
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
+    assert "王经理" in (
+        next(
+            item["input_summary"]
+            for item in trace["writes"]["results"]
+            if item["write_type"] == "graph_update_schedule"
+        )
+        or ""
+    )
 
 
 def test_confirm_previous_fact_without_previous_fact_records_blocked_writes_without_legacy_fallback(
@@ -351,8 +369,21 @@ def test_confirm_previous_fact_without_previous_fact_records_blocked_writes_with
     assert steps["assistant_acknowledgement"]["status"] == "success"
     assert steps["fact_confirmation"]["status"] == "skipped"
     assert steps["graph_update"]["status"] == "skipped"
-    assert steps["graph_update"]["skip_reason"] == "missing_previous_fact"
-    assert trace["writes"]["requested"] == []
+    assert steps["graph_update"]["skip_reason"] == "missing_previous_fact_blocks_confirm_writes"
+    assert [item["name"] for item in trace["writes"]["requested"]] == [
+        "structured_case_persistence",
+        "graph_update_schedule",
+    ]
+    assert trace["writes"]["allowed"] == []
+    assert [item["name"] for item in trace["writes"]["blocked"]] == [
+        "structured_case_persistence",
+        "graph_update_schedule",
+    ]
+    assert [item["status"] for item in trace["writes"]["results"]] == ["blocked", "blocked"]
+    assert all(
+        "missing_previous_fact_blocks_confirm_writes" in item["blocked_by"]
+        for item in trace["writes"]["blocked"]
+    )
     assert trace["final_basis"]["source"] == "case_update_acknowledgement"
     assert trackers["legal_agent_calls"] == 0
     assert graph_calls == []
@@ -384,8 +415,14 @@ def test_temporary_fact_update_trace_keeps_writes_blocked_and_uses_legal_special
     assert guards["temporary_blocks_persistence"]["triggered"] is True
     assert trace["agent_plan"]["response_style"] == "case_analysis_without_persistence"
     assert steps["legal_agent_answer"]["status"] == "success"
+    assert trace["writes"]["allowed"] == []
+    assert [item["name"] for item in trace["writes"]["blocked"]] == [
+        "structured_case_persistence",
+        "graph_update_schedule",
+    ]
     assert trace["writes"]["applied"] == []
     assert any(item["name"] == "structured_case_persistence" and item["allowed"] is False for item in trace["writes"]["requested"])
+    assert [item["status"] for item in trace["writes"]["results"]] == ["blocked", "blocked"]
     assert graph_calls == []
     assert trackers["legal_agent_calls"] == 1
     assert persisted["case_summary"] == ""
@@ -411,8 +448,12 @@ def test_subject_reference_trace_records_current_conversation_graph_resolution(
     assert "current_conversation_graph_query" in tool_names
     assert "subject_reference_resolve" in tool_names
     assert steps["dossier_memory_subject_reference"]["status"] == "success"
+    assert _guard_lookup(result)["subject_reference_blocks_writes"]["triggered"] is True
     assert "B公司" in result["response"]
     assert trace["writes"]["requested"] == []
+    assert trace["writes"]["allowed"] == []
+    assert trace["writes"]["blocked"] == []
+    assert trace["writes"]["results"] == []
     assert trackers["legal_agent_calls"] == 0
     assert graph_calls == []
     assert persisted["metadata"]["execution_trace"]["final_basis"]["source"] == "memory_resolver"
@@ -437,6 +478,7 @@ def test_execution_trace_schema_constraints_hold(
     assert "tool_calls" in trace
     assert "writes" in trace
     assert "final_basis" in trace
+    assert {"requested", "allowed", "blocked", "applied", "results"} <= set(trace["writes"])
     for step in trace["steps"]:
         assert step["name"]
         assert step["agent"]
