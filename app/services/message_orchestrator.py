@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.agentic_request_context import (
+    AgenticRequestContext,
+    resolve_previous_factual_user_message,
+)
+
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
@@ -36,43 +41,19 @@ def _resolve_previous_fact_text(
     original_message: str,
     message_understanding: dict[str, Any],
     recent_messages: list[dict[str, Any]] | None,
+    request_context: AgenticRequestContext | None = None,
 ) -> str:
-    previous_fact_confirmation = (
-        message_understanding.get("previous_fact_confirmation")
-        if isinstance(message_understanding.get("previous_fact_confirmation"), dict)
-        else {}
-    )
-    normalized_current_message = _normalize_text(original_message)
-    target_text = _normalize_text(previous_fact_confirmation.get("target_text"))
-    if target_text and target_text != normalized_current_message:
-        return target_text
-
-    normalized_target_message_id = _coerce_int(previous_fact_confirmation.get("target_message_id"))
-    candidates = list(recent_messages or [])
-    if normalized_target_message_id is not None:
-        for item in reversed(candidates):
-            if not isinstance(item, dict):
-                continue
-            if str(item.get("role") or "").strip().lower() != "user":
-                continue
-            candidate_text = _normalize_text(item.get("content"))
-            if not candidate_text or candidate_text == normalized_current_message:
-                continue
-            candidate_message_id = _coerce_int(item.get("message_id") or item.get("id"))
-            if candidate_message_id == normalized_target_message_id:
-                return candidate_text
-
-    for item in reversed(candidates):
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("role") or "").strip().lower() != "user":
-            continue
-        candidate_text = _normalize_text(item.get("content"))
-        if not candidate_text or candidate_text == normalized_current_message:
-            continue
-        return candidate_text
-
-    return ""
+    if isinstance(request_context, AgenticRequestContext):
+        previous_message = request_context.previous_factual_user_message
+    else:
+        previous_message = resolve_previous_factual_user_message(
+            message_text=original_message,
+            recent_messages=recent_messages,
+            message_understanding=message_understanding,
+        )
+    if not isinstance(previous_message, dict):
+        return ""
+    return _normalize_text(previous_message.get("content"))
 
 
 def build_execution_plan_from_message_understanding(
@@ -82,6 +63,7 @@ def build_execution_plan_from_message_understanding(
     recent_messages: list[dict[str, Any]] | None,
     dossier_id: int | None,
     persistence_consent: str | None,
+    request_context: AgenticRequestContext | None = None,
 ) -> dict[str, Any]:
     mu_result = message_understanding if isinstance(message_understanding, dict) else {}
     trace = mu_result.get("trace") if isinstance(mu_result.get("trace"), dict) else {}
@@ -227,6 +209,7 @@ def build_execution_plan_from_message_understanding(
             original_message=normalized_message,
             message_understanding=mu_result,
             recent_messages=recent_messages,
+            request_context=request_context,
         )
         plan["steps"] = [
             _build_step(
@@ -238,6 +221,20 @@ def build_execution_plan_from_message_understanding(
         ]
         plan["resolved_inputs"]["previous_fact_text"] = previous_fact_text
         if previous_fact_text:
+            previous_fact_message = (
+                request_context.previous_factual_user_message
+                if isinstance(request_context, AgenticRequestContext)
+                and isinstance(request_context.previous_factual_user_message, dict)
+                else resolve_previous_factual_user_message(
+                    message_text=normalized_message,
+                    recent_messages=recent_messages,
+                    message_understanding=mu_result,
+                )
+            )
+            if isinstance(previous_fact_message, dict):
+                plan["resolved_inputs"]["previous_fact_message_id"] = _coerce_int(
+                    previous_fact_message.get("message_id")
+                )
             plan["steps"].extend(
                 [
                     _build_step(
@@ -269,6 +266,10 @@ def build_execution_plan_from_message_understanding(
             plan["is_actionable"] = True
         else:
             plan["trace"]["warnings"].append("confirmed_previous_fact_text_unavailable")
+            plan["trace"]["reason"] = (
+                plan["trace"]["reason"]
+                or "No verified previous factual user message is available for confirmation."
+            )
         return plan
 
     return plan

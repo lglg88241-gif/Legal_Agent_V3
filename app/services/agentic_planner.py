@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from app.services.agentic_request_context import AgenticRequestContext
 from app.services.tool_registry import get_tool_contract
 
 
@@ -39,13 +40,70 @@ def _tool_call(
     }
 
 
-def _write_request(name: str, *, requested: bool, input_text: str, reason: str) -> dict[str, Any]:
+def _write_request(
+    name: str,
+    *,
+    tool_name: str | None = None,
+    requested: bool,
+    input_text: str,
+    reason: str,
+) -> dict[str, Any]:
     return {
         "name": name,
+        "tool_name": _normalize_text(tool_name) or None,
         "requested": bool(requested),
         "input_text": _normalize_text(input_text),
         "reason": _normalize_text(reason),
     }
+
+
+def _base_plan(
+    *,
+    intent: str,
+    route: str,
+    response_mode: str,
+    specialist: str,
+    needs_legal_rag: bool,
+    needs_graph_context: bool,
+    needs_structured_persistence: bool,
+) -> dict[str, Any]:
+    return {
+        "planner_version": "h8-2a-v1",
+        "intent": intent,
+        "route": route,
+        "response_mode": response_mode,
+        "response_style": response_mode,
+        "specialist": specialist,
+        "plan_summary": "Legacy-compatible planner fallback.",
+        "context_requirements": [],
+        "tool_sequence": [],
+        "tool_calls": [],
+        "writes_requested": [],
+        "needs_legal_rag": bool(needs_legal_rag),
+        "needs_graph_context": bool(needs_graph_context),
+        "needs_structured_persistence": bool(needs_structured_persistence),
+        "final_response_strategy": "legacy_fallback",
+        "missing_requirements": [],
+        "fallback_allowed": True,
+    }
+
+
+def _resolved_previous_fact_text(
+    *,
+    request_context: AgenticRequestContext | None,
+    execution_plan: dict[str, Any] | None,
+) -> str:
+    if isinstance(request_context, AgenticRequestContext):
+        previous_message = request_context.previous_factual_user_message
+        if isinstance(previous_message, dict):
+            return _normalize_text(previous_message.get("content"))
+
+    resolved_inputs = (
+        execution_plan.get("resolved_inputs")
+        if isinstance(execution_plan, dict) and isinstance(execution_plan.get("resolved_inputs"), dict)
+        else {}
+    )
+    return _normalize_text(resolved_inputs.get("previous_fact_text"))
 
 
 def build_agentic_plan(
@@ -57,226 +115,324 @@ def build_agentic_plan(
     dossier_id: int | None,
     persistence_consent: str | None,
     conversation_mode: str | None,
+    request_context: AgenticRequestContext | None = None,
 ) -> dict[str, Any]:
     del conversation_mode
+    del persistence_consent
 
     mu = message_understanding if isinstance(message_understanding, dict) else {}
-    plan = execution_plan if isinstance(execution_plan, dict) else {}
+    legacy_plan = execution_plan if isinstance(execution_plan, dict) else {}
     intent = _normalize_text(mu.get("intent")).lower() or "unknown"
-    route = _normalize_text(plan.get("primary_route") or mu.get("route_hint")).upper() or "UNKNOWN"
-    response_mode = _normalize_text(plan.get("response_mode")).lower() or "legal_answer"
+    route = _normalize_text(legacy_plan.get("primary_route") or mu.get("route_hint")).upper() or "UNKNOWN"
     normalized_question = _normalize_text(question)
-
-    agentic_plan: dict[str, Any] = {
-        "planner_version": 1,
-        "intent": intent,
-        "route": route,
-        "response_style": response_mode,
-        "specialist": "legacy_fallback",
-        "plan_summary": "本轮仍走旧链路，暂未形成可执行的 Agent 计划。",
-        "tool_calls": [],
-        "writes_requested": [],
+    needs_legal_rag = bool(mu.get("needs_legal_rag"))
+    needs_graph_context = bool(mu.get("needs_dossier_graph_context")) or intent in {
+        "subject_reference",
+        "clarification_response",
     }
+    needs_structured_persistence = bool(mu.get("needs_structured_persistence"))
+
+    plan = _base_plan(
+        intent=intent,
+        route=route,
+        response_mode=_normalize_text(legacy_plan.get("response_mode")).lower() or "legacy_fallback",
+        specialist="legacy_fallback",
+        needs_legal_rag=needs_legal_rag,
+        needs_graph_context=needs_graph_context,
+        needs_structured_persistence=needs_structured_persistence,
+    )
 
     if intent in {"subject_reference", "clarification_response"} and route == "DOSSIER_MEMORY":
-        tool_calls = [
+        tool_sequence = [
             _tool_call(
                 "current_conversation_graph_query",
                 arguments={"conversation_id": conversation_id},
-                reason="优先查询当前会话图谱，先在本会话里解析主体指代。",
+                reason="Load current conversation graph before resolving the subject reference.",
             ),
-        ]
-        if dossier_id:
-            tool_calls.append(
-                _tool_call(
-                    "dossier_graph_context_query",
-                    arguments={
-                        "conversation_id": conversation_id,
-                        "dossier_id": dossier_id,
-                        "query": normalized_question,
-                    },
-                    reason="如果当前会话信息不足，再补充案卷范围的图谱与主体线索。",
-                )
-            )
-        tool_calls.append(
+            _tool_call(
+                "current_conversation_messages_query",
+                arguments={"conversation_id": conversation_id, "limit": 12},
+                reason="Use recent conversation messages as secondary evidence for subject reference resolution.",
+                dispatch_mode="planned_contract",
+            ),
             _tool_call(
                 "subject_reference_resolve",
                 arguments={
                     "question": normalized_question,
+                    "message_understanding": mu,
+                    "recent_messages": (
+                        request_context.recent_messages
+                        if isinstance(request_context, AgenticRequestContext)
+                        else []
+                    ),
                     "current_conversation_id": conversation_id,
                 },
-                reason="结合当前会话图谱、最近消息与案卷线索生成指代解析结论。",
-            )
-        )
-        agentic_plan.update(
+                reason="Resolve the referenced subject from current-conversation and dossier memory scopes.",
+            ),
+            _tool_call(
+                "memory_answer_compose",
+                arguments={
+                    "question": normalized_question,
+                    "message_understanding": mu,
+                    "recent_messages": (
+                        request_context.recent_messages
+                        if isinstance(request_context, AgenticRequestContext)
+                        else []
+                    ),
+                    "current_conversation_id": conversation_id,
+                },
+                reason="Compose the user-facing subject reference answer from resolver output.",
+                dispatch_mode="specialist_owned",
+            ),
+        ]
+        plan.update(
+            response_mode="dossier_memory_answer",
+            response_style="dossier_memory_answer",
             specialist="dossier_memory_agent",
-            response_style="memory_answer",
-            plan_summary="这是主体指代问题。先查当前会话图谱，再按 scope_order 逐级升级到案卷记忆。",
-            tool_calls=tool_calls,
+            plan_summary="Resolve subject reference from current conversation context before escalating to dossier memory.",
+            context_requirements=["current_conversation_graph", "pending_clarification"],
+            tool_sequence=tool_sequence,
+            tool_calls=tool_sequence,
             writes_requested=[],
+            needs_legal_rag=False,
+            needs_graph_context=True,
+            needs_structured_persistence=False,
+            final_response_strategy="memory_answer",
+            missing_requirements=[],
+            fallback_allowed=False,
         )
-        return agentic_plan
+        return plan
 
     if intent == "fact_update" and route == "CASE_UPDATE":
+        tool_sequence = [
+            _tool_call(
+                "case_fact_extract",
+                arguments={"text": normalized_question},
+                reason="Extract structured factual elements from the current user message.",
+                dispatch_mode="planned_contract",
+            ),
+            _tool_call(
+                "case_summary_update",
+                arguments={"conversation_id": conversation_id, "case_summary": normalized_question},
+                reason="Plan a structured case summary update using the current factual message.",
+                dispatch_mode="planned_contract",
+            ),
+            _tool_call(
+                "schedule_graph_update",
+                arguments={"conversation_id": conversation_id, "user_id": 0},
+                reason="Plan a graph update schedule using the current factual message.",
+                dispatch_mode="planned_contract",
+            ),
+            _tool_call(
+                "acknowledgement_compose",
+                arguments={"intent": "fact_update"},
+                reason="Compose a lightweight acknowledgement for the factual update.",
+                dispatch_mode="specialist_owned",
+            ),
+        ]
         writes_requested = [
             _write_request(
                 "structured_case_persistence",
+                tool_name="case_summary_update",
                 requested=True,
                 input_text=normalized_question,
-                reason="当前消息是新的案情事实，应进入结构化案情。",
+                reason="Persist the new factual message into structured case summary state.",
             ),
             _write_request(
                 "graph_update_schedule",
+                tool_name="schedule_graph_update",
                 requested=True,
                 input_text=normalized_question,
-                reason="当前消息包含新的主体、事件或关系线索，应作为图谱更新输入。",
+                reason="Schedule graph extraction/update from the new factual message.",
             ),
         ]
-        if _normalize_text(persistence_consent).lower() == "temporary":
-            agentic_plan.update(
-                specialist="case_update_agent",
-                response_style="case_analysis_without_persistence",
-                plan_summary="这是事实补充，但当前会话为 temporary 模式。本轮只做法律分析，不写结构化案情，也不更新图谱。",
-                tool_calls=[
-                    _tool_call(
-                        "legal_answer_compose",
-                        arguments={"question": normalized_question},
-                        reason="基于当前事实补充生成本轮法律分析。",
-                        dispatch_mode="specialist_owned",
-                    )
-                ],
-                writes_requested=writes_requested,
-            )
-            return agentic_plan
-
-        agentic_plan.update(
+        response_mode = "case_analysis_without_persistence" if (
+            isinstance(request_context, AgenticRequestContext) and request_context.temporary
+        ) else "acknowledge_and_persist"
+        plan.update(
+            response_mode=response_mode,
+            response_style=response_mode,
             specialist="case_update_agent",
-            response_style="acknowledge_and_persist",
-            plan_summary="这是新的案情事实。记录结构化案情并计划更新当前会话图谱，然后返回轻量确认。",
-            tool_calls=[
-                _tool_call(
-                    "acknowledgement_compose",
-                    arguments={"intent": "fact_update"},
-                    reason="生成面向用户的事实补充确认文本。",
-                    dispatch_mode="specialist_owned",
-                )
-            ],
+            plan_summary="Treat the message as a factual case update and acknowledge it after planning persistence writes.",
+            context_requirements=["message_text", "persistence_consent"],
+            tool_sequence=tool_sequence,
+            tool_calls=tool_sequence,
             writes_requested=writes_requested,
+            needs_legal_rag=False,
+            needs_graph_context=False,
+            needs_structured_persistence=True,
+            final_response_strategy="acknowledgement",
+            missing_requirements=[],
+            fallback_allowed=False,
         )
-        return agentic_plan
+        return plan
 
     if intent == "confirm_previous_fact" and route == "CASE_UPDATE":
-        resolved_inputs = plan.get("resolved_inputs") if isinstance(plan.get("resolved_inputs"), dict) else {}
-        previous_fact_text = _normalize_text(resolved_inputs.get("previous_fact_text"))
-        if previous_fact_text:
-            writes_requested = [
-                _write_request(
-                    "structured_case_persistence",
-                    requested=True,
-                    input_text=previous_fact_text,
-                    reason="用户确认了上一条事实，应使用被确认的事实文本做结构化更新。",
-                ),
-                _write_request(
-                    "graph_update_schedule",
-                    requested=True,
-                    input_text=previous_fact_text,
-                    reason="图谱更新必须使用被确认的上一条事实文本，而不是确认短句本身。",
-                ),
-            ]
-            agentic_plan.update(
-                specialist="case_update_agent",
-                response_style="acknowledge_and_persist",
-                plan_summary="这是上一条事实确认。绑定最近一条可确认事实，并以该事实文本执行持久化和图谱更新。",
-                tool_calls=[
-                    _tool_call(
-                        "acknowledgement_compose",
-                        arguments={"intent": "confirm_previous_fact"},
-                        reason="生成上一条事实确认后的用户确认文本。",
-                        dispatch_mode="specialist_owned",
-                    )
-                ],
-                writes_requested=writes_requested,
-            )
-            return agentic_plan
-
-        agentic_plan.update(
-            specialist="case_update_agent",
-            response_style="clarification",
-            plan_summary="用户在确认上一条事实，但当前无法定位可确认的事实文本。本轮只返回澄清，不执行写入。",
-            tool_calls=[
-                _tool_call(
-                    "acknowledgement_compose",
-                    arguments={"intent": "confirm_previous_fact"},
-                    reason="生成缺少上一条事实时的保守澄清回复。",
-                    dispatch_mode="specialist_owned",
-                )
-            ],
-            writes_requested=[
-                _write_request(
-                    "structured_case_persistence",
-                    requested=True,
-                    input_text="",
-                    reason="如果找不到上一条事实，必须阻断结构化写入。",
-                ),
-                _write_request(
-                    "graph_update_schedule",
-                    requested=True,
-                    input_text="",
-                    reason="如果找不到上一条事实，必须阻断图谱更新。",
-                ),
-            ],
+        previous_fact_text = _resolved_previous_fact_text(
+            request_context=request_context,
+            execution_plan=legacy_plan,
         )
-        return agentic_plan
+        base_tool_sequence = [
+            _tool_call(
+                "acknowledgement_compose",
+                arguments={"intent": "confirm_previous_fact"},
+                reason="Compose a lightweight acknowledgement for the previous fact confirmation.",
+                dispatch_mode="specialist_owned",
+            ),
+        ]
+        plan.update(
+            response_mode="acknowledge_and_persist",
+            response_style="acknowledge_and_persist",
+            specialist="case_update_agent",
+            context_requirements=["previous_factual_user_message"],
+            tool_sequence=base_tool_sequence,
+            tool_calls=base_tool_sequence,
+            needs_legal_rag=False,
+            needs_graph_context=False,
+            needs_structured_persistence=True,
+            fallback_allowed=False,
+        )
+        if previous_fact_text:
+            full_tool_sequence = [
+                _tool_call(
+                    "case_summary_update",
+                    arguments={"conversation_id": conversation_id, "case_summary": previous_fact_text},
+                    reason="Plan persistence using the resolved previous factual user message, not the confirmation short sentence.",
+                    dispatch_mode="planned_contract",
+                ),
+                _tool_call(
+                    "schedule_graph_update",
+                    arguments={"conversation_id": conversation_id, "user_id": 0},
+                    reason="Plan graph update using the resolved previous factual user message.",
+                    dispatch_mode="planned_contract",
+                ),
+                *base_tool_sequence,
+            ]
+            plan.update(
+                plan_summary="Bind confirmation to the resolved previous factual user message before planning writes.",
+                tool_sequence=full_tool_sequence,
+                tool_calls=full_tool_sequence,
+                writes_requested=[
+                    _write_request(
+                        "structured_case_persistence",
+                        tool_name="case_summary_update",
+                        requested=True,
+                        input_text=previous_fact_text,
+                        reason="Persist the resolved previous factual user message.",
+                    ),
+                    _write_request(
+                        "graph_update_schedule",
+                        tool_name="schedule_graph_update",
+                        requested=True,
+                        input_text=previous_fact_text,
+                        reason="Schedule graph update from the resolved previous factual user message.",
+                    ),
+                ],
+                final_response_strategy="acknowledgement",
+                missing_requirements=[],
+            )
+            return plan
+
+        plan.update(
+            response_mode="clarification",
+            response_style="clarification",
+            plan_summary="Previous fact confirmation is missing a verified factual target, so writes must stay blocked.",
+            tool_sequence=base_tool_sequence,
+            tool_calls=base_tool_sequence,
+            writes_requested=[],
+            final_response_strategy="ask_clarification",
+            missing_requirements=["previous_factual_user_message"],
+        )
+        return plan
 
     if intent == "legal_question" and route == "LEGAL_QA":
         explicit_article = _looks_like_explicit_law_article_question(normalized_question)
         lookup_tool = "exact_law_lookup" if explicit_article else "legal_rag_search"
-        lookup_reason = (
-            "这是明确法条问题，优先做精确法条查询。"
-            if explicit_article
-            else "这是法律规则问题，先做法律检索。"
-        )
-        agentic_plan.update(
-            specialist="legal_qa_agent",
+        tool_sequence = [
+            _tool_call(
+                lookup_tool,
+                arguments={"query": normalized_question},
+                reason=(
+                    "Use exact law lookup for an explicit statute article question."
+                    if explicit_article
+                    else "Use legal retrieval before composing the legal answer."
+                ),
+            ),
+            _tool_call(
+                "legal_answer_compose",
+                arguments={"question": normalized_question},
+                reason="Compose the final legal answer from retrieval results.",
+                dispatch_mode="specialist_owned",
+            ),
+        ]
+        plan.update(
+            response_mode="legal_answer",
             response_style="legal_answer",
-            plan_summary="这是法律问答。先完成法律检索，再交给法律问答专家生成解释，不写案情也不更新图谱。",
-            tool_calls=[
-                _tool_call(
-                    lookup_tool,
-                    arguments={"query": normalized_question},
-                    reason=lookup_reason,
-                ),
-                _tool_call(
-                    "legal_answer_compose",
-                    arguments={"question": normalized_question},
-                    reason="基于检索结果生成最终法律回答。",
-                    dispatch_mode="specialist_owned",
-                ),
-            ],
+            specialist="legal_qa_agent",
+            plan_summary="Answer a legal question through retrieval and a legal-answer specialist without any case writes.",
+            context_requirements=["message_text"],
+            tool_sequence=tool_sequence,
+            tool_calls=tool_sequence,
             writes_requested=[],
+            needs_legal_rag=True,
+            needs_graph_context=False,
+            needs_structured_persistence=False,
+            final_response_strategy="legal_answer",
+            missing_requirements=[],
+            fallback_allowed=False,
         )
-        return agentic_plan
+        return plan
 
     if intent == "advice_question" and route in {"GENERAL_CONSULT", "LEGAL_QA"}:
-        agentic_plan.update(
-            specialist="legal_qa_agent",
+        tool_sequence = [
+            _tool_call(
+                "legal_rag_search",
+                arguments={"query": normalized_question},
+                reason="Retrieve legal background before composing advice.",
+            ),
+            _tool_call(
+                "legal_answer_compose",
+                arguments={"question": normalized_question},
+                reason="Compose the final advice answer from retrieval results.",
+                dispatch_mode="specialist_owned",
+            ),
+        ]
+        plan.update(
+            response_mode="legal_answer",
             response_style="legal_answer",
-            plan_summary="这是法律建议问题。先做法律检索，再生成维权或准备建议，不写案情也不更新图谱。",
-            tool_calls=[
-                _tool_call(
-                    "legal_rag_search",
-                    arguments={"query": normalized_question},
-                    reason="先检索相关法律依据与裁判规则。",
-                ),
-                _tool_call(
-                    "legal_answer_compose",
-                    arguments={"question": normalized_question},
-                    reason="基于检索依据生成最终建议。",
-                    dispatch_mode="specialist_owned",
-                ),
-            ],
+            specialist="legal_qa_agent",
+            plan_summary="Answer an advice question through legal retrieval and advice composition without case writes.",
+            context_requirements=["message_text"],
+            tool_sequence=tool_sequence,
+            tool_calls=tool_sequence,
             writes_requested=[],
+            needs_legal_rag=True,
+            needs_graph_context=False,
+            needs_structured_persistence=False,
+            final_response_strategy="legal_answer",
+            missing_requirements=[],
+            fallback_allowed=False,
         )
-        return agentic_plan
+        return plan
 
-    return agentic_plan
+    if intent == "document_request" and route in {"DOCUMENT_ASSIST", "GENERAL_CONSULT", "UNKNOWN"}:
+        plan.update(
+            route="DOCUMENT_ASSIST",
+            response_mode="legacy_document_fallback",
+            response_style="legacy_document_fallback",
+            specialist="legacy_document_specialist",
+            plan_summary="Route document request into the planner contract, then allow legacy specialist fallback.",
+            context_requirements=["message_text"],
+            tool_sequence=[],
+            tool_calls=[],
+            writes_requested=[],
+            needs_legal_rag=False,
+            needs_graph_context=False,
+            needs_structured_persistence=False,
+            final_response_strategy="document_assist",
+            missing_requirements=[],
+            fallback_allowed=True,
+        )
+        return plan
+
+    return plan

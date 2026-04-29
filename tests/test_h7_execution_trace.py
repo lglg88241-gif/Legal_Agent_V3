@@ -347,7 +347,7 @@ def test_confirm_previous_fact_without_previous_fact_records_blocked_writes_with
     assert steps["fact_confirmation"]["status"] == "skipped"
     assert steps["graph_update"]["status"] == "skipped"
     assert steps["graph_update"]["skip_reason"] == "missing_previous_fact"
-    assert any(item["name"] == "graph_update_schedule" and item["allowed"] is False for item in trace["writes"]["requested"])
+    assert trace["writes"]["requested"] == []
     assert trace["final_basis"]["source"] == "case_update_acknowledgement"
     assert trackers["legal_agent_calls"] == 0
     assert graph_calls == []

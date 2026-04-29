@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 
 from app.core.llm_factory import create_cloud_llm
 from app.core.llm_provider import get_llm_router
+from app.services.agentic_request_context import AgenticRequestContext
 from app.services.memory_resolver import (
     extract_pending_subject_reference_clarification,
     looks_like_subject_reference_clarification_response,
@@ -194,6 +195,7 @@ def _build_base_result() -> dict[str, Any]:
         "previous_fact_confirmation": None,
         "advice_question": None,
         "legal_question": None,
+        "document_request": None,
         "confidence": "low",
         "reason": "",
         "provider": "fallback",
@@ -390,6 +392,53 @@ def _normalize_optional_question(value: Any, *, message: str) -> dict[str, Any] 
     if isinstance(value, str) and _normalize_text(value):
         return {"enabled": True, "question": _normalize_text(value)}
     return None
+
+
+def _apply_request_context_contract(
+    result: dict[str, Any],
+    *,
+    request_context: AgenticRequestContext | None,
+) -> dict[str, Any]:
+    if not isinstance(request_context, AgenticRequestContext):
+        return result
+
+    result["context_summary"] = dict(request_context.context_summary)
+
+    if result.get("intent") == "confirm_previous_fact":
+        previous_fact_confirmation = (
+            result.get("previous_fact_confirmation")
+            if isinstance(result.get("previous_fact_confirmation"), dict)
+            else None
+        )
+        previous_factual_user_message = request_context.previous_factual_user_message
+        if isinstance(previous_fact_confirmation, dict) and isinstance(previous_factual_user_message, dict):
+            previous_fact_confirmation["target_message_id"] = _coerce_int(
+                previous_fact_confirmation.get("target_message_id")
+            ) or _coerce_int(previous_factual_user_message.get("message_id"))
+            previous_fact_confirmation["target_text"] = (
+                _normalize_text(previous_fact_confirmation.get("target_text"))
+                or _normalize_text(previous_factual_user_message.get("content"))
+                or None
+            )
+            previous_fact_confirmation["target_fact_summary"] = (
+                _normalize_text(previous_fact_confirmation.get("target_fact_summary"))
+                or _normalize_text(previous_factual_user_message.get("content"))
+                or None
+            )
+        elif isinstance(previous_fact_confirmation, dict):
+            previous_fact_confirmation["target_message_id"] = None
+            previous_fact_confirmation["target_text"] = None
+            previous_fact_confirmation["target_fact_summary"] = None
+            trace = result.get("trace") if isinstance(result.get("trace"), dict) else {"steps": [], "warnings": []}
+            warnings = trace.get("warnings") if isinstance(trace.get("warnings"), list) else []
+            if "no_previous_fact_found" not in warnings:
+                warnings.append("no_previous_fact_found")
+            trace["warnings"] = warnings
+            result["trace"] = trace
+            if not _normalize_text(result.get("reason")):
+                result["reason"] = "no_previous_fact_found"
+
+    return result
 
 
 def _normalize_clarification_response(
@@ -661,6 +710,7 @@ def _build_prompt_messages(
     dossier_id: int | None,
     dossier_context: dict[str, Any] | None,
     case_summary: str | None,
+    context_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     request_payload = {
         "current_message": message,
@@ -670,6 +720,7 @@ def _build_prompt_messages(
         "dossier_id": _coerce_int(dossier_id),
         "dossier_context": _serialize_context(dossier_context),
         "case_summary": _normalize_text(case_summary, limit=_MAX_CONTEXT_LENGTH),
+        "context_summary": context_summary if isinstance(context_summary, dict) else {},
     }
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -760,8 +811,17 @@ async def understand_message_with_agent(
     case_summary: str | None = None,
     provider_hint: str | None = None,
     use_llm: bool = True,
+    request_context: AgenticRequestContext | None = None,
 ) -> dict[str, Any]:
-    normalized_message = _normalize_text(message)
+    if isinstance(request_context, AgenticRequestContext):
+        normalized_message = request_context.message_text
+        recent_messages = request_context.recent_messages
+        conversation_mode = request_context.conversation_mode
+        dossier_id = request_context.dossier_id
+        dossier_context = request_context.dossier_context
+        case_summary = request_context.case_summary
+    else:
+        normalized_message = _normalize_text(message)
     trace = {"steps": ["build_request"], "warnings": []}
 
     if not normalized_message:
@@ -771,22 +831,32 @@ async def understand_message_with_agent(
             trace=trace,
         )
 
-    pending_clarification = extract_pending_subject_reference_clarification(recent_messages)
+    pending_clarification = (
+        request_context.pending_clarification
+        if isinstance(request_context, AgenticRequestContext)
+        else extract_pending_subject_reference_clarification(recent_messages)
+    )
     if looks_like_subject_reference_clarification_response(
         message=normalized_message,
         pending_clarification=pending_clarification,
     ):
-        return _build_pending_clarification_contract_result(
-            message=normalized_message,
-            pending_clarification=pending_clarification,
-            trace=trace,
+        return _apply_request_context_contract(
+            _build_pending_clarification_contract_result(
+                message=normalized_message,
+                pending_clarification=pending_clarification,
+                trace=trace,
+            ),
+            request_context=request_context,
         )
 
     if not use_llm:
-        return _build_fallback_result(
-            message=normalized_message,
-            fallback_reason="llm_disabled",
-            trace=trace,
+        return _apply_request_context_contract(
+            _build_fallback_result(
+                message=normalized_message,
+                fallback_reason="llm_disabled",
+                trace=trace,
+            ),
+            request_context=request_context,
         )
 
     messages = _build_prompt_messages(
@@ -796,6 +866,11 @@ async def understand_message_with_agent(
         dossier_id=dossier_id,
         dossier_context=dossier_context,
         case_summary=case_summary,
+        context_summary=(
+            request_context.context_summary
+            if isinstance(request_context, AgenticRequestContext)
+            else None
+        ),
     )
     trace["steps"].append("build_prompt")
 
@@ -807,20 +882,26 @@ async def understand_message_with_agent(
     except Exception as exc:
         logger.warning("Message understanding LLM call failed: %s", exc)
         trace["steps"].append("call_llm")
-        return _build_fallback_result(
-            message=normalized_message,
-            fallback_reason="llm_call_failed",
-            trace=trace,
+        return _apply_request_context_contract(
+            _build_fallback_result(
+                message=normalized_message,
+                fallback_reason="llm_call_failed",
+                trace=trace,
+            ),
+            request_context=request_context,
         )
 
     trace["steps"].append("call_llm")
     parsed = _extract_json_object(llm_response.get("content", ""))
     if parsed is None:
         logger.warning("Message understanding LLM returned invalid JSON payload")
-        return _build_fallback_result(
-            message=normalized_message,
-            fallback_reason="invalid_llm_json",
-            trace=trace,
+        return _apply_request_context_contract(
+            _build_fallback_result(
+                message=normalized_message,
+                fallback_reason="invalid_llm_json",
+                trace=trace,
+            ),
+            request_context=request_context,
         )
 
     trace["steps"].append("parse_llm_json")
@@ -832,4 +913,12 @@ async def understand_message_with_agent(
         trace=trace,
     )
     trace["steps"].append("normalize_result")
-    return normalized_result
+    if normalized_result.get("intent") == "document_request":
+        normalized_result["document_request"] = _normalize_optional_question(
+            parsed.get("document_request"),
+            message=normalized_message,
+        ) or {"enabled": True, "question": normalized_message}
+    return _apply_request_context_contract(
+        normalized_result,
+        request_context=request_context,
+    )

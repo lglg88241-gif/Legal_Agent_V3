@@ -57,5 +57,12 @@ def test_party_naming_tool_is_planned_not_directly_callable() -> None:
     assert contract.planner_callable is False
 
 
+def test_current_conversation_messages_query_is_declared_as_planned_contract() -> None:
+    contract = get_tool_contract("current_conversation_messages_query")
+    assert contract is not None
+    assert contract.migration_status == "planned"
+    assert contract.planner_callable is False
+
+
 def test_registry_validation_passes() -> None:
     validate_tool_registry()

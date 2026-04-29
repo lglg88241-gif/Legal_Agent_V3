@@ -289,6 +289,27 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
         migration_status="ready_readonly",
     ),
     _tool(
+        name="current_conversation_messages_query",
+        category="memory",
+        current_implementation="app.services.conversation_store::list_recent_conversation_messages",
+        description="Read-only recent current-conversation message lookup used by subject reference and clarification flows.",
+        input_schema=_schema(
+            required=("conversation_id",),
+            properties={
+                "conversation_id": {"type": "integer"},
+                "limit": {"type": "integer"},
+            },
+        ),
+        output_schema=_schema(
+            properties={
+                "recent_messages": {"type": "array"},
+            },
+        ),
+        planner_callable=False,
+        migration_status="planned",
+        notes="Planned in H8-2a contract only. Executor wiring is deferred to H8-2b.",
+    ),
+    _tool(
         name="dossier_intelligence_build",
         category="intelligence",
         current_implementation="app.services.dossier_intelligence::build_dossier_intelligence",
@@ -322,13 +343,15 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
         current_implementation="app.services.memory_resolver::build_subject_reference_response_text",
         description="Resolve subject references across current-conversation and dossier memory scopes.",
         input_schema=_schema(
-            required=("question", "message_understanding", "recent_messages", "current_conversation_id"),
+            required=("question", "message_understanding", "current_conversation_id"),
             properties={
                 "question": {"type": "string"},
                 "message_understanding": {"type": "object"},
+                "request_context": {"type": "object"},
                 "current_conversation_graph": {"type": "object"},
                 "dossier_context": {"type": "object"},
                 "dossier_graph_context": {"type": "object"},
+                "pending_clarification": {"type": "object"},
                 "recent_messages": {"type": "array"},
                 "current_conversation_id": {"type": "integer"},
             },
@@ -436,13 +459,15 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
         current_implementation="app.services.memory_resolver::answer_subject_reference_message_async",
         description="Compose the final user-facing answer for subject-reference and clarification flows.",
         input_schema=_schema(
-            required=("question", "message_understanding", "recent_messages", "current_conversation_id"),
+            required=("question", "message_understanding", "current_conversation_id"),
             properties={
                 "question": {"type": "string"},
                 "message_understanding": {"type": "object"},
+                "request_context": {"type": "object"},
                 "current_conversation_graph": {"type": "object"},
                 "dossier_context": {"type": "object"},
                 "dossier_graph_context": {"type": "object"},
+                "pending_clarification": {"type": "object"},
                 "case_summary": {"type": "string"},
                 "recent_messages": {"type": "array"},
                 "current_conversation_id": {"type": "integer"},
@@ -457,6 +482,7 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
         ),
         planner_callable=False,
         migration_status="specialist_only",
+        notes="Planner may reference this compose step in H8-2a, but executor ownership remains deferred to H8-2b.",
     ),
     _tool(
         name="acknowledgement_compose",

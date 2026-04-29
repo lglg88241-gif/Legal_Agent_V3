@@ -38,6 +38,7 @@ from app.services.case_followup import (
 from app.services.case_update_acknowledgement import build_case_update_acknowledgement
 from app.services.agentic_hard_guards import evaluate_agentic_hard_guards
 from app.services.agentic_planner import build_agentic_plan
+from app.services.agentic_request_context import build_agentic_request_context
 from app.services.agentic_tool_executor import execute_agentic_tool
 from app.services.dossier_graph import build_dossier_graph_summary_for_conversation
 from app.services.dossier_graph_tool import (
@@ -111,10 +112,12 @@ def _build_message_understanding_shadow_fallback(
         "needs_structured_persistence": False,
         "needs_graph_update": False,
         "subject_reference": None,
+        "clarification_response": None,
         "fact_update": None,
         "previous_fact_confirmation": None,
         "advice_question": None,
         "legal_question": None,
+        "document_request": None,
         "confidence": "low",
         "reason": reason,
         "provider": "fallback",
@@ -136,17 +139,24 @@ async def _build_message_understanding_shadow_async(
     conversation_id: int,
     dossier_context: dict[str, Any] | None,
     case_summary: str | None,
+    request_context=None,
 ) -> dict[str, Any]:
-    shadow_dossier_context = (
-        dossier_context
-        if isinstance(dossier_context, dict)
-        else {
-            "has_dossier": bool(dossier_id),
-            "dossier_id": dossier_id,
-            "conversation_id": conversation_id,
-        }
-    )
-    shadow_recent_messages = recent_messages if isinstance(recent_messages, list) else []
+    if request_context is not None:
+        shadow_dossier_context = request_context.dossier_context
+        shadow_recent_messages = request_context.recent_messages
+        conversation_mode = request_context.conversation_mode
+        dossier_id = request_context.dossier_id
+    else:
+        shadow_dossier_context = (
+            dossier_context
+            if isinstance(dossier_context, dict)
+            else {
+                "has_dossier": bool(dossier_id),
+                "dossier_id": dossier_id,
+                "conversation_id": conversation_id,
+            }
+        )
+        shadow_recent_messages = recent_messages if isinstance(recent_messages, list) else []
 
     try:
         result = await understand_message_with_agent(
@@ -157,6 +167,7 @@ async def _build_message_understanding_shadow_async(
             dossier_context=shadow_dossier_context,
             case_summary=case_summary,
             use_llm=True,
+            request_context=request_context,
         )
     except Exception as exc:
         logger.warning(
@@ -1008,6 +1019,7 @@ async def _run_task_async(
             "recent_messages": recent_messages,
             "case_summary": case_summary,
             "graph_memory": graph_memory,
+            "current_conversation_graph": None,
             "saved_case_state": saved_case_state,
             "persistence_consent": persistence_consent,
             "conversation_mode": conversation_mode,
@@ -1242,6 +1254,35 @@ def ask_agent_task(
         dossier_id = context.get("dossier_id")
         if not dossier_id and isinstance(raw_dossier_context, dict):
             dossier_id = raw_dossier_context.get("id")
+        current_conversation_graph = (
+            context.get("current_conversation_graph")
+            if isinstance(context.get("current_conversation_graph"), dict)
+            else None
+        )
+        request_context = build_agentic_request_context(
+            request_id=request_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message_text=question,
+            chat_history=chat_history,
+            recent_messages=context.get("recent_messages"),
+            conversation_mode=conversation_mode,
+            persistence_consent=persistence_consent,
+            case_summary=case_summary,
+            saved_case_state=context.get("saved_case_state"),
+            current_conversation_graph=current_conversation_graph,
+            dossier_id=dossier_id,
+            dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
+            dossier_graph_context=(
+                raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None
+            ),
+            ownership_context={
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "dossier_id": dossier_id,
+                "owner_check_pending": False,
+            },
+        )
         message_understanding_started_at = time.time()
         message_understanding = asyncio.run(
             _build_message_understanding_shadow_async(
@@ -1252,7 +1293,33 @@ def ask_agent_task(
                 conversation_id=conversation_id,
                 dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
                 case_summary=case_summary,
+                request_context=request_context,
             )
+        )
+        request_context = build_agentic_request_context(
+            request_id=request_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            message_text=question,
+            chat_history=chat_history,
+            recent_messages=context.get("recent_messages"),
+            conversation_mode=conversation_mode,
+            persistence_consent=persistence_consent,
+            case_summary=case_summary,
+            saved_case_state=context.get("saved_case_state"),
+            current_conversation_graph=current_conversation_graph,
+            dossier_id=dossier_id,
+            dossier_context=raw_dossier_context if isinstance(raw_dossier_context, dict) else None,
+            dossier_graph_context=(
+                raw_dossier_graph_context if isinstance(raw_dossier_graph_context, dict) else None
+            ),
+            ownership_context={
+                "user_id": user_id,
+                "conversation_id": conversation_id,
+                "dossier_id": dossier_id,
+                "owner_check_pending": False,
+            },
+            message_understanding=message_understanding,
         )
         message_understanding_latency_ms = int(
             max(0.0, (time.time() - message_understanding_started_at) * 1000)
@@ -1281,9 +1348,10 @@ def ask_agent_task(
         execution_plan = build_execution_plan_from_message_understanding(
             message_understanding,
             original_message=question,
-            recent_messages=context.get("recent_messages"),
+            recent_messages=request_context.recent_messages,
             dossier_id=dossier_id,
             persistence_consent=persistence_consent,
+            request_context=request_context,
         )
         execution_plan_steps = (
             execution_plan.get("steps") if isinstance(execution_plan.get("steps"), list) else []
@@ -1320,11 +1388,6 @@ def ask_agent_task(
         graph_update_input_text = " ".join(
             str(execution_plan_resolved_inputs.get("graph_update_input_text") or "").strip().split()
         )
-        current_conversation_graph = (
-            context.get("current_conversation_graph")
-            if isinstance(context.get("current_conversation_graph"), dict)
-            else None
-        )
         agentic_plan = build_agentic_plan(
             question=question,
             message_understanding=message_understanding,
@@ -1333,6 +1396,7 @@ def ask_agent_task(
             dossier_id=dossier_id,
             persistence_consent=persistence_consent,
             conversation_mode=conversation_mode,
+            request_context=request_context,
         )
         agentic_tool_calls = (
             agentic_plan.get("tool_calls")
