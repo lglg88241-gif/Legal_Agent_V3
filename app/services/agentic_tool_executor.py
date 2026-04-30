@@ -94,10 +94,12 @@ def _legal_qa_case_isolated(runtime: dict[str, Any]) -> bool:
     route = _normalize_text(plan.get("route")).upper()
     intent = _normalize_text(plan.get("intent") or message_understanding.get("intent")).lower()
     strategy = _normalize_text(plan.get("final_response_strategy")).lower()
+    has_advisor_dossier_context = isinstance(runtime.get("advisor_dossier_context"), dict)
     return (
         route == "LEGAL_QA"
         and intent == "legal_question"
         and strategy == "answer_legal_question_without_case_pollution"
+        and not has_advisor_dossier_context
     )
 
 

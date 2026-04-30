@@ -225,7 +225,7 @@ def test_build_execution_plan_temporary_fact_update_uses_transient_case_analysis
 
     assert plan["intent"] == "fact_update"
     assert plan["primary_route"] == "CASE_UPDATE"
-    assert plan["response_mode"] == "case_analysis_without_persistence"
+    assert plan["response_mode"] == "temporary_case_analysis"
     assert plan["persistence_allowed"] is False
     assert plan["graph_update_allowed"] is False
     assert plan["is_actionable"] is True

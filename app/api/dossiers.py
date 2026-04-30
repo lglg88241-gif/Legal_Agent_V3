@@ -912,12 +912,14 @@ async def get_dossier_display_graph(
     }
 
 
-@router.get("/{dossier_id}/coordination-graph")
-async def get_dossier_coordination_graph(
+async def _build_dossier_canonical_graph_response(
+    *,
     dossier_id: int,
-    current_user: AuthenticatedUser = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
+    current_user: AuthenticatedUser,
+    db: AsyncSession,
+    view: str,
+    graph_key: str,
+) -> dict[str, Any]:
     await ensure_storage_schema()
     try:
         payload = await build_dossier_coordination_graph_for_user(
@@ -934,13 +936,43 @@ async def get_dossier_coordination_graph(
     return {
         "status": "success",
         "dossier_id": dossier_id,
-        "view": "coordination",
-        "coordination_graph": payload.get("coordination_graph", {}),
+        "view": view,
+        graph_key: payload.get("coordination_graph", {}),
         "entity_onboarding": payload.get("entity_onboarding", []),
         "conversation_entity_states": payload.get("conversation_entity_states", []),
         "dossier_entity_state": payload.get("dossier_entity_state", {}),
         "generated_at": payload.get("generated_at"),
     }
+
+
+@router.get("/{dossier_id}/coordination-graph")
+async def get_dossier_coordination_graph(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _build_dossier_canonical_graph_response(
+        dossier_id=dossier_id,
+        current_user=current_user,
+        db=db,
+        view="coordination",
+        graph_key="coordination_graph",
+    )
+
+
+@router.get("/{dossier_id}/canonical-graph")
+async def get_dossier_canonical_graph(
+    dossier_id: int,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _build_dossier_canonical_graph_response(
+        dossier_id=dossier_id,
+        current_user=current_user,
+        db=db,
+        view="canonical",
+        graph_key="canonical_graph",
+    )
 
 
 @router.get("/{dossier_id}/intelligence")

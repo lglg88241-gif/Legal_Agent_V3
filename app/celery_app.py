@@ -51,8 +51,7 @@ from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 from app.services.message_orchestrator import build_execution_plan_from_message_understanding
 from app.services.message_understanding_agent import understand_message_with_agent
-from app.services.conversation_entity_state import build_conversation_entity_state
-from app.services.dossier_entity_state import build_dossier_entity_state
+from app.services.dossier_state_snapshot import build_single_conversation_dossier_state_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -1727,11 +1726,11 @@ def ask_agent_task(
             ]
         case_update_transient_analysis_active = (
             case_update_plan_active
-            and agentic_response_style == "case_analysis_without_persistence"
+            and agentic_response_style == "temporary_case_analysis"
         )
         case_update_acknowledgement_active = (
             case_update_plan_active
-            and agentic_response_style in {"acknowledge_and_persist", "clarification"}
+            and agentic_response_style in {"tracked_case_refresh", "clarification"}
             and any(
                 str(item.get("tool_name") or "").strip() == "acknowledgement_compose"
                 for item in agentic_tool_calls
@@ -1864,60 +1863,16 @@ def ask_agent_task(
                 try:
                     raw_graph_payload = raw_dossier_graph_context.get("graph_payload")
                     if isinstance(raw_graph_payload, dict):
-                        conversation_entity_state = build_conversation_entity_state(
+                        snapshot = build_single_conversation_dossier_state_snapshot(
                             message_text=question,
                             raw_graph_payload=raw_graph_payload,
                             conversation_id=conversation_id,
                             conversation_mode=conversation_mode,
                             persistence_consent=persistence_consent,
+                            dossier_id=dossier_id,
+                            user_id=user_id,
                         )
-                        if conversation_entity_state.get("should_build"):
-                            dossier_entity_state = build_dossier_entity_state(
-                                conversation_entity_states=[conversation_entity_state],
-                                dossier_id=dossier_id,
-                                user_id=user_id,
-                                resolution_decisions=[],
-                                conversation_summaries=[],
-                            )
-                            canonical_entities = dossier_entity_state.get("entities") if isinstance(dossier_entity_state.get("entities"), list) else []
-                            entity_parts = []
-                            current_party = None
-                            employers = []
-                            organizations = []
-                            relations = []
-                            for entity in canonical_entities:
-                                if not isinstance(entity, dict):
-                                    continue
-                                label = str(entity.get("canonical_label") or "").strip()
-                                entity_type = str(entity.get("entity_type") or "").strip()
-                                role = str(entity.get("role") or "").strip()
-                                confidence = str(entity.get("confidence") or "").strip()
-                                if not label or confidence == "low":
-                                    continue
-                                if role == "current_party" and entity_type == "person":
-                                    current_party = label
-                                elif role == "employer" and entity_type == "organization":
-                                    employers.append(label)
-                                elif entity_type == "organization" and label not in employers:
-                                    organizations.append(label)
-                            for relation in dossier_entity_state.get("relations") if isinstance(dossier_entity_state.get("relations"), list) else []:
-                                if not isinstance(relation, dict):
-                                    continue
-                                source_label = str(relation.get("source_label") or "").strip()
-                                target_label = str(relation.get("target_label") or "").strip()
-                                relation_label = str(relation.get("label") or "").strip()
-                                if source_label and target_label and relation_label:
-                                    relations.append((source_label, relation_label, target_label))
-                            if current_party:
-                                entity_parts.append(f"当事人是{current_party}")
-                            for employer in employers[:2]:
-                                entity_parts.append(f"用人单位是{employer}")
-                            for org in organizations[:2]:
-                                entity_parts.append(f"涉及组织{org}")
-                            for source, rel, target in relations[:3]:
-                                entity_parts.append(f"{source}{rel}{target}")
-                            if entity_parts:
-                                h9_canonical_entity_summary = "当前案卷已确认：" + "；".join(entity_parts) + "。"
+                        h9_canonical_entity_summary = snapshot.get("canonical_entity_summary")
                 except Exception as exc:
                     logger.warning(
                         "H9 canonical entity summary build failed | conversation_id=%s dossier_id=%s error=%s",

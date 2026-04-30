@@ -93,6 +93,8 @@ async def process_dialog(
                 }
 
         current_mode = normalize_conversation_mode(getattr(conversation, "conversation_mode", None))
+        conversation_dossier_id = getattr(conversation, "dossier_id", None)
+        has_bound_dossier = isinstance(conversation_dossier_id, int) and conversation_dossier_id > 0
         if request.mode_consent_enabled:
             persistence_consent = normalize_persistence_consent(
                 getattr(conversation, "persistence_consent", None)
@@ -100,7 +102,7 @@ async def process_dialog(
             case_tracking_decision = await decide_case_tracking_entry(
                 message_text=clean_input,
                 conversation_mode=current_mode,
-                dossier_id=getattr(conversation, "dossier_id", None),
+                dossier_id=conversation_dossier_id,
                 recent_messages=recent_messages,
                 current_conversation_graph=current_graph_summary,
                 case_summary=conversation.case_summary,
@@ -122,7 +124,7 @@ async def process_dialog(
                 await db.commit()
                 current_mode = "LEGAL_QA"
 
-            if requires_consent:
+            if requires_consent and not has_bound_dossier:
                 return {
                     "status": "needs_confirmation",
                     "action": "mode_consent",
@@ -134,11 +136,14 @@ async def process_dialog(
                     "conversation_mode": current_mode,
                     "suggested_mode": suggested_mode,
                     "requires_persistence_consent": True,
-                    "consent_prompt": "我注意到你正在描述一个具体案情。是否要保存为持续跟踪的案情会话？",
+                    "consent_prompt": "我注意到你正在描述一个具体案情。你可以仅在本轮分析，或将它纳入案卷持续跟踪。",
                     "consent_actions": [
-                        {"label": "仅本次分析", "value": "temporary"},
-                        {"label": "保存并持续跟踪", "value": "tracked"},
+                        {"label": "仅本轮分析", "value": "temporary_analysis"},
+                        {"label": "进入案卷持续跟踪", "value": "tracked_dossier"},
                     ],
+                    "tracking_entry_kind": "dossier_selection_required",
+                    "requires_dossier_binding": True,
+                    "has_bound_dossier": False,
                     "reason": reason,
                     "case_tracking_decision": case_tracking_decision,
                 }

@@ -1,29 +1,38 @@
-"""Test H9 canonical entity injection into legal_agent.ask context."""
 from __future__ import annotations
+
+from app.services.dossier_state_snapshot import (
+    build_dossier_state_snapshot,
+    format_h9_canonical_entity_summary,
+)
 
 
 def test_h9_canonical_entity_summary_format() -> None:
     """Test that H9 canonical entity summary is formatted correctly."""
-    # Simulate the entity extraction logic
-    entity_parts = []
-    current_party = "张三"
-    employers = ["B公司"]
-    organizations = []
-    relations = [("王经理", "代表", "B公司")]
+    dossier_entity_state = {
+        "entities": [
+            {
+                "canonical_label": "张三",
+                "entity_type": "person",
+                "role": "current_party",
+                "confidence": "high",
+            },
+            {
+                "canonical_label": "B公司",
+                "entity_type": "organization",
+                "role": "employer",
+                "confidence": "medium",
+            },
+        ],
+        "relations": [
+            {
+                "source_label": "王经理",
+                "label": "代表",
+                "target_label": "B公司",
+            }
+        ],
+    }
 
-    if current_party:
-        entity_parts.append(f"当事人是{current_party}")
-    for employer in employers[:2]:
-        entity_parts.append(f"用人单位是{employer}")
-    for org in organizations[:2]:
-        entity_parts.append(f"涉及组织{org}")
-    for source, rel, target in relations[:3]:
-        entity_parts.append(f"{source}{rel}{target}")
-
-    if entity_parts:
-        h9_canonical_entity_summary = "当前案卷已确认：" + "；".join(entity_parts) + "。"
-    else:
-        h9_canonical_entity_summary = None
+    h9_canonical_entity_summary = format_h9_canonical_entity_summary(dossier_entity_state)
 
     assert h9_canonical_entity_summary == "当前案卷已确认：当事人是张三；用人单位是B公司；王经理代表B公司。"
 
@@ -58,36 +67,86 @@ def test_h9_canonical_entity_summary_handles_none() -> None:
 
 def test_h9_canonical_entity_summary_filters_low_confidence() -> None:
     """Test that low confidence entities are filtered out."""
-    entities = [
-        {"canonical_label": "张三", "entity_type": "person", "role": "current_party", "confidence": "high"},
-        {"canonical_label": "李四", "entity_type": "person", "role": "", "confidence": "low"},
-        {"canonical_label": "B公司", "entity_type": "organization", "role": "employer", "confidence": "medium"},
-    ]
+    dossier_entity_state = {
+        "entities": [
+            {"canonical_label": "张三", "entity_type": "person", "role": "current_party", "confidence": "high"},
+            {"canonical_label": "李四", "entity_type": "person", "role": "", "confidence": "low"},
+            {"canonical_label": "B公司", "entity_type": "organization", "role": "employer", "confidence": "medium"},
+        ],
+        "relations": [],
+    }
 
-    entity_parts = []
-    current_party = None
-    employers = []
-
-    for entity in entities:
-        label = entity.get("canonical_label", "").strip()
-        entity_type = entity.get("entity_type", "").strip()
-        role = entity.get("role", "").strip()
-        confidence = entity.get("confidence", "").strip()
-
-        if not label or confidence == "low":
-            continue
-
-        if role == "current_party" and entity_type == "person":
-            current_party = label
-        elif role == "employer" and entity_type == "organization":
-            employers.append(label)
-
-    if current_party:
-        entity_parts.append(f"当事人是{current_party}")
-    for employer in employers[:2]:
-        entity_parts.append(f"用人单位是{employer}")
-
-    h9_canonical_entity_summary = "当前案卷已确认：" + "；".join(entity_parts) + "。" if entity_parts else None
+    h9_canonical_entity_summary = format_h9_canonical_entity_summary(dossier_entity_state)
 
     assert h9_canonical_entity_summary == "当前案卷已确认：当事人是张三；用人单位是B公司。"
     assert "李四" not in h9_canonical_entity_summary
+
+
+def test_dossier_state_snapshot_builds_shared_outputs() -> None:
+    snapshot = build_dossier_state_snapshot(
+        conversation_entity_states=[
+            {
+                "should_build": True,
+                "conversation_id": 701,
+                "entities": [
+                    {
+                        "id": "conversation:701:entity:party",
+                        "canonical_label": "张三",
+                        "entity_type": "person",
+                        "role": "current_party",
+                        "confidence": "high",
+                        "source": "conversation_graph",
+                        "aliases": ["当事人"],
+                        "mentions": [
+                            {
+                                "id": "conversation:701:mention:party",
+                                "conversation_id": 701,
+                                "raw_label": "张三",
+                                "raw_node_id": "party-701",
+                                "source": "conversation_graph",
+                            }
+                        ],
+                    },
+                    {
+                        "id": "conversation:701:entity:company",
+                        "canonical_label": "B公司",
+                        "entity_type": "organization",
+                        "role": "employer",
+                        "confidence": "high",
+                        "source": "conversation_graph",
+                        "aliases": [],
+                        "mentions": [
+                            {
+                                "id": "conversation:701:mention:company",
+                                "conversation_id": 701,
+                                "raw_label": "B公司",
+                                "raw_node_id": "company-701",
+                                "source": "conversation_graph",
+                            }
+                        ],
+                    },
+                ],
+                "relations": [
+                    {
+                        "source": "conversation:701:entity:party",
+                        "target": "conversation:701:entity:company",
+                        "source_label": "张三",
+                        "target_label": "B公司",
+                        "relation": "签订劳动合同",
+                        "relation_type": "contract",
+                        "conversation_id": 701,
+                        "confidence": "high",
+                    }
+                ],
+            }
+        ],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+        conversation_summaries=[{"id": 701, "title": "劳动合同争议"}],
+    )
+
+    assert snapshot["canonical_entity_summary"] == "当前案卷已确认：当事人是张三；用人单位是B公司；张三签订劳动合同B公司。"
+    assert snapshot["coordination_graph"]["stats"]["canonical_entities"] == 2
+    assert sorted(entity["label"] for entity in snapshot["coordination_graph"]["entities"]) == ["B公司", "张三"]
+    assert snapshot["dossier_entity_state"]["dossier_id"] == 51

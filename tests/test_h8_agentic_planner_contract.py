@@ -80,7 +80,7 @@ def test_fact_update_plan_requests_structured_persistence() -> None:
         },
         execution_plan={
             "primary_route": "CASE_UPDATE",
-            "response_mode": "acknowledge_and_persist",
+            "response_mode": "tracked_case_refresh",
         },
         conversation_id=11,
         dossier_id=21,
@@ -134,7 +134,7 @@ def test_confirm_previous_fact_plan_uses_previous_fact_text() -> None:
         },
         execution_plan={
             "primary_route": "CASE_UPDATE",
-            "response_mode": "acknowledge_and_persist",
+            "response_mode": "tracked_case_refresh",
         },
         conversation_id=11,
         dossier_id=21,
@@ -168,7 +168,7 @@ def test_confirm_previous_fact_plan_blocks_writes_when_previous_fact_missing() -
         },
         execution_plan={
             "primary_route": "CASE_UPDATE",
-            "response_mode": "acknowledge_and_persist",
+            "response_mode": "tracked_case_refresh",
         },
         conversation_id=11,
         dossier_id=21,

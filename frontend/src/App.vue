@@ -477,10 +477,10 @@
             </div>
           </div>
 
-          <div class="dossier-coordination-section">
+          <div class="dossier-canonical-section">
             <div class="dossier-auto-summary-header">
               <div class="dossier-toolbar-copy">
-                <div class="dossier-detail-conversations-title">案卷实体连接</div>
+                <div class="dossier-detail-conversations-title">案卷规范实体图</div>
                 <span class="dossier-toolbar-subtitle">
                   这里只展示案卷中的责任主体和关键主体关系，例如个人、公司、单位、机构及其代表关系。劳动合同、社保、金额、通知等事实信息会作为详情证据展示，不作为主节点。
                 </span>
@@ -488,45 +488,45 @@
               <el-button
                 size="small"
                 plain
-                :loading="dossierCoordinationGraphLoading || dossierIntelligenceLoading"
-                @click="handleRefreshDossierCoordination"
+                :loading="dossierCanonicalGraphLoading || dossierIntelligenceLoading"
+                @click="handleRefreshDossierCanonical"
               >
-                刷新实体连接
+                刷新规范实体图
               </el-button>
             </div>
-            <div class="dossier-coordination-body">
+            <div class="dossier-canonical-body">
               <div class="dossier-coordination-summary">
                 <span class="dossier-coordination-chip">
-                  案卷实体 {{ selectedDossierCoordinationStats.connectedEntities }}
+                  案卷实体 {{ selectedDossierCanonicalStats.connectedEntities }}
                 </span>
                 <span class="dossier-coordination-chip">
-                  跨会话待确认 {{ selectedDossierCoordinationCrossConversationTasks.length }}
+                  跨会话待确认 {{ selectedDossierCanonicalCrossConversationTasks.length }}
                 </span>
                 <span class="dossier-coordination-chip">
-                  来源会话 {{ selectedDossierCoordinationStats.boundConversations }}
+                  来源会话 {{ selectedDossierCanonicalStats.boundConversations }}
                 </span>
                 <span class="dossier-coordination-chip">
-                  关系 {{ selectedDossierCoordinationStats.relations }}
+                  关系 {{ selectedDossierCanonicalStats.relations }}
                 </span>
               </div>
 
               <div
-                v-if="selectedDossierCoordinationHasSingleSourceHint"
+                v-if="selectedDossierCanonicalHasSingleSourceHint"
                 class="dossier-coordination-hint"
               >
                 当前仅有一个来源会话，跨会话连接将在绑定更多会话后出现。
               </div>
 
-              <div class="dossier-coordination-graph-shell">
+              <div class="dossier-canonical-graph-shell">
                 <KnowledgeGraphPanel
-                  :graph="selectedDossierCoordinationGraphPreview"
+                  :graph="selectedDossierCanonicalGraphPreview"
                   @node-action="handleOpenCoordinationGraphNodeConversation"
                 />
               </div>
 
               <el-collapse
-                v-if="selectedDossierCoordinationHasAuxiliaryPanels"
-                v-model="dossierCoordinationSections"
+                v-if="selectedDossierCanonicalHasAuxiliaryPanels"
+                v-model="dossierCanonicalSections"
                 class="dossier-coordination-collapse"
               >
                 <el-collapse-item name="lists">
@@ -539,13 +539,13 @@
 
                   <div class="dossier-coordination-list-body">
                 <div
-                  v-if="selectedDossierCoordinationConfirmedEntities.length"
+                  v-if="selectedDossierConfirmedCanonicalEntities.length"
                   class="dossier-coordination-group"
                 >
                   <div class="dossier-detail-conversations-title">已连接主体</div>
                   <div class="dossier-coordination-entity-list">
                     <div
-                      v-for="entity in selectedDossierCoordinationConfirmedEntities"
+                      v-for="entity in selectedDossierConfirmedCanonicalEntities"
                       :key="entity.id"
                       class="dossier-coordination-entity-card"
                     >
@@ -575,13 +575,13 @@
                 </div>
 
                 <div
-                  v-if="selectedDossierCoordinationCrossConversationTasks.length"
+                  v-if="selectedDossierCanonicalCrossConversationTasks.length"
                   class="dossier-coordination-group"
                 >
                   <div class="dossier-detail-conversations-title">跨会话同一实体确认</div>
                   <div class="dossier-intelligence-task-list">
                     <div
-                      v-for="task in selectedDossierCoordinationCrossConversationTasks"
+                      v-for="task in selectedDossierCanonicalCrossConversationTasks"
                       :key="task.id || task.task_key"
                       class="dossier-intelligence-task-card"
                     >
@@ -604,13 +604,13 @@
                 </div>
 
                 <div
-                  v-if="selectedDossierCoordinationPendingIdentityEntities.length"
+                  v-if="selectedDossierPendingCanonicalIdentityEntities.length"
                   class="dossier-coordination-group"
                 >
                   <div class="dossier-detail-conversations-title">待确认连接</div>
                   <div class="dossier-coordination-entity-list">
                     <div
-                      v-for="entity in selectedDossierCoordinationPendingIdentityEntities"
+                      v-for="entity in selectedDossierPendingCanonicalIdentityEntities"
                       :key="entity.id"
                       class="dossier-coordination-entity-card"
                     >
@@ -636,13 +636,13 @@
                 </div>
 
                 <div
-                  v-if="selectedDossierCoordinationPendingNamingEntities.length"
+                  v-if="selectedDossierPendingCanonicalNamingEntities.length"
                   class="dossier-coordination-group"
                 >
                   <div class="dossier-detail-conversations-title">待命名主体</div>
                   <div class="dossier-coordination-entity-list">
                     <div
-                      v-for="entity in selectedDossierCoordinationPendingNamingEntities"
+                      v-for="entity in selectedDossierPendingCanonicalNamingEntities"
                       :key="entity.id"
                       class="dossier-coordination-entity-card"
                     >
@@ -762,13 +762,13 @@
                 </div>
 
                 <div
-                  v-if="selectedDossierCoordinationIsolatedAnchorEntities.length"
+                  v-if="selectedDossierCanonicalIsolatedAnchorEntities.length"
                   class="dossier-coordination-group"
                 >
                   <div class="dossier-detail-conversations-title">未连接主体锚点</div>
                   <div class="dossier-coordination-entity-list">
                     <div
-                      v-for="entity in selectedDossierCoordinationIsolatedAnchorEntities"
+                      v-for="entity in selectedDossierCanonicalIsolatedAnchorEntities"
                       :key="entity.id"
                       class="dossier-coordination-entity-card"
                     >
@@ -799,21 +799,21 @@
 
                 <div
                   v-if="
-                    selectedDossierCoordinationPendingNamingEntities.length ||
-                    selectedDossierCoordinationPartyNamingTasks.length ||
+                    selectedDossierPendingCanonicalNamingEntities.length ||
+                    selectedDossierCanonicalPartyNamingTasks.length ||
                     dossierIntelligenceLoading ||
                     dossierIntelligenceState.error
                   "
-                  ref="dossierCoordinationNamingRef"
+                  ref="dossierCanonicalNamingRef"
                   class="dossier-coordination-group dossier-coordination-task-section"
                 >
                   <div class="dossier-detail-conversations-title">待命名确认</div>
                   <div
-                    v-if="selectedDossierCoordinationPartyNamingTasks.length"
+                    v-if="selectedDossierCanonicalPartyNamingTasks.length"
                     class="dossier-intelligence-task-list"
                   >
                     <div
-                      v-for="(task, index) in selectedDossierCoordinationPartyNamingTasks"
+                      v-for="(task, index) in selectedDossierCanonicalPartyNamingTasks"
                       :key="`dossier-party-naming-task-${index}`"
                       class="dossier-intelligence-task-card"
                     >
@@ -893,7 +893,7 @@
             </div>
           </div>
 
-          <div v-if="!selectedDossierHasCanonicalCoordinationGraph" class="dossier-participants-section">
+          <div v-if="!selectedDossierHasCanonicalGraph" class="dossier-participants-section">
             <div class="dossier-auto-summary-header">
               <div class="dossier-toolbar-copy">
                 <div class="dossier-detail-conversations-title">主体关系确认</div>
@@ -1928,7 +1928,7 @@ import {
   getConversationMessages,
   getConversationSummary,
   getConversations,
-  getDossierCoordinationGraph,
+  getDossierCanonicalGraph,
   getDossierDetail,
   getDossierDisplayGraph,
   getDossierIntelligence,
@@ -1998,8 +1998,8 @@ const dossierParticipantCandidateCreateKey = ref('')
 const dossierSummaryGenerating = ref(false)
 const dossierGraphLoading = ref(false)
 const dossierGraphLoaded = ref(false)
-const dossierCoordinationGraphLoading = ref(false)
-const dossierCoordinationSections = ref([])
+const dossierCanonicalGraphLoading = ref(false)
+const dossierCanonicalSections = ref([])
 const dossierIntelligenceLoading = ref(false)
 const dossierPartyNamingSubmittingKey = ref('')
 const partyNamingModalVisible = ref(false)
@@ -2008,7 +2008,7 @@ const partyNamingInput = ref('')
 const partyNamingSubmitting = ref(false)
 const partyNamingError = ref('')
 const dismissedPartyNamingTaskIds = ref(new Set())
-const dossierCoordinationNamingRef = ref(null)
+const dossierCanonicalNamingRef = ref(null)
 const dossierSelfIdentityTaskStates = reactive({})
 const trackedOnboardingVisible = ref(false)
 const trackedOnboardingSubmitting = ref(false)
@@ -2047,7 +2047,7 @@ const dossierIntelligenceState = reactive({
   traceWarnings: [],
   error: '',
 })
-const dossierCoordinationGraphState = reactive({
+const dossierCanonicalGraphState = reactive({
   dossierId: null,
   entities: [],
   edges: [],
@@ -2060,7 +2060,7 @@ const dossierCoordinationGraphState = reactive({
     pendingNaming: 0,
     isolatedAnchors: 0,
   },
-  view: 'coordination',
+  view: 'canonical',
   generatedAt: '',
   error: '',
 })
@@ -2330,88 +2330,88 @@ const selectedDossierIntelligenceTraceWarnings = computed(() =>
     ? dossierIntelligenceState.traceWarnings
     : []
 )
-const selectedDossierCoordinationEntities = computed(() =>
-  Array.isArray(dossierCoordinationGraphState.entities) ? dossierCoordinationGraphState.entities : []
+const selectedDossierCanonicalEntities = computed(() =>
+  Array.isArray(dossierCanonicalGraphState.entities) ? dossierCanonicalGraphState.entities : []
 )
-const selectedDossierCoordinationTasks = computed(() =>
-  Array.isArray(dossierCoordinationGraphState.tasks) ? dossierCoordinationGraphState.tasks : []
+const selectedDossierCanonicalTasks = computed(() =>
+  Array.isArray(dossierCanonicalGraphState.tasks) ? dossierCanonicalGraphState.tasks : []
 )
-const selectedDossierCanonicalCoordinationEntities = computed(() =>
-  selectedDossierCoordinationEntities.value.filter(
+const selectedDossierResolvedCanonicalEntities = computed(() =>
+  selectedDossierCanonicalEntities.value.filter(
     (entity) => String(entity?.status || '').trim() === 'canonical'
   )
 )
-const selectedDossierHasCanonicalCoordinationGraph = computed(
-  () => selectedDossierCanonicalCoordinationEntities.value.length > 0
+const selectedDossierHasCanonicalGraph = computed(
+  () => selectedDossierResolvedCanonicalEntities.value.length > 0
 )
-const selectedDossierMainCoordinationEntities = computed(() =>
-  selectedDossierHasCanonicalCoordinationGraph.value
-    ? selectedDossierCanonicalCoordinationEntities.value
-    : selectedDossierCoordinationEntities.value
+const selectedDossierPrimaryCanonicalEntities = computed(() =>
+  selectedDossierHasCanonicalGraph.value
+    ? selectedDossierResolvedCanonicalEntities.value
+    : selectedDossierCanonicalEntities.value
 )
-const selectedDossierCoordinationCrossConversationTasks = computed(() =>
-  selectedDossierCoordinationTasks.value.filter((task) => {
+const selectedDossierCanonicalCrossConversationTasks = computed(() =>
+  selectedDossierCanonicalTasks.value.filter((task) => {
     const taskType = String(task?.task_type || task?.type || '').trim()
     return taskType === 'cross_conversation_same_entity'
   })
 )
-const selectedDossierCoordinationStats = computed(() => ({
-  boundConversations: Number(dossierCoordinationGraphState.stats?.boundConversations || 0),
-  connectedEntities: selectedDossierHasCanonicalCoordinationGraph.value
-    ? selectedDossierCanonicalCoordinationEntities.value.length
-    : Number(dossierCoordinationGraphState.stats?.connectedEntities || 0),
-  pendingIdentity: selectedDossierHasCanonicalCoordinationGraph.value
-    ? selectedDossierCoordinationCrossConversationTasks.value.length
-    : Number(dossierCoordinationGraphState.stats?.pendingIdentity || 0),
-  pendingNaming: Number(dossierCoordinationGraphState.stats?.pendingNaming || 0),
-  isolatedAnchors: Number(dossierCoordinationGraphState.stats?.isolatedAnchors || 0),
-  relations: Array.isArray(dossierCoordinationGraphState.edges)
-    ? dossierCoordinationGraphState.edges.length
+const selectedDossierCanonicalStats = computed(() => ({
+  boundConversations: Number(dossierCanonicalGraphState.stats?.boundConversations || 0),
+  connectedEntities: selectedDossierHasCanonicalGraph.value
+    ? selectedDossierResolvedCanonicalEntities.value.length
+    : Number(dossierCanonicalGraphState.stats?.connectedEntities || 0),
+  pendingIdentity: selectedDossierHasCanonicalGraph.value
+    ? selectedDossierCanonicalCrossConversationTasks.value.length
+    : Number(dossierCanonicalGraphState.stats?.pendingIdentity || 0),
+  pendingNaming: Number(dossierCanonicalGraphState.stats?.pendingNaming || 0),
+  isolatedAnchors: Number(dossierCanonicalGraphState.stats?.isolatedAnchors || 0),
+  relations: Array.isArray(dossierCanonicalGraphState.edges)
+    ? dossierCanonicalGraphState.edges.length
     : 0,
 }))
-const selectedDossierCoordinationConfirmedEntities = computed(() =>
-  selectedDossierHasCanonicalCoordinationGraph.value
-    ? selectedDossierCanonicalCoordinationEntities.value
-    : selectedDossierCoordinationEntities.value.filter(
+const selectedDossierConfirmedCanonicalEntities = computed(() =>
+  selectedDossierHasCanonicalGraph.value
+    ? selectedDossierResolvedCanonicalEntities.value
+    : selectedDossierCanonicalEntities.value.filter(
         (entity) => String(entity?.status || '').trim() === 'confirmed'
       )
 )
-const selectedDossierCoordinationPendingIdentityEntities = computed(() =>
-  selectedDossierCoordinationEntities.value.filter(
+const selectedDossierPendingCanonicalIdentityEntities = computed(() =>
+  selectedDossierCanonicalEntities.value.filter(
     (entity) => String(entity?.status || '').trim() === 'pending_identity'
   )
 )
-const selectedDossierCoordinationPendingNamingEntities = computed(() =>
-  selectedDossierCoordinationEntities.value.filter(
+const selectedDossierPendingCanonicalNamingEntities = computed(() =>
+  selectedDossierCanonicalEntities.value.filter(
     (entity) => String(entity?.status || '').trim() === 'pending_naming'
   )
 )
-const selectedDossierCoordinationIsolatedAnchorEntities = computed(() =>
-  selectedDossierCoordinationEntities.value.filter(
+const selectedDossierCanonicalIsolatedAnchorEntities = computed(() =>
+  selectedDossierCanonicalEntities.value.filter(
     (entity) => ['isolated_anchor', 'generic_label', 'unconfirmed_label'].includes(String(entity?.status || '').trim())
   )
 )
-const selectedDossierCoordinationIsEmpty = computed(
-  () => selectedDossierCoordinationEntities.value.length === 0
+const selectedDossierCanonicalGraphIsEmpty = computed(
+  () => selectedDossierCanonicalEntities.value.length === 0
 )
-const selectedDossierCoordinationHasSingleSourceHint = computed(
+const selectedDossierCanonicalHasSingleSourceHint = computed(
   () =>
-    !dossierCoordinationGraphLoading.value &&
-    !dossierCoordinationGraphState.error &&
-    selectedDossierCoordinationGraphConversationCount.value === 1 &&
-    selectedDossierCoordinationGraphPreview.value.nodes.length > 0
+    !dossierCanonicalGraphLoading.value &&
+    !dossierCanonicalGraphState.error &&
+    selectedDossierCanonicalGraphConversationCount.value === 1 &&
+    selectedDossierCanonicalGraphPreview.value.nodes.length > 0
 )
-const selectedDossierCoordinationHasAuxiliaryPanels = computed(
+const selectedDossierCanonicalHasAuxiliaryPanels = computed(
   () =>
-    selectedDossierCoordinationConfirmedEntities.value.length > 0 ||
-    selectedDossierCoordinationCrossConversationTasks.value.length > 0 ||
-    selectedDossierCoordinationHasLegacyCompatibilityItems.value ||
+    selectedDossierConfirmedCanonicalEntities.value.length > 0 ||
+    selectedDossierCanonicalCrossConversationTasks.value.length > 0 ||
+    selectedDossierCanonicalHasLegacyCompatibilityItems.value ||
     dossierIntelligenceLoading.value ||
     Boolean(dossierIntelligenceState.error)
 )
-const selectedDossierCoordinationIdentityTaskLookup = computed(() => {
+const selectedDossierCanonicalIdentityTaskLookup = computed(() => {
   const lookup = {}
-  for (const task of selectedDossierCoordinationTasks.value) {
+  for (const task of selectedDossierCanonicalTasks.value) {
     if (String(task?.type || '').trim() !== 'entity_identity') continue
     const entityIds = Array.isArray(task?.entity_ids) ? task.entity_ids : []
     for (const entityId of entityIds) {
@@ -2422,18 +2422,18 @@ const selectedDossierCoordinationIdentityTaskLookup = computed(() => {
   }
   return lookup
 })
-const selectedDossierCoordinationPartyNamingTasks = computed(() =>
+const selectedDossierCanonicalPartyNamingTasks = computed(() =>
   selectedDossierIntelligenceConfirmationTasks.value.filter(
     (task) => String(task?.task_type || '').trim() === 'party_naming'
   )
 )
-const selectedDossierCoordinationHasLegacyCompatibilityItems = computed(
+const selectedDossierCanonicalHasLegacyCompatibilityItems = computed(
   () =>
-    selectedDossierCoordinationPendingIdentityEntities.value.length > 0 ||
-    selectedDossierCoordinationPendingNamingEntities.value.length > 0 ||
-    selectedDossierCoordinationIsolatedAnchorEntities.value.length > 0 ||
+    selectedDossierPendingCanonicalIdentityEntities.value.length > 0 ||
+    selectedDossierPendingCanonicalNamingEntities.value.length > 0 ||
+    selectedDossierCanonicalIsolatedAnchorEntities.value.length > 0 ||
     selectedDossierSelfAnchorIdentityTasks.value.length > 0 ||
-    selectedDossierCoordinationPartyNamingTasks.value.length > 0
+    selectedDossierCanonicalPartyNamingTasks.value.length > 0
 )
 const activePartyNamingRawLabels = computed(() => partyNamingTaskRawLabels(activePartyNamingTask.value))
 const activePartyNamingSuggestedLabels = computed(() => partyNamingTaskSuggestedLabels(activePartyNamingTask.value))
@@ -2441,11 +2441,11 @@ const activePartyNamingCurrentLabel = computed(() => {
   const currentLabel = String(activePartyNamingTask.value?.current_label || '').trim()
   return currentLabel || activePartyNamingRawLabels.value[0] || '当事人'
 })
-const selectedDossierCoordinationGraphConversationCount = computed(() => {
-  const statsCount = Number(selectedDossierCoordinationStats.value.boundConversations || 0)
+const selectedDossierCanonicalGraphConversationCount = computed(() => {
+  const statsCount = Number(selectedDossierCanonicalStats.value.boundConversations || 0)
   if (statsCount > 0) return statsCount
   const conversationIds = new Set()
-  for (const entity of selectedDossierCoordinationEntities.value) {
+  for (const entity of selectedDossierCanonicalEntities.value) {
     for (const conversationId of normalizeGraphConversationIds(entity?.source_conversation_ids)) {
       conversationIds.add(conversationId)
     }
@@ -2453,12 +2453,12 @@ const selectedDossierCoordinationGraphConversationCount = computed(() => {
   if (conversationIds.size) return conversationIds.size
   return Number(selectedDossierConversationCount.value || 0)
 })
-const selectedDossierCoordinationGraphPreview = computed(() =>
+const selectedDossierCanonicalGraphPreview = computed(() =>
   buildDossierCoordinationGraphPreview({
-    entities: selectedDossierMainCoordinationEntities.value,
-    edges: Array.isArray(dossierCoordinationGraphState.edges) ? dossierCoordinationGraphState.edges : [],
-    loading: dossierCoordinationGraphLoading.value,
-    error: dossierCoordinationGraphState.error,
+    entities: selectedDossierPrimaryCanonicalEntities.value,
+    edges: Array.isArray(dossierCanonicalGraphState.edges) ? dossierCanonicalGraphState.edges : [],
+    loading: dossierCanonicalGraphLoading.value,
+    error: dossierCanonicalGraphState.error,
   })
 )
 const selectedDossierSelfAnchorIdentityTasks = computed(() =>
@@ -2577,7 +2577,7 @@ watch(dossierDrawerVisible, (visible) => {
   if (!visible) {
     dossierParticipantCandidateDialogVisible.value = false
     dossierAdvancedSections.value = []
-    dossierCoordinationSections.value = []
+    dossierCanonicalSections.value = []
     resetParticipantCandidateCreateDraft()
   }
 })
@@ -2586,7 +2586,7 @@ watch(
   [
     currentConversationId,
     () => currentConversationDossierId(),
-    () => selectedDossierCoordinationPartyNamingTasks.value.map((task) => dossierIntelligenceTaskKey(task)).join('|'),
+    () => selectedDossierCanonicalPartyNamingTasks.value.map((task) => dossierIntelligenceTaskKey(task)).join('|'),
   ],
   () => {
     if (
@@ -2831,7 +2831,7 @@ function applySelectedDossierDetail(dossier) {
     resetDossierDetailForm()
     resetDossierParticipantRegistryState()
     resetDossierIntelligenceState()
-    resetDossierCoordinationGraphState()
+    resetDossierCanonicalGraphState()
     return
   }
 
@@ -3044,9 +3044,9 @@ function findPendingPartyNamingTaskForCurrentConversation() {
   const dossierId = currentConversationDossierId()
   if (conversationId <= 0 || dossierId <= 0) return null
   if (Number(dossierIntelligenceState.dossierId || 0) !== dossierId) return null
-  if (selectedDossierHasCanonicalCoordinationGraph.value) return null
+  if (selectedDossierHasCanonicalGraph.value) return null
 
-  return selectedDossierCoordinationPartyNamingTasks.value.find((task) => {
+  return selectedDossierCanonicalPartyNamingTasks.value.find((task) => {
     if (!isPendingSelfAnchorPartyNamingTask(task)) return false
     if (dismissedPartyNamingTaskIds.value.has(dossierIntelligenceTaskKey(task))) return false
     return partyNamingTaskSourceConversationIds(task).includes(conversationId)
@@ -3226,52 +3226,52 @@ function buildPartyNamingConfirmPayload(task, displayLabel) {
   }
 }
 
-function resetDossierCoordinationGraphState() {
-  dossierCoordinationGraphState.dossierId = null
-  dossierCoordinationGraphState.entities = []
-  dossierCoordinationGraphState.edges = []
-  dossierCoordinationGraphState.tasks = []
-  dossierCoordinationGraphState.dossierEntityState = null
-  dossierCoordinationGraphState.stats = {
+function resetDossierCanonicalGraphState() {
+  dossierCanonicalGraphState.dossierId = null
+  dossierCanonicalGraphState.entities = []
+  dossierCanonicalGraphState.edges = []
+  dossierCanonicalGraphState.tasks = []
+  dossierCanonicalGraphState.dossierEntityState = null
+  dossierCanonicalGraphState.stats = {
     boundConversations: 0,
     connectedEntities: 0,
     pendingIdentity: 0,
     pendingNaming: 0,
     isolatedAnchors: 0,
   }
-  dossierCoordinationGraphState.view = 'coordination'
-  dossierCoordinationGraphState.generatedAt = ''
-  dossierCoordinationGraphState.error = ''
+  dossierCanonicalGraphState.view = 'canonical'
+  dossierCanonicalGraphState.generatedAt = ''
+  dossierCanonicalGraphState.error = ''
 }
 
-function applyDossierCoordinationGraphPayload(dossierId, payload) {
-  const coordinationGraph = payload?.coordination_graph || {}
+function applyDossierCanonicalGraphPayload(dossierId, payload) {
+  const coordinationGraph = payload?.canonical_graph || payload?.coordination_graph || {}
   const stats = coordinationGraph?.stats || {}
 
-  dossierCoordinationGraphState.dossierId = dossierId
-  dossierCoordinationGraphState.entities = Array.isArray(coordinationGraph.entities)
+  dossierCanonicalGraphState.dossierId = dossierId
+  dossierCanonicalGraphState.entities = Array.isArray(coordinationGraph.entities)
     ? coordinationGraph.entities
     : []
-  dossierCoordinationGraphState.edges = Array.isArray(coordinationGraph.edges)
+  dossierCanonicalGraphState.edges = Array.isArray(coordinationGraph.edges)
     ? coordinationGraph.edges
     : []
-  dossierCoordinationGraphState.tasks = Array.isArray(coordinationGraph.tasks)
+  dossierCanonicalGraphState.tasks = Array.isArray(coordinationGraph.tasks)
     ? coordinationGraph.tasks
     : []
-  dossierCoordinationGraphState.dossierEntityState =
+  dossierCanonicalGraphState.dossierEntityState =
     payload?.dossier_entity_state && typeof payload.dossier_entity_state === 'object'
       ? payload.dossier_entity_state
       : null
-  dossierCoordinationGraphState.stats = {
+  dossierCanonicalGraphState.stats = {
     boundConversations: Number(stats.bound_conversations || stats.boundConversations || 0),
     connectedEntities: Number(stats.connected_entities || stats.connectedEntities || stats.canonical_entities || 0),
     pendingIdentity: Number(stats.pending_identity || stats.pendingIdentity || 0),
     pendingNaming: Number(stats.pending_naming || stats.pendingNaming || 0),
     isolatedAnchors: Number(stats.isolated_anchors || stats.isolatedAnchors || 0),
   }
-  dossierCoordinationGraphState.view = String(payload?.view || 'coordination').trim() || 'coordination'
-  dossierCoordinationGraphState.generatedAt = payload?.generated_at || ''
-  dossierCoordinationGraphState.error = ''
+  dossierCanonicalGraphState.view = String(payload?.view || 'canonical').trim() || 'canonical'
+  dossierCanonicalGraphState.generatedAt = payload?.generated_at || ''
+  dossierCanonicalGraphState.error = ''
 }
 
 function resetDossierGraphState() {
@@ -3437,7 +3437,7 @@ async function refreshCurrentDossierAfterGraphSync() {
 
   selectedDossierId.value = dossierId
   await Promise.allSettled([
-    loadSelectedDossierCoordinationGraph(dossierId, { silent: true }),
+    loadSelectedDossierCanonicalGraph(dossierId, { silent: true }),
     loadSelectedDossierIntelligence(dossierId),
   ])
   detectPendingPartyNamingForCurrentConversation()
@@ -3585,7 +3585,7 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     selectedDossierId.value = null
     applySelectedDossierDetail(null)
     resetDossierGraphState()
-    resetDossierCoordinationGraphState()
+    resetDossierCanonicalGraphState()
     resetDossierIntelligenceState()
     return
   }
@@ -3605,7 +3605,7 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     console.error('Failed to fetch dossier detail:', error)
     applySelectedDossierDetail(null)
     resetDossierGraphState()
-    resetDossierCoordinationGraphState()
+    resetDossierCanonicalGraphState()
     resetDossierIntelligenceState()
     if (!options.silent) {
       ElMessage.error('Failed to load dossier detail')
@@ -3615,17 +3615,20 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
   }
 
   if (detailLoaded && options.loadParticipants !== false) {
-    await loadSelectedDossierParticipants(dossierId, { silent: true })
-    await loadSelectedDossierParticipantCandidates(dossierId, { silent: true })
+    // 旧接口：不再默认加载 participants 和 participant_candidates
+    // await loadSelectedDossierParticipants(dossierId, { silent: true })
+    // await loadSelectedDossierParticipantCandidates(dossierId, { silent: true })
   }
   if (detailLoaded && options.loadGraph !== false) {
-    await loadSelectedDossierGraph(dossierId, { silent: true })
+    // 旧接口：不再默认加载 raw graph（仅用于调试）
+    // await loadSelectedDossierGraph(dossierId, { silent: true })
   }
   if (detailLoaded && options.loadCoordinationGraph !== false) {
-    await loadSelectedDossierCoordinationGraph(dossierId, { silent: true })
+    await loadSelectedDossierCanonicalGraph(dossierId, { silent: true })
   }
   if (detailLoaded && options.loadIntelligence !== false) {
-    await loadSelectedDossierIntelligence(dossierId)
+    // 旧接口：不再默认加载 intelligence（仅用于 party_naming，H9 已 suppress）
+    // await loadSelectedDossierIntelligence(dossierId)
   }
 }
 
@@ -3724,35 +3727,35 @@ async function loadSelectedDossierGraph(dossierId, options = {}) {
   }
 }
 
-async function loadSelectedDossierCoordinationGraph(dossierId, options = {}) {
+async function loadSelectedDossierCanonicalGraph(dossierId, options = {}) {
   if (!dossierId) {
-    resetDossierCoordinationGraphState()
+    resetDossierCanonicalGraphState()
     return
   }
 
-  const isSameDossier = dossierCoordinationGraphState.dossierId === dossierId
+  const isSameDossier = dossierCanonicalGraphState.dossierId === dossierId
   if (!isSameDossier) {
-    resetDossierCoordinationGraphState()
-    dossierCoordinationGraphState.dossierId = dossierId
+    resetDossierCanonicalGraphState()
+    dossierCanonicalGraphState.dossierId = dossierId
   }
 
-  dossierCoordinationGraphLoading.value = true
-  dossierCoordinationGraphState.error = ''
+  dossierCanonicalGraphLoading.value = true
+  dossierCanonicalGraphState.error = ''
   try {
-    const { data } = await getDossierCoordinationGraph(dossierId)
-    applyDossierCoordinationGraphPayload(dossierId, data)
+    const { data } = await getDossierCanonicalGraph(dossierId)
+    applyDossierCanonicalGraphPayload(dossierId, data)
   } catch (error) {
-    console.error('Failed to fetch dossier coordination graph:', error)
-    dossierCoordinationGraphState.dossierId = dossierId
-    dossierCoordinationGraphState.error =
+    console.error('Failed to fetch dossier canonical graph:', error)
+    dossierCanonicalGraphState.dossierId = dossierId
+    dossierCanonicalGraphState.error =
       typeof error?.response?.data?.detail === 'string' && error.response.data.detail
         ? error.response.data.detail
         : '案卷实体连接暂不可用'
     if (!options.silent) {
-      ElMessage.error(dossierCoordinationGraphState.error)
+      ElMessage.error(dossierCanonicalGraphState.error)
     }
   } finally {
-    dossierCoordinationGraphLoading.value = false
+    dossierCanonicalGraphLoading.value = false
   }
 }
 
@@ -3788,10 +3791,10 @@ async function handleRefreshDossierGraph() {
   await loadSelectedDossierGraph(selectedDossierId.value)
 }
 
-async function handleRefreshDossierCoordination() {
+async function handleRefreshDossierCanonical() {
   if (!selectedDossierId.value) return
   await Promise.allSettled([
-    loadSelectedDossierCoordinationGraph(selectedDossierId.value),
+    loadSelectedDossierCanonicalGraph(selectedDossierId.value),
     loadSelectedDossierIntelligence(selectedDossierId.value),
   ])
 }
@@ -3803,18 +3806,19 @@ async function handleRefreshDossierIntelligence() {
 
 async function refreshSelectedDossierAfterPartyNaming(dossierId) {
   await Promise.allSettled([
-    loadSelectedDossierCoordinationGraph(dossierId, { silent: true }),
-    loadSelectedDossierIntelligence(dossierId),
-    loadSelectedDossierParticipants(dossierId, { silent: true }),
-    loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
-    loadSelectedDossierGraph(dossierId, { silent: true }),
+    loadSelectedDossierCanonicalGraph(dossierId, { silent: true }),
+    // 旧接口：party_naming 后只需刷新 coordination graph
+    // loadSelectedDossierIntelligence(dossierId),
+    // loadSelectedDossierParticipants(dossierId, { silent: true }),
+    // loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
+    // loadSelectedDossierGraph(dossierId, { silent: true }),
   ])
 
   const refreshErrors = [
-    dossierCoordinationGraphState.error,
-    dossierIntelligenceState.error,
-    dossierParticipantRegistryState.error,
-    dossierGraphState.error,
+    dossierCanonicalGraphState.error,
+    // dossierIntelligenceState.error,
+    // dossierParticipantRegistryState.error,
+    // dossierGraphState.error,
   ].filter((value) => String(value || '').trim())
 
   if (refreshErrors.length) {
@@ -3825,18 +3829,19 @@ async function refreshSelectedDossierAfterPartyNaming(dossierId) {
 
 async function refreshSelectedDossierAfterSelfIdentity(dossierId) {
   await Promise.allSettled([
-    loadSelectedDossierCoordinationGraph(dossierId, { silent: true }),
-    loadSelectedDossierIntelligence(dossierId),
-    loadSelectedDossierParticipants(dossierId, { silent: true }),
-    loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
-    loadSelectedDossierGraph(dossierId, { silent: true }),
+    loadSelectedDossierCanonicalGraph(dossierId, { silent: true }),
+    // 旧接口：self_identity 后只需刷新 coordination graph
+    // loadSelectedDossierIntelligence(dossierId),
+    // loadSelectedDossierParticipants(dossierId, { silent: true }),
+    // loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
+    // loadSelectedDossierGraph(dossierId, { silent: true }),
   ])
 
   const refreshErrors = [
-    dossierCoordinationGraphState.error,
-    dossierIntelligenceState.error,
-    dossierParticipantRegistryState.error,
-    dossierGraphState.error,
+    dossierCanonicalGraphState.error,
+    // dossierIntelligenceState.error,
+    // dossierParticipantRegistryState.error,
+    // dossierGraphState.error,
   ].filter((value) => String(value || '').trim())
 
   if (refreshErrors.length) {
@@ -4152,7 +4157,7 @@ function coordinationEntityDetailConversationLabel(entity) {
 }
 
 function coordinationEntityIdentityReason(entity) {
-  const task = selectedDossierCoordinationIdentityTaskLookup.value[String(entity?.id || '').trim()]
+  const task = selectedDossierCanonicalIdentityTaskLookup.value[String(entity?.id || '').trim()]
   return String(task?.reason || '').trim()
 }
 
@@ -4226,10 +4231,10 @@ function handleOpenCoordinationIdentity() {
 async function handleOpenCoordinationNaming() {
   await nextTick()
   if (
-    dossierCoordinationNamingRef.value &&
-    typeof dossierCoordinationNamingRef.value.scrollIntoView === 'function'
+    dossierCanonicalNamingRef.value &&
+    typeof dossierCanonicalNamingRef.value.scrollIntoView === 'function'
   ) {
-    dossierCoordinationNamingRef.value.scrollIntoView({
+    dossierCanonicalNamingRef.value.scrollIntoView({
       behavior: 'smooth',
       block: 'start',
     })
@@ -4850,7 +4855,7 @@ async function refreshSelectedDossierParticipantViews(options = {}) {
   await loadSelectedDossierParticipants(selectedDossierId.value, { silent: true })
   await loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true })
   await loadSelectedDossierGraph(selectedDossierId.value, { silent: true })
-  await loadSelectedDossierCoordinationGraph(selectedDossierId.value, { silent: true })
+  await loadSelectedDossierCanonicalGraph(selectedDossierId.value, { silent: true })
   await loadSelectedDossierIntelligence(selectedDossierId.value)
   if (!selectedDossierParticipantCandidates.value.length) {
     dossierParticipantCandidateDialogVisible.value = false
@@ -4866,7 +4871,7 @@ async function handleRefreshParticipantTasks() {
   await Promise.allSettled([
     loadSelectedDossierParticipants(selectedDossierId.value, { silent: true }),
     loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true }),
-    loadSelectedDossierCoordinationGraph(selectedDossierId.value, { silent: true }),
+    loadSelectedDossierCanonicalGraph(selectedDossierId.value, { silent: true }),
     loadSelectedDossierIntelligence(selectedDossierId.value),
   ])
   ElMessage.success('主体线索已刷新')
@@ -5218,19 +5223,19 @@ async function handleConfirmTrackedOnboarding() {
       }
     }
 
-    const { data: consentData } = await setConversationModeConsent(conversationId, {
-      mode: 'TRACKED_CASE',
-      consent: 'tracked',
-      reason: 'user_selected_tracked',
-    })
-    if (consentData?.conversation) {
-      upsertConversationLocal(consentData.conversation)
-    }
-
     if (conversation?.dossier_id !== dossierId) {
       const { data: attachData } = await attachConversationToDossier(conversationId, dossierId)
       if (attachData?.conversation) {
         upsertConversationLocal(attachData.conversation)
+      }
+    } else {
+      const { data: consentData } = await setConversationModeConsent(conversationId, {
+        mode: 'TRACKED_CASE',
+        consent: 'tracked',
+        reason: 'user_selected_tracked_dossier',
+      })
+      if (consentData?.conversation) {
+        upsertConversationLocal(consentData.conversation)
       }
     }
 
@@ -6153,9 +6158,9 @@ function handleCancelTrackedOnboarding() {
 
 async function resolveModeConsentSuggestion(prompt) {
   const message = [
-    prompt || '我注意到你正在描述一个具体案情。是否要保存为持续跟踪的案情会话？',
+    prompt || '我注意到你正在描述一个具体案情。你可以仅在本轮分析，或将它纳入案卷持续跟踪。',
     '',
-    '当前聊天记录仍会保存在会话历史中；选择持续跟踪后，系统会把案情整理为可持续维护的结构化案情。',
+    '仅本轮分析不会把这次案情纳入案卷持续跟踪；进入案卷持续跟踪后，系统会将当前会话绑定到案卷并持续维护相关案情上下文。',
   ].join('\n')
 
   try {
@@ -6163,16 +6168,16 @@ async function resolveModeConsentSuggestion(prompt) {
       message,
       '模式确认',
       {
-        confirmButtonText: '保存并持续跟踪',
-        cancelButtonText: '仅本次分析',
+        confirmButtonText: '进入案卷持续跟踪',
+        cancelButtonText: '仅本轮分析',
         distinguishCancelAndClose: true,
         type: 'warning',
       }
     )
-    return 'tracked'
+    return 'tracked_dossier'
   } catch (error) {
     if (error === 'cancel') {
-      return 'temporary'
+      return 'temporary_analysis'
     }
     if (error === 'close') {
       return 'cancelled'
@@ -6308,7 +6313,7 @@ async function sendImpl(textOverride = null, options = {}) {
         return
       }
 
-      if (nextAction === 'tracked') {
+      if (nextAction === 'tracked_dossier') {
         const onboardingResult = await resolveTrackedOnboarding({
           conversationId: baseConversationId,
           text,
@@ -6329,18 +6334,11 @@ async function sendImpl(textOverride = null, options = {}) {
         return
       }
 
-      const payload =
-        nextAction === 'tracked'
-          ? {
-              mode: 'TRACKED_CASE',
-              consent: 'tracked',
-              reason: 'user_selected_tracked',
-            }
-          : {
-              mode: 'CASE_ANALYSIS',
-              consent: 'temporary',
-              reason: 'user_selected_temporary',
-            }
+      const payload = {
+        mode: 'CASE_ANALYSIS',
+        consent: 'temporary',
+        reason: 'user_selected_temporary_analysis',
+      }
 
       try {
         const { data: consentData } = await setConversationModeConsent(baseConversationId, payload)

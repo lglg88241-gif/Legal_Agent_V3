@@ -280,8 +280,69 @@ def test_dialog_returns_mode_consent_when_enabled_for_case_analysis(
     assert result["conversation_mode"] == "LEGAL_QA"
     assert result["suggested_mode"] == "TRACKED_CASE"
     assert result["requires_persistence_consent"] is True
+    assert result["tracking_entry_kind"] == "dossier_selection_required"
+    assert result["requires_dossier_binding"] is True
+    assert result["has_bound_dossier"] is False
+    assert result["consent_actions"] == [
+        {"label": "仅本轮分析", "value": "temporary_analysis"},
+        {"label": "进入案卷持续跟踪", "value": "tracked_dossier"},
+    ]
     assert result["case_tracking_decision"]["source"] == "legacy_fallback"
     assert result["case_tracking_decision"]["fallback_used"] is True
+
+
+def test_dialog_does_not_repeat_mode_consent_for_bound_dossier_case_conversation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dialog_api = _load_dialog_api_module()
+
+    class DummyDB:
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_conversation_for_user(db, user_id: int, conversation_id: int):
+        return Conversation(
+            id=conversation_id,
+            user_id=user_id,
+            session_id="session-bound",
+            title="bound",
+            conversation_mode="TRACKED_CASE",
+            persistence_consent="tracked",
+            dossier_id=91,
+        )
+
+    async def fake_list_recent_conversation_messages(db, conversation_id: int, limit: int = 6):
+        return []
+
+    async def fake_detect_case_boundary(**kwargs):
+        return "SAME_CASE"
+
+    monkeypatch.setattr(dialog_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dialog_api, "get_conversation_for_user", fake_get_conversation_for_user)
+    monkeypatch.setattr(dialog_api, "list_recent_conversation_messages", fake_list_recent_conversation_messages)
+    monkeypatch.setattr(dialog_api, "detect_case_boundary", fake_detect_case_boundary)
+
+    result = asyncio.run(
+        dialog_api.process_dialog(
+            request=dialog_api.DialogRequest(
+                user_input="我再补充一个事实，公司还拖欠我两个月工资",
+                conversation_id=31,
+                mode_consent_enabled=True,
+            ),
+            current_user=AuthenticatedUser(user_id=5, username="alice"),
+            db=DummyDB(),
+        )
+    )
+
+    assert result["status"] == "processing"
+    assert result["task_id"] == "task-123"
+    assert result.get("action") is None
 
 
 def test_dialog_prioritizes_suggest_new_case_over_mode_consent(
@@ -440,9 +501,60 @@ def test_mode_consent_api_updates_temporary_case_analysis(
     assert result["conversation"]["persistence_consent"] == "temporary"
 
 
-def test_mode_consent_api_rejects_other_users_conversation(
+def test_attach_dossier_promotes_conversation_to_tracked_case(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    conversations_api = _load_conversations_api_module()
+
+    class DummyDB:
+        def add(self, obj) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+        async def refresh(self, conversation) -> None:
+            return None
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_conversation_for_user(db, user_id: int, conversation_id: int):
+        return Conversation(
+            id=conversation_id,
+            user_id=user_id,
+            session_id="session-attach",
+            title="attach",
+            conversation_mode="UNKNOWN",
+            persistence_consent="unknown",
+        )
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return type("Dossier", (), {"id": dossier_id})()
+
+    monkeypatch.setattr(conversations_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(conversations_api, "get_conversation_for_user", fake_get_conversation_for_user)
+    monkeypatch.setattr(conversations_api, "get_dossier_for_user", fake_get_dossier_for_user)
+
+    result = asyncio.run(
+        conversations_api.attach_dossier(
+            conversation_id=41,
+            payload=conversations_api.ConversationAttachDossierRequest(dossier_id=9),
+            current_user=AuthenticatedUser(user_id=6, username="owner"),
+            db=DummyDB(),
+        )
+    )
+
+    assert result["status"] == "success"
+    assert result["conversation"]["dossier_id"] == 9
+    assert result["conversation"]["conversation_mode"] == "TRACKED_CASE"
+    assert result["conversation"]["persistence_consent"] == "tracked"
+    assert result["conversation"]["mode_reason"] == "attached_to_dossier"
+
+
     conversations_api = _load_conversations_api_module()
 
     class DummyDB:

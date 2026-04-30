@@ -23,14 +23,11 @@ from app.services.conversation_store import (
     serialize_dossier_participant_mention,
 )
 from app.services.dossier_display_graph import build_dossier_display_graph
-from app.services.conversation_entity_state import build_conversation_entity_state
 from app.services.dossier_entity_onboarding_agent import (
     build_dossier_entity_onboarding_decision,
 )
-from app.services.dossier_entity_state import (
-    build_dossier_entity_state,
-    coordination_graph_from_dossier_entity_state,
-)
+from app.services.dossier_entity_state import coordination_graph_from_dossier_entity_state
+from app.services.dossier_state_snapshot import build_dossier_state_snapshot_for_user
 from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.dossier_intelligence import (
     _build_party_naming_task,
@@ -2102,15 +2099,15 @@ async def build_dossier_coordination_graph_for_user(
 
     confirmation_tasks: list[dict[str, Any]] = []
     onboarding_decisions: list[dict[str, Any]] = []
-    conversation_entity_states: list[dict[str, Any]] = []
-    conversation_summaries = [
-        {
-            "id": conversation.id,
-            "title": getattr(conversation, "title", "") or f"conversation {conversation.id}",
-        }
-        for conversation in conversations
-        if isinstance(getattr(conversation, "id", None), int) and conversation.id > 0
-    ]
+    snapshot = await build_dossier_state_snapshot_for_user(
+        db,
+        user_id=user_id,
+        dossier_id=dossier.id,
+        raw_graph_payload=raw_graph_payload,
+    )
+    conversation_entity_states = snapshot.get("conversation_entity_states") or []
+    conversation_summaries = snapshot.get("conversation_summaries") or []
+    dossier_entity_state = snapshot.get("dossier_entity_state") or {}
     for conversation in conversations:
         conversation_id = _positive_int(getattr(conversation, "id", None))
         if conversation_id <= 0:
@@ -2119,14 +2116,14 @@ async def build_dossier_coordination_graph_for_user(
             db,
             conversation_id=conversation_id,
         )
-        conversation_entity_state = build_conversation_entity_state(
-            message_text=message_text,
-            raw_graph_payload=raw_graph_payload,
-            conversation_id=conversation_id,
-            conversation_mode=getattr(conversation, "conversation_mode", None) or "TRACKED_CASE",
-            persistence_consent=getattr(conversation, "persistence_consent", None) or "tracked",
+        conversation_entity_state = next(
+            (
+                item
+                for item in conversation_entity_states
+                if _positive_int(item.get("conversation_id")) == conversation_id
+            ),
+            {},
         )
-        conversation_entity_states.append(conversation_entity_state)
         onboarding_decision = build_dossier_entity_onboarding_decision(
             message_text=message_text,
             raw_graph_payload=raw_graph_payload,
@@ -2147,16 +2144,6 @@ async def build_dossier_coordination_graph_for_user(
         if party_naming_task is not None:
             confirmation_tasks.append(party_naming_task)
 
-    dossier_entity_state = build_dossier_entity_state(
-        conversation_entity_states=conversation_entity_states,
-        dossier_id=dossier.id,
-        user_id=user_id,
-        resolution_decisions=[
-            serialize_dossier_entity_resolution_decision(decision)
-            for decision in decisions
-        ],
-        conversation_summaries=conversation_summaries,
-    )
     confirmation_tasks = _suppress_resolved_current_party_party_naming_tasks(
         confirmation_tasks,
         conversation_entity_states=conversation_entity_states,
@@ -2168,14 +2155,7 @@ async def build_dossier_coordination_graph_for_user(
         participant_candidates=participant_candidates,
         intelligence_payload={"confirmation_tasks": confirmation_tasks},
         bound_conversation_ids=conversation_ids,
-        conversation_summaries=[
-            {
-                "id": conversation.id,
-                "title": getattr(conversation, "title", "") or f"会话 {conversation.id}",
-            }
-            for conversation in conversations
-            if isinstance(getattr(conversation, "id", None), int) and conversation.id > 0
-        ],
+        conversation_summaries=conversation_summaries,
         dossier_entity_state=dossier_entity_state,
     )
     return {

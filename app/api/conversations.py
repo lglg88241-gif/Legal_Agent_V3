@@ -328,6 +328,14 @@ async def attach_dossier(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
 
     await attach_conversation_to_dossier(db, conversation, dossier.id)
+    await update_conversation_mode_state(
+        db,
+        conversation,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+        mode_reason="attached_to_dossier",
+        mark_confirmed=True,
+    )
     await db.commit()
     await db.refresh(conversation)
     return {"status": "success", "conversation": serialize_conversation(conversation)}

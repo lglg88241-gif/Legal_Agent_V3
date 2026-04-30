@@ -313,7 +313,7 @@ def test_fact_update_execution_trace_records_agent_plan_tool_calls_and_writes(
     assert trace["message_understanding"]["intent"] == "fact_update"
     assert trace["execution_plan"]["primary_route"] == "CASE_UPDATE"
     assert trace["agent_plan"]["specialist"] == "case_update_agent"
-    assert trace["agent_plan"]["response_style"] == "acknowledge_and_persist"
+    assert trace["agent_plan"]["response_style"] == "tracked_case_refresh"
     assert "acknowledgement_compose" in tool_names
     assert steps["assistant_acknowledgement"]["status"] == "success"
     assert steps["fact_persistence"]["status"] == "success"
@@ -413,7 +413,7 @@ def test_temporary_fact_update_trace_keeps_writes_blocked_and_uses_legal_special
     guards = _guard_lookup(result)
 
     assert guards["temporary_blocks_persistence"]["triggered"] is True
-    assert trace["agent_plan"]["response_style"] == "case_analysis_without_persistence"
+    assert trace["agent_plan"]["response_style"] == "temporary_case_analysis"
     assert steps["legal_agent_answer"]["status"] == "success"
     assert trace["writes"]["allowed"] == []
     assert [item["name"] for item in trace["writes"]["blocked"]] == [

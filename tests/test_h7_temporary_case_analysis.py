@@ -149,7 +149,7 @@ def test_temporary_fact_update_runs_legal_analysis_without_persistence(
     assert result["route_intent"] == "CASE_UPDATE"
     assert trackers["legal_agent_calls"] == 1
     assert trackers["ack_calls"] == 0
-    assert trace["execution_plan"]["response_mode"] == "case_analysis_without_persistence"
+    assert trace["execution_plan"]["response_mode"] == "temporary_case_analysis"
     assert "legal_agent_answer" in step_names
     assert "fact_persistence" in step_names
     assert "graph_update" in step_names

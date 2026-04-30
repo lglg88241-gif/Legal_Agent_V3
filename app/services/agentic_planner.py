@@ -246,14 +246,24 @@ def build_agentic_plan(
                 reason="Schedule graph extraction/update from the new factual message.",
             ),
         ]
-        response_mode = "case_analysis_without_persistence" if (
+        response_mode = "temporary_case_analysis" if (
             isinstance(request_context, AgenticRequestContext) and request_context.temporary
-        ) else "acknowledge_and_persist"
+        ) else "tracked_case_refresh"
+        plan_summary = (
+            "Treat the message as a temporary case analysis request without persistence writes."
+            if response_mode == "temporary_case_analysis"
+            else "Treat the message as a tracked case refresh and plan state/graph updates around the factual message."
+        )
+        final_response_strategy = (
+            "temporary_case_analysis"
+            if response_mode == "temporary_case_analysis"
+            else "acknowledgement"
+        )
         plan.update(
             response_mode=response_mode,
             response_style=response_mode,
             specialist="case_update_agent",
-            plan_summary="Treat the message as a factual case update and acknowledge it after planning persistence writes.",
+            plan_summary=plan_summary,
             context_requirements=["message_text", "persistence_consent"],
             tool_sequence=tool_sequence,
             tool_calls=tool_sequence,
@@ -261,7 +271,7 @@ def build_agentic_plan(
             needs_legal_rag=False,
             needs_graph_context=False,
             needs_structured_persistence=True,
-            final_response_strategy="acknowledgement",
+            final_response_strategy=final_response_strategy,
             missing_requirements=[],
             fallback_allowed=False,
         )
@@ -280,9 +290,11 @@ def build_agentic_plan(
                 dispatch_mode="specialist_owned",
             ),
         ]
+        is_temporary = isinstance(request_context, AgenticRequestContext) and request_context.temporary
+        response_mode = "temporary_case_analysis" if is_temporary else "tracked_case_refresh"
         plan.update(
-            response_mode="acknowledge_and_persist",
-            response_style="acknowledge_and_persist",
+            response_mode=response_mode,
+            response_style=response_mode,
             specialist="case_update_agent",
             context_requirements=["previous_factual_user_message"],
             tool_sequence=base_tool_sequence,
@@ -309,7 +321,11 @@ def build_agentic_plan(
                 *base_tool_sequence,
             ]
             plan.update(
-                plan_summary="Bind confirmation to the resolved previous factual user message before planning writes.",
+                plan_summary=(
+                    "Use the resolved previous factual user message only for temporary analysis without persistence."
+                    if is_temporary
+                    else "Bind confirmation to the resolved previous factual user message before planning tracked refresh writes."
+                ),
                 tool_sequence=full_tool_sequence,
                 tool_calls=full_tool_sequence,
                 writes_requested=[
@@ -328,7 +344,9 @@ def build_agentic_plan(
                         reason="Schedule graph update from the resolved previous factual user message.",
                     ),
                 ],
-                final_response_strategy="acknowledgement",
+                final_response_strategy=(
+                    "temporary_case_analysis" if is_temporary else "acknowledgement"
+                ),
                 missing_requirements=[],
             )
             return plan

@@ -159,7 +159,7 @@ def build_execution_plan_from_message_understanding(
         plan["resolved_inputs"]["graph_update_input_text"] = normalized_message
         plan["is_actionable"] = True
         if str(persistence_consent or "").strip().lower() == "temporary":
-            plan["response_mode"] = "case_analysis_without_persistence"
+            plan["response_mode"] = "temporary_case_analysis"
             plan["steps"] = [
                 _build_step(
                     name="legal_agent_answer",
@@ -170,7 +170,7 @@ def build_execution_plan_from_message_understanding(
             ]
             plan["trace"]["reason"] = (
                 plan["trace"]["reason"]
-                or "用户选择仅本次分析，应基于事实给出法律分析，但不得持久化或更新图谱。"
+                or "用户选择仅本轮分析，应基于事实给出法律分析，但不得持久化或更新图谱。"
             )
             return plan
 
@@ -199,9 +199,13 @@ def build_execution_plan_from_message_understanding(
                     required=False,
                 ),
             ]
-            plan["response_mode"] = "acknowledge_and_persist"
+            plan["response_mode"] = "tracked_case_refresh"
             plan["persistence_allowed"] = True
             plan["graph_update_allowed"] = True
+            plan["trace"]["reason"] = (
+                plan["trace"]["reason"]
+                or "用户正在补充已持续跟踪案情，应刷新结构化案情与会话图谱状态，供后续问答继续使用。"
+            )
             return plan
 
     if intent == "confirm_previous_fact" and primary_route == "CASE_UPDATE":
@@ -260,10 +264,19 @@ def build_execution_plan_from_message_understanding(
             )
             plan["resolved_inputs"]["effective_persistence_text"] = previous_fact_text
             plan["resolved_inputs"]["graph_update_input_text"] = previous_fact_text
-            plan["response_mode"] = "acknowledge_and_persist"
-            plan["persistence_allowed"] = str(persistence_consent or "").strip().lower() != "temporary"
-            plan["graph_update_allowed"] = str(persistence_consent or "").strip().lower() != "temporary"
+            is_temporary = str(persistence_consent or "").strip().lower() == "temporary"
+            plan["response_mode"] = "temporary_case_analysis" if is_temporary else "tracked_case_refresh"
+            plan["persistence_allowed"] = not is_temporary
+            plan["graph_update_allowed"] = not is_temporary
             plan["is_actionable"] = True
+            plan["trace"]["reason"] = (
+                plan["trace"]["reason"]
+                or (
+                    "用户确认上一条事实，但当前仅允许本轮分析，因此只将确认后的事实用于当前分析。"
+                    if is_temporary
+                    else "用户确认上一条事实，应以已解析的真实事实刷新结构化案情与会话图谱状态。"
+                )
+            )
         else:
             plan["trace"]["warnings"].append("confirmed_previous_fact_text_unavailable")
             plan["trace"]["reason"] = (
