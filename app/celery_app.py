@@ -51,6 +51,8 @@ from app.services.graph_extractor import format_graph_memory, refresh_case_graph
 from app.services.legal_agent import legal_agent
 from app.services.message_orchestrator import build_execution_plan_from_message_understanding
 from app.services.message_understanding_agent import understand_message_with_agent
+from app.services.conversation_entity_state import build_conversation_entity_state
+from app.services.dossier_entity_state import build_dossier_entity_state
 
 logger = logging.getLogger(__name__)
 
@@ -1840,6 +1842,7 @@ def ask_agent_task(
             advisor_dossier_context = None
             advisor_dossier_graph_summary = None
             advisor_dossier_graph_context = None
+            h9_canonical_entity_summary = None
             execution_trace.mark_legacy_fallback(used=False, reason=None)
         else:
             dossier_scope_hint = dossier_id or (1 if raw_dossier_context else None)
@@ -1856,6 +1859,73 @@ def ask_agent_task(
             advisor_dossier_graph_context = (
                 raw_dossier_graph_context if include_dossier_context_for_advisor else None
             )
+            h9_canonical_entity_summary = None
+            if include_dossier_context_for_advisor and dossier_id and isinstance(raw_dossier_graph_context, dict):
+                try:
+                    raw_graph_payload = raw_dossier_graph_context.get("graph_payload")
+                    if isinstance(raw_graph_payload, dict):
+                        conversation_entity_state = build_conversation_entity_state(
+                            message_text=question,
+                            raw_graph_payload=raw_graph_payload,
+                            conversation_id=conversation_id,
+                            conversation_mode=conversation_mode,
+                            persistence_consent=persistence_consent,
+                        )
+                        if conversation_entity_state.get("should_build"):
+                            dossier_entity_state = build_dossier_entity_state(
+                                conversation_entity_states=[conversation_entity_state],
+                                dossier_id=dossier_id,
+                                user_id=user_id,
+                                resolution_decisions=[],
+                                conversation_summaries=[],
+                            )
+                            canonical_entities = dossier_entity_state.get("entities") if isinstance(dossier_entity_state.get("entities"), list) else []
+                            entity_parts = []
+                            current_party = None
+                            employers = []
+                            organizations = []
+                            relations = []
+                            for entity in canonical_entities:
+                                if not isinstance(entity, dict):
+                                    continue
+                                label = str(entity.get("canonical_label") or "").strip()
+                                entity_type = str(entity.get("entity_type") or "").strip()
+                                role = str(entity.get("role") or "").strip()
+                                confidence = str(entity.get("confidence") or "").strip()
+                                if not label or confidence == "low":
+                                    continue
+                                if role == "current_party" and entity_type == "person":
+                                    current_party = label
+                                elif role == "employer" and entity_type == "organization":
+                                    employers.append(label)
+                                elif entity_type == "organization" and label not in employers:
+                                    organizations.append(label)
+                            for relation in dossier_entity_state.get("relations") if isinstance(dossier_entity_state.get("relations"), list) else []:
+                                if not isinstance(relation, dict):
+                                    continue
+                                source_label = str(relation.get("source_label") or "").strip()
+                                target_label = str(relation.get("target_label") or "").strip()
+                                relation_label = str(relation.get("label") or "").strip()
+                                if source_label and target_label and relation_label:
+                                    relations.append((source_label, relation_label, target_label))
+                            if current_party:
+                                entity_parts.append(f"当事人是{current_party}")
+                            for employer in employers[:2]:
+                                entity_parts.append(f"用人单位是{employer}")
+                            for org in organizations[:2]:
+                                entity_parts.append(f"涉及组织{org}")
+                            for source, rel, target in relations[:3]:
+                                entity_parts.append(f"{source}{rel}{target}")
+                            if entity_parts:
+                                h9_canonical_entity_summary = "当前案卷已确认：" + "；".join(entity_parts) + "。"
+                except Exception as exc:
+                    logger.warning(
+                        "H9 canonical entity summary build failed | conversation_id=%s dossier_id=%s error=%s",
+                        conversation_id,
+                        dossier_id,
+                        exc,
+                    )
+                    h9_canonical_entity_summary = None
             if raw_dossier_context and not include_dossier_context_for_advisor:
                 logger.info(
                     "Advisor dossier context skipped for pure legal query | conversation_id=%s user_id=%s",
@@ -1869,6 +1939,11 @@ def ask_agent_task(
                     name="legal_agent_answer",
                     agent="legal_agent",
                 ):
+                    enriched_dossier_graph_summary = advisor_dossier_graph_summary
+                    if h9_canonical_entity_summary:
+                        enriched_dossier_graph_summary = (
+                            f"{h9_canonical_entity_summary}\n\n{advisor_dossier_graph_summary or ''}"
+                        ).strip()
                     answer = asyncio.run(
                         legal_agent.ask(
                             user_id,
@@ -1882,7 +1957,7 @@ def ask_agent_task(
                             conversation_id=conversation_id,
                             saved_case_state=context.get("saved_case_state"),
                             dossier_context=advisor_dossier_context,
-                            dossier_graph_summary=advisor_dossier_graph_summary,
+                            dossier_graph_summary=enriched_dossier_graph_summary,
                             dossier_graph_context=advisor_dossier_graph_context,
                         )
                     )
@@ -1986,6 +2061,11 @@ def ask_agent_task(
                         name="legal_agent_answer",
                         agent="legal_agent",
                     ):
+                        enriched_dossier_graph_summary = advisor_dossier_graph_summary
+                        if h9_canonical_entity_summary:
+                            enriched_dossier_graph_summary = (
+                                f"{h9_canonical_entity_summary}\n\n{advisor_dossier_graph_summary or ''}"
+                            ).strip()
                         answer = asyncio.run(
                             legal_agent.ask(
                                 user_id,
@@ -1999,7 +2079,7 @@ def ask_agent_task(
                                 conversation_id=conversation_id,
                                 saved_case_state=context.get("saved_case_state"),
                                 dossier_context=advisor_dossier_context,
-                                dossier_graph_summary=advisor_dossier_graph_summary,
+                                dossier_graph_summary=enriched_dossier_graph_summary,
                                 dossier_graph_context=advisor_dossier_graph_context,
                             )
                         )
@@ -2095,6 +2175,11 @@ def ask_agent_task(
                         name="legal_agent_answer",
                         agent="legal_agent",
                     ):
+                        enriched_dossier_graph_summary = advisor_dossier_graph_summary
+                        if h9_canonical_entity_summary:
+                            enriched_dossier_graph_summary = (
+                                f"{h9_canonical_entity_summary}\n\n{advisor_dossier_graph_summary or ''}"
+                            ).strip()
                         answer = asyncio.run(
                             legal_agent.ask(
                                 user_id,
@@ -2108,7 +2193,7 @@ def ask_agent_task(
                                 conversation_id=conversation_id,
                                 saved_case_state=context.get("saved_case_state"),
                                 dossier_context=advisor_dossier_context,
-                                dossier_graph_summary=advisor_dossier_graph_summary,
+                                dossier_graph_summary=enriched_dossier_graph_summary,
                                 dossier_graph_context=advisor_dossier_graph_context,
                             )
                         )
@@ -2134,6 +2219,11 @@ def ask_agent_task(
                     name="legal_agent_answer",
                     agent="legal_agent",
                 ):
+                    enriched_dossier_graph_summary = advisor_dossier_graph_summary
+                    if h9_canonical_entity_summary:
+                        enriched_dossier_graph_summary = (
+                            f"{h9_canonical_entity_summary}\n\n{advisor_dossier_graph_summary or ''}"
+                        ).strip()
                     answer = asyncio.run(
                         legal_agent.ask(
                             user_id,
@@ -2147,7 +2237,7 @@ def ask_agent_task(
                             conversation_id=conversation_id,
                             saved_case_state=context.get("saved_case_state"),
                             dossier_context=advisor_dossier_context,
-                            dossier_graph_summary=advisor_dossier_graph_summary,
+                            dossier_graph_summary=enriched_dossier_graph_summary,
                             dossier_graph_context=advisor_dossier_graph_context,
                             )
                         )
