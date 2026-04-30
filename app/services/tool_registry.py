@@ -269,6 +269,64 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
         migration_status="ready_readonly",
     ),
     _tool(
+        name="conversation_entity_state_build",
+        category="intelligence",
+        current_implementation="app.services.conversation_entity_state::build_conversation_entity_state",
+        description="Build resolved single-conversation entity state for dossier orchestration.",
+        input_schema=_schema(
+            required=("conversation_id",),
+            properties={
+                "conversation_id": {"type": "integer"},
+                "message_text": {"type": "string"},
+                "message_understanding": {"type": "object"},
+                "raw_graph_payload": {"type": "object"},
+            },
+        ),
+        output_schema=_schema(
+            properties={
+                "entities": {"type": "array"},
+                "relations": {"type": "array"},
+                "clarification_tasks": {"type": "array"},
+            },
+        ),
+        hard_guards=(
+            "temporary_blocks_persistence",
+            "legal_qa_blocks_case_graph_pollution",
+            "raw_graph_not_mutated_by_dossier_overlay",
+        ),
+        planner_callable=True,
+        migration_status="ready_readonly",
+    ),
+    _tool(
+        name="dossier_entity_state_build",
+        category="intelligence",
+        current_implementation="app.services.dossier_entity_state::build_dossier_entity_state",
+        description="Build dossier canonical entity state from conversation_entity_state inputs.",
+        input_schema=_schema(
+            required=("dossier_id", "conversation_entity_states"),
+            properties={
+                "dossier_id": {"type": "integer"},
+                "conversation_entity_states": {"type": "array"},
+                "resolution_decisions": {"type": "array"},
+            },
+        ),
+        output_schema=_schema(
+            properties={
+                "entities": {"type": "array"},
+                "relations": {"type": "array"},
+                "confirmation_tasks": {"type": "array"},
+            },
+        ),
+        hard_guards=(
+            "conversation_must_belong_to_dossier",
+            "entity_merge_requires_user_confirmation",
+            "person_to_company_never_identity_merge",
+            "role_person_not_auto_identity_merge",
+        ),
+        planner_callable=True,
+        migration_status="ready_readonly",
+    ),
+    _tool(
         name="display_graph_build",
         category="graph_read",
         current_implementation="app.services.dossier_display_graph::build_dossier_display_graph_from_payload",

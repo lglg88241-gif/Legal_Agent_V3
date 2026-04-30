@@ -23,8 +23,13 @@ from app.services.conversation_store import (
     serialize_dossier_participant_mention,
 )
 from app.services.dossier_display_graph import build_dossier_display_graph
+from app.services.conversation_entity_state import build_conversation_entity_state
 from app.services.dossier_entity_onboarding_agent import (
     build_dossier_entity_onboarding_decision,
+)
+from app.services.dossier_entity_state import (
+    build_dossier_entity_state,
+    coordination_graph_from_dossier_entity_state,
 )
 from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.dossier_intelligence import _build_party_naming_task
@@ -2007,7 +2012,11 @@ def build_dossier_coordination_graph(
     intelligence_payload: dict[str, Any] | None,
     bound_conversation_ids: list[int] | None = None,
     conversation_summaries: list[dict[str, Any]] | None = None,
+    dossier_entity_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    if isinstance(dossier_entity_state, dict):
+        return coordination_graph_from_dossier_entity_state(dossier_entity_state)
+
     agent_input = _build_responsible_entity_graph_agent_input(
         raw_graph_payload=raw_graph_payload,
         display_graph=display_graph,
@@ -2090,6 +2099,15 @@ async def build_dossier_coordination_graph_for_user(
 
     confirmation_tasks: list[dict[str, Any]] = []
     onboarding_decisions: list[dict[str, Any]] = []
+    conversation_entity_states: list[dict[str, Any]] = []
+    conversation_summaries = [
+        {
+            "id": conversation.id,
+            "title": getattr(conversation, "title", "") or f"conversation {conversation.id}",
+        }
+        for conversation in conversations
+        if isinstance(getattr(conversation, "id", None), int) and conversation.id > 0
+    ]
     for conversation in conversations:
         conversation_id = _positive_int(getattr(conversation, "id", None))
         if conversation_id <= 0:
@@ -2116,6 +2134,26 @@ async def build_dossier_coordination_graph_for_user(
         )
         if party_naming_task is not None:
             confirmation_tasks.append(party_naming_task)
+        conversation_entity_states.append(
+            build_conversation_entity_state(
+                message_text=message_text,
+                raw_graph_payload=raw_graph_payload,
+                conversation_id=conversation_id,
+                conversation_mode=getattr(conversation, "conversation_mode", None) or "TRACKED_CASE",
+                persistence_consent=getattr(conversation, "persistence_consent", None) or "tracked",
+            )
+        )
+
+    dossier_entity_state = build_dossier_entity_state(
+        conversation_entity_states=conversation_entity_states,
+        dossier_id=dossier.id,
+        user_id=user_id,
+        resolution_decisions=[
+            serialize_dossier_entity_resolution_decision(decision)
+            for decision in decisions
+        ],
+        conversation_summaries=conversation_summaries,
+    )
 
     coordination_graph = build_dossier_coordination_graph(
         raw_graph_payload=raw_graph_payload,
@@ -2131,9 +2169,12 @@ async def build_dossier_coordination_graph_for_user(
             for conversation in conversations
             if isinstance(getattr(conversation, "id", None), int) and conversation.id > 0
         ],
+        dossier_entity_state=dossier_entity_state,
     )
     return {
         "coordination_graph": coordination_graph,
         "entity_onboarding": onboarding_decisions,
+        "conversation_entity_states": conversation_entity_states,
+        "dossier_entity_state": dossier_entity_state,
         "generated_at": raw_graph_payload.get("generated_at"),
     }

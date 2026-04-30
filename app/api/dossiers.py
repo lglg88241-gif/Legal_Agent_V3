@@ -937,6 +937,8 @@ async def get_dossier_coordination_graph(
         "view": "coordination",
         "coordination_graph": payload.get("coordination_graph", {}),
         "entity_onboarding": payload.get("entity_onboarding", []),
+        "conversation_entity_states": payload.get("conversation_entity_states", []),
+        "dossier_entity_state": payload.get("dossier_entity_state", {}),
         "generated_at": payload.get("generated_at"),
     }
 
