@@ -16,12 +16,16 @@ from app.services.conversation_store import (
     list_dossier_entity_resolution_decisions,
     list_dossier_participant_mentions,
     list_dossier_participants,
+    list_recent_conversation_messages,
     serialize_dossier,
     serialize_dossier_entity_resolution_decision,
     serialize_dossier_participant,
     serialize_dossier_participant_mention,
 )
 from app.services.dossier_display_graph import build_dossier_display_graph
+from app.services.dossier_entity_onboarding_agent import (
+    build_dossier_entity_onboarding_decision,
+)
 from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.message_understanding_agent import (
     _call_openai_json_model,
@@ -556,6 +560,8 @@ def _has_confirmed_self_naming(raw_graph_payload: dict[str, Any] | None) -> bool
 def _collect_self_anchor_evidence(
     raw_graph_payload: dict[str, Any] | None,
     display_graph: dict[str, Any] | None,
+    *,
+    conversation_id: int | None = None,
 ) -> dict[str, Any] | None:
     raw_labels: list[str] = []
     source_conversation_ids: list[int] = []
@@ -565,6 +571,9 @@ def _collect_self_anchor_evidence(
     raw_nodes = raw_graph.get("nodes") if isinstance(raw_graph, dict) else []
     for node in raw_nodes if isinstance(raw_nodes, list) else []:
         if not isinstance(node, dict):
+            continue
+        node_conversation_ids = _extract_node_conversation_ids(node)
+        if conversation_id and node_conversation_ids and conversation_id not in node_conversation_ids:
             continue
         labels = _extract_self_anchor_labels_from_node(node)
         if not labels:
@@ -576,6 +585,9 @@ def _collect_self_anchor_evidence(
     display_nodes = display_graph.get("nodes") if isinstance(display_graph, dict) else []
     for node in display_nodes if isinstance(display_nodes, list) else []:
         if not isinstance(node, dict):
+            continue
+        node_conversation_ids = _extract_node_conversation_ids(node)
+        if conversation_id and node_conversation_ids and conversation_id not in node_conversation_ids:
             continue
         labels = _extract_self_anchor_labels_from_node(node)
         if not labels:
@@ -606,11 +618,27 @@ def _collect_self_anchor_evidence(
 def _build_party_naming_task(
     raw_graph_payload: dict[str, Any] | None,
     display_graph: dict[str, Any] | None,
+    *,
+    onboarding_decision: dict[str, Any] | None = None,
+    conversation_id: int | None = None,
 ) -> dict[str, Any] | None:
     if _has_confirmed_self_naming(raw_graph_payload):
         return None
 
-    evidence = _collect_self_anchor_evidence(raw_graph_payload, display_graph)
+    if isinstance(onboarding_decision, dict):
+        party_naming_decision = (
+            onboarding_decision.get("party_naming_decision")
+            if isinstance(onboarding_decision.get("party_naming_decision"), dict)
+            else {}
+        )
+        if party_naming_decision.get("should_create_party_naming") is False:
+            return None
+
+    evidence = _collect_self_anchor_evidence(
+        raw_graph_payload,
+        display_graph,
+        conversation_id=conversation_id,
+    )
     if evidence is None:
         return None
 
@@ -620,6 +648,20 @@ def _build_party_naming_task(
     if _is_organization_like_label(current_label) or is_role_person_label(current_label):
         return None
     suggested_labels = list(_SELF_NAMING_SUGGESTED_LABELS)
+    reason = _SELF_NAMING_REASON
+    source = "dossier_intelligence_rules"
+    if isinstance(onboarding_decision, dict):
+        reason = (
+            _normalize_text(
+                (
+                    onboarding_decision.get("current_party_resolution")
+                    if isinstance(onboarding_decision.get("current_party_resolution"), dict)
+                    else {}
+                ).get("reason")
+            )
+            or reason
+        )
+        source = _normalize_text(onboarding_decision.get("source")) or source
     return {
         "type": "party_naming",
         "task_type": "party_naming",
@@ -628,9 +670,9 @@ def _build_party_naming_task(
         "current_label": current_label,
         "suggested_labels": suggested_labels,
         "suggested_names": suggested_labels,
-        "reason": _SELF_NAMING_REASON,
+        "reason": reason,
         "requires_user_confirmation": True,
-        "source": "dossier_intelligence_rules",
+        "source": source,
         "source_conversation_ids": evidence.get("source_conversation_ids", []),
         "raw_labels": evidence.get("raw_labels", []),
         "raw_node_ids": evidence.get("raw_node_ids", []),
@@ -1663,6 +1705,77 @@ async def _load_display_graph_context(
     return raw_graph_payload, display_graph
 
 
+def _message_understanding_from_message_metadata(message: Any) -> dict[str, Any] | None:
+    metadata = (
+        message.message_metadata
+        if isinstance(getattr(message, "message_metadata", None), dict)
+        else {}
+    )
+    message_understanding = metadata.get("message_understanding")
+    if isinstance(message_understanding, dict):
+        return message_understanding
+
+    execution_trace = metadata.get("execution_trace")
+    if isinstance(execution_trace, dict) and isinstance(execution_trace.get("message_understanding"), dict):
+        return execution_trace["message_understanding"]
+    return None
+
+
+async def _build_onboarding_context_for_conversation(
+    db: AsyncSession,
+    *,
+    conversation_id: int | None,
+) -> tuple[str, dict[str, Any] | None]:
+    normalized_conversation_id = _positive_int(conversation_id)
+    if normalized_conversation_id <= 0:
+        return "", None
+
+    messages = await list_recent_conversation_messages(
+        db,
+        conversation_id=normalized_conversation_id,
+        limit=8,
+    )
+    user_messages = [
+        message
+        for message in messages
+        if _normalize_key(getattr(message, "role", "")) == "user"
+        and _normalize_text(getattr(message, "content", ""))
+    ]
+    message_text = " ".join(
+        _normalize_text(getattr(message, "content", ""))
+        for message in user_messages
+    )
+    latest_understanding: dict[str, Any] | None = None
+    for message in reversed(user_messages):
+        latest_understanding = _message_understanding_from_message_metadata(message)
+        if latest_understanding is not None:
+            break
+    return message_text, latest_understanding
+
+
+async def _build_onboarding_decision_for_intelligence(
+    db: AsyncSession,
+    *,
+    dossier_id: int,
+    conversation_id: int | None,
+    raw_graph_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    message_text, message_understanding = await _build_onboarding_context_for_conversation(
+        db,
+        conversation_id=conversation_id,
+    )
+    return build_dossier_entity_onboarding_decision(
+        message_text=message_text,
+        message_understanding=message_understanding,
+        raw_graph_payload=raw_graph_payload,
+        conversation_id=conversation_id,
+        dossier_id=dossier_id,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+        graph_updated=True,
+    )
+
+
 async def build_dossier_intelligence(
     db: AsyncSession,
     *,
@@ -1740,8 +1853,36 @@ async def build_dossier_intelligence(
     warnings.extend(summary_warnings)
     steps.append(_step("build_summary", "success", source=summary_payload["source"]))
 
+    onboarding_decision = await _build_onboarding_decision_for_intelligence(
+        db,
+        dossier_id=dossier.id,
+        conversation_id=conversation_id,
+        raw_graph_payload=raw_graph_payload,
+    )
+    steps.append(
+        _step(
+            "build_entity_onboarding_decision",
+            "success" if onboarding_decision.get("should_run_onboarding") else "skipped",
+            needs_current_party_confirmation=bool(
+                onboarding_decision.get("needs_current_party_confirmation")
+            ),
+            party_naming=bool(
+                (
+                    onboarding_decision.get("party_naming_decision")
+                    if isinstance(onboarding_decision.get("party_naming_decision"), dict)
+                    else {}
+                ).get("should_create_party_naming")
+            ),
+        )
+    )
+
     confirmation_tasks: list[dict[str, Any]] = []
-    party_naming_task = _build_party_naming_task(raw_graph_payload, display_graph)
+    party_naming_task = _build_party_naming_task(
+        raw_graph_payload,
+        display_graph,
+        onboarding_decision=onboarding_decision,
+        conversation_id=conversation_id,
+    )
     if party_naming_task is not None:
         confirmation_tasks.append(party_naming_task)
     steps.append(
@@ -1848,6 +1989,7 @@ async def build_dossier_intelligence(
         },
         "summary": summary_payload,
         "confirmation_tasks": confirmation_tasks,
+        "entity_onboarding": onboarding_decision,
         "display_graph_notes": display_graph_notes,
         "candidate_classifier": {
             "provider": classifier_result.get("provider"),

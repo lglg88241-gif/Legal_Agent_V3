@@ -3696,8 +3696,13 @@ async function loadSelectedDossierIntelligence(dossierId) {
   dossierIntelligenceLoading.value = true
   dossierIntelligenceState.error = ''
   try {
+    const scopedConversationId =
+      Number(currentConversationDossierId() || 0) === Number(dossierId || 0)
+        ? currentConversationId.value || undefined
+        : undefined
     const { data } = await getDossierIntelligence(dossierId, {
       include_display_graph: true,
+      conversation_id: scopedConversationId,
     })
     applyDossierIntelligencePayload(dossierId, data)
   } catch (error) {
