@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from app.services.dossier_coordination_graph import build_dossier_coordination_graph
 from app.services.dossier_display_graph import build_dossier_display_graph
+from app.services.dossier_entity_state import build_dossier_entity_state
 
 
 def _make_raw_graph_payload(
@@ -544,3 +545,76 @@ def test_confirmed_self_alias_becomes_named_entity_without_duplicate_anchor() ->
             "is_best": True,
         }
     ]
+
+
+def test_coordination_graph_uses_canonical_dossier_entity_state_only() -> None:
+    dossier_entity_state = build_dossier_entity_state(
+        conversation_entity_states=[
+            {
+                "should_build": True,
+                "conversation_id": 701,
+                "entities": [
+                    {
+                        "id": "conversation:701:entity:company",
+                        "canonical_label": "B公司",
+                        "entity_type": "organization",
+                        "role": "employer",
+                        "confidence": "high",
+                        "source": "conversation_graph",
+                        "aliases": [],
+                        "mentions": [
+                            {
+                                "id": "conversation:701:mention:company",
+                                "conversation_id": 701,
+                                "raw_label": "B公司",
+                                "raw_node_id": "company-701",
+                                "source": "conversation_graph",
+                            }
+                        ],
+                    }
+                ],
+                "relations": [],
+            }
+        ],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+    raw_graph_payload = _make_raw_graph_payload(
+        {
+            "nodes": [
+                {"id": "company-701", "label": "B公司", "type": "organization", "conversation_id": 701},
+                {"id": "legacy-701", "label": "legacy raw node", "type": "person", "conversation_id": 701},
+            ],
+            "edges": [],
+        }
+    )
+
+    result = build_dossier_coordination_graph(
+        raw_graph_payload=raw_graph_payload,
+        display_graph=_build_display_graph(raw_graph_payload),
+        participant_candidates=[
+            {
+                "task_type": "identity",
+                "task_key": "legacy-candidate",
+                "suggested_label": "legacy raw node",
+                "source_node": {"conversation_id": 701, "graph_node_id": "legacy-701"},
+            }
+        ],
+        intelligence_payload={
+            "confirmation_tasks": [
+                {
+                    "task_type": "party_naming",
+                    "current_label": "当事人",
+                    "evidence": {"source_conversation_ids": [701]},
+                }
+            ]
+        },
+        bound_conversation_ids=[701],
+        dossier_entity_state=dossier_entity_state,
+    )
+
+    assert [entity["label"] for entity in result["entities"]] == ["B公司"]
+    assert result["tasks"] == []
+    assert result["stats"]["canonical_entities"] == 1
+    assert result["trace"]["mode"] == "agentic_dossier_entity_state"

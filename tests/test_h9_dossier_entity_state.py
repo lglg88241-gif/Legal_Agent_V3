@@ -9,12 +9,33 @@ from app.services.dossier_entity_state import (
 )
 
 
-def _state(message: str, conversation_id: int) -> dict:
+def _graph(nodes: list[dict], edges: list[dict] | None = None) -> dict:
+    return {"graph": {"nodes": nodes, "edges": edges or []}}
+
+
+def _conversation_state(conversation_id: int, nodes: list[dict], edges: list[dict] | None = None, message: str = "") -> dict:
     return build_conversation_entity_state(
         message_text=message,
+        raw_graph_payload=_graph(nodes, edges),
         conversation_id=conversation_id,
         conversation_mode="TRACKED_CASE",
         persistence_consent="tracked",
+    )
+
+
+def _named_party_state(conversation_id: int, label: str = "张三") -> dict:
+    return _conversation_state(
+        conversation_id,
+        [
+            {
+                "id": f"person-{conversation_id}",
+                "label": label,
+                "type": "person",
+                "conversation_id": conversation_id,
+                "properties": {"role": "current_party"},
+            }
+        ],
+        message=f"我叫{label}，是这起劳动争议里的劳动者。",
     )
 
 
@@ -27,7 +48,7 @@ def _entity_by_label(dossier_state: dict, label: str) -> list[dict]:
 
 
 def test_dossier_agent_consumes_conversation_entity_state_not_party_naming_tasks() -> None:
-    conversation_state = _state("我叫张三，是这起劳动争议里的劳动者。", 805)
+    conversation_state = _named_party_state(805)
 
     dossier_state = build_dossier_entity_state(
         conversation_entity_states=[conversation_state],
@@ -45,8 +66,21 @@ def test_dossier_agent_consumes_conversation_entity_state_not_party_naming_tasks
 
 
 def test_cross_conversation_same_entity_candidate_and_confirm_merge() -> None:
-    state_805 = _state("我叫张三，是这起劳动争议里的劳动者。", 805)
-    state_806 = _state("张三是本案申请人，B公司未缴纳社保。", 806)
+    state_805 = _named_party_state(805)
+    state_806 = _conversation_state(
+        806,
+        [
+            {
+                "id": "person-806",
+                "label": "张三",
+                "type": "person",
+                "conversation_id": 806,
+                "properties": {"role": "current_party"},
+            },
+            {"id": "company-806", "label": "B公司", "type": "organization", "conversation_id": 806},
+        ],
+        message="张三是本案申请人，B公司未缴纳社保。",
+    )
 
     dossier_state = build_dossier_entity_state(
         conversation_entity_states=[state_805, state_806],
@@ -77,8 +111,8 @@ def test_cross_conversation_same_entity_candidate_and_confirm_merge() -> None:
 
 
 def test_reject_same_entity_keeps_separate_entities_and_suppresses_task() -> None:
-    state_805 = _state("我叫张三，是这起劳动争议里的劳动者。", 805)
-    state_806 = _state("张三是本案申请人，B公司未缴纳社保。", 806)
+    state_805 = _named_party_state(805)
+    state_806 = _named_party_state(806)
     initial_state = build_dossier_entity_state(
         conversation_entity_states=[state_805, state_806],
         dossier_id=51,
@@ -99,7 +133,23 @@ def test_reject_same_entity_keeps_separate_entities_and_suppresses_task() -> Non
 
 
 def test_person_to_company_never_identity_candidate() -> None:
-    state = _state("B公司的人事王经理口头通知我不用来了。", 806)
+    state = _conversation_state(
+        806,
+        [
+            {"id": "company-806", "label": "B公司", "type": "organization", "conversation_id": 806},
+            {"id": "manager-806", "label": "王经理", "type": "person", "conversation_id": 806},
+        ],
+        [
+            {
+                "id": "edge-806",
+                "source": "manager-806",
+                "target": "company-806",
+                "label": "人事/代表/隶属",
+                "conversation_id": 806,
+            }
+        ],
+        message="B公司的人事王经理口头通知我不用来了。",
+    )
 
     dossier_state = build_dossier_entity_state(
         conversation_entity_states=[state],
@@ -116,8 +166,15 @@ def test_person_to_company_never_identity_candidate() -> None:
 
 
 def test_unresolved_current_party_placeholder_stays_out_of_dossier_graph() -> None:
-    conversation_state = _state("我和B公司签了劳动合同。", 806)
-    assert _entity_by_label({"entities": conversation_state["entities"]}, "当前会话当事人")
+    conversation_state = _conversation_state(
+        806,
+        [
+            {"id": "self-806", "label": "我", "type": "person", "conversation_id": 806},
+            {"id": "company-806", "label": "B公司", "type": "organization", "conversation_id": 806},
+        ],
+        message="我和B公司签了劳动合同。",
+    )
+    assert not _entity_by_label({"entities": conversation_state["entities"]}, "当前会话当事人")
     assert conversation_state["clarification_tasks"]
 
     dossier_state = build_dossier_entity_state(
@@ -139,8 +196,8 @@ def test_unresolved_current_party_placeholder_stays_out_of_dossier_graph() -> No
 
 
 def test_confirmation_task_entities_include_guard_fields() -> None:
-    state_805 = _state("我叫张三，是这起劳动争议里的劳动者。", 805)
-    state_806 = _state("张三是本案申请人，B公司未缴纳社保。", 806)
+    state_805 = _named_party_state(805)
+    state_806 = _named_party_state(806)
 
     dossier_state = build_dossier_entity_state(
         conversation_entity_states=[state_805, state_806],
@@ -157,6 +214,51 @@ def test_confirmation_task_entities_include_guard_fields() -> None:
         assert "aliases" in entity
         assert entity["source_entity_ids"]
         assert entity["source_conversation_ids"]
+
+
+def test_dossier_entity_state_does_not_extract_entities_from_message_text() -> None:
+    conversation_state = build_conversation_entity_state(
+        message_text="我叫张三，是这起劳动争议里的劳动者。我和B公司签了劳动合同，但B公司一直没有给我缴纳社保。",
+        raw_graph_payload=_graph(
+            [
+                {"id": "person-813", "label": "张三", "type": "person", "conversation_id": 813},
+                {"id": "company-813", "label": "B公司", "type": "organization", "conversation_id": 813},
+            ]
+        ),
+        conversation_id=813,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    dossier_state = build_dossier_entity_state(
+        conversation_entity_states=[conversation_state],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+
+    assert _entity_by_label(dossier_state, "B公司")
+    assert not _entity_by_label(dossier_state, "但B公司")
+
+
+def test_fallback_rules_entities_do_not_enter_dossier_canonical_graph() -> None:
+    conversation_state = build_conversation_entity_state(
+        message_text="我叫张三，是这起劳动争议里的劳动者。我和B公司签了劳动合同。",
+        conversation_id=814,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    dossier_state = build_dossier_entity_state(
+        conversation_entity_states=[conversation_state],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+
+    assert conversation_state["entity_source"] == "fallback_rules"
+    assert dossier_state["entities"] == []
+    assert coordination_graph_from_dossier_entity_state(dossier_state)["entities"] == []
 
 
 def test_raw_graph_not_mutated_by_dossier_overlay() -> None:

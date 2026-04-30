@@ -209,6 +209,36 @@ def _node_incident_conversation_ids(raw_graph_payload: dict[str, Any] | None) ->
     return incident_ids
 
 
+def _node_belongs_to_conversation(
+    node: dict[str, Any],
+    raw_graph_payload: dict[str, Any] | None,
+    conversation_id: int | None,
+) -> bool:
+    if not conversation_id:
+        return True
+    node_conversation_id = _node_conversation_id(node)
+    if node_conversation_id > 0:
+        return node_conversation_id == conversation_id
+    node_id = _raw_node_id(node)
+    if not node_id:
+        return False
+    return conversation_id in _node_incident_conversation_ids(raw_graph_payload).get(node_id, set())
+
+
+def _graph_has_scoped_content(
+    raw_graph_payload: dict[str, Any] | None,
+    conversation_id: int | None,
+) -> bool:
+    for node in _graph_nodes(raw_graph_payload):
+        if _node_belongs_to_conversation(node, raw_graph_payload, conversation_id):
+            return True
+    for edge in _graph_edges(raw_graph_payload):
+        edge_conversation_id = _edge_conversation_id(edge)
+        if not conversation_id or edge_conversation_id == conversation_id:
+            return True
+    return False
+
+
 def _is_self_anchor(label: str) -> bool:
     return _normalize_text(label) in SELF_ANCHOR_LABELS
 
@@ -256,6 +286,11 @@ def _looks_like_person_name(label: str) -> bool:
     return len(normalized) in {2, 3, 4} and all("\u4e00" <= char <= "\u9fff" for char in normalized)
 
 
+def _is_specific_person_label(label: str) -> bool:
+    normalized = _normalize_text(label)
+    return _looks_like_person_name(normalized) and normalized not in SELF_ANCHOR_LABELS
+
+
 def _entity_type_for_label(label: str, node_type: str = "") -> str:
     normalized_type = _normalize_key(node_type)
     if any(hint in label for hint in AUTHORITY_HINTS):
@@ -273,6 +308,31 @@ def _entity_type_for_label(label: str, node_type: str = "") -> str:
     if _looks_like_person_name(label):
         return "person"
     return "unknown"
+
+
+def _graph_node_role(label: str, entity_type: str, node: dict[str, Any]) -> str:
+    properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+    for key in ("role", "participant_role", "party_role"):
+        role = _normalize_text(node.get(key) or properties.get(key))
+        if role:
+            if role in {"current_party", "本人", "当事人", "劳动者", "申请人"}:
+                return "current_party"
+            if role in {"represented_party", "委托人", "客户"}:
+                return "represented_party"
+            return role
+    party_side = _normalize_key(
+        node.get("party_side")
+        or node.get("participant_party_side")
+        or properties.get("party_side")
+        or properties.get("participant_party_side")
+    )
+    if party_side in {"claimant", "primary", "current_party"} and entity_type == "person":
+        return "current_party"
+    if entity_type == "organization" and ("公司" in label or "单位" in label):
+        return "employer"
+    if entity_type in {"person", "role"} and _looks_like_role_or_manager(label):
+        return "manager_or_hr"
+    return ""
 
 
 def _extract_self_name(message_text: str) -> str | None:
@@ -420,6 +480,7 @@ def _entity_bucket(
     entity_type: str,
     role: str = "",
     confidence: str = "medium",
+    source: str = "conversation_graph",
     aliases: list[str] | None = None,
     evidence: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -430,6 +491,7 @@ def _entity_bucket(
         "role": role,
         "aliases": _sorted_unique(aliases or []),
         "confidence": confidence,
+        "source": source,
         "evidence": evidence or [],
         "mentions": [],
         "source_conversation_id": conversation_id,
@@ -463,258 +525,102 @@ def _merge_aliases(entity: dict[str, Any], aliases: list[str]) -> None:
     entity["aliases"] = _sorted_unique(list(entity.get("aliases") or []) + aliases)
 
 
-def build_conversation_entity_state(
+def _build_entities_from_graph(
     *,
-    message_text: str = "",
-    message_understanding: dict[str, Any] | None = None,
-    raw_graph_payload: dict[str, Any] | None = None,
-    conversation_id: int | None = None,
-    conversation_mode: str | None = None,
-    persistence_consent: str | None = None,
-) -> dict[str, Any]:
-    normalized_mode = normalize_conversation_mode(conversation_mode)
-    normalized_consent = normalize_persistence_consent(persistence_consent)
-    mu = message_understanding if isinstance(message_understanding, dict) else {}
-    intent = _normalize_key(mu.get("intent"))
-    route_hint = _normalize_text(mu.get("route_hint")).upper()
-
-    if normalized_consent == "temporary":
-        return _empty_state(conversation_id=conversation_id, reason="temporary_conversation")
-    if intent in LEGAL_INTENTS or route_hint == "LEGAL_QA" or normalized_mode == "LEGAL_QA":
-        return _empty_state(conversation_id=conversation_id, reason="legal_qa")
-    if intent in SUPPRESSED_INTENTS or route_hint in {"DOSSIER_MEMORY", "SUBJECT_REFERENCE"}:
-        return _empty_state(conversation_id=conversation_id, reason="non_case_entity_flow")
-
-    clean_message = _normalize_text(message_text)
-    message_units = _message_units(str(message_text or ""))
-    parsed_units = [
-        {
-            "text": unit,
-            "self_name": _extract_self_name(unit),
-            "third_party": _is_third_party_retelling(unit),
-            "represented_name": _extract_third_party_name(unit) if _is_third_party_retelling(unit) else None,
-        }
-        for unit in message_units
-    ]
-    self_name = next(
-        (
-            _normalize_text(unit.get("self_name"))
-            for unit in parsed_units
-            if unit.get("self_name") and not unit.get("third_party")
-        ),
-        None,
-    ) or next(
-        (_normalize_text(unit.get("self_name")) for unit in parsed_units if unit.get("self_name")),
-        None,
-    )
-    represented_names = _sorted_unique(
-        [
-            unit.get("represented_name")
-            for unit in parsed_units
-            if unit.get("third_party") and unit.get("represented_name")
-        ]
-    )
-    third_party = bool(represented_names)
-    graph_mentions = _graph_entity_mentions(raw_graph_payload, conversation_id)
-    message_mentions = _message_entity_mentions(clean_message, conversation_id)
-    self_anchor_mentions = [
-        mention for mention in graph_mentions if _is_self_anchor(_normalize_text(mention.get("raw_label")))
-    ]
-    if any(anchor in clean_message for anchor in SELF_ANCHOR_LABELS):
-        for anchor in SELF_ANCHOR_LABELS:
-            if anchor in clean_message:
-                self_anchor_mentions.append(
-                    {
-                        "label": anchor,
-                        "entity_type": "person",
-                        "raw_label": anchor,
-                        "raw_node_id": None,
-                        "conversation_id": conversation_id,
-                        "source": "message_text",
-                    }
-                )
-
+    graph_mentions: list[dict[str, Any]],
+    raw_graph_payload: dict[str, Any] | None,
+    conversation_id: int | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     entities_by_label: dict[str, dict[str, Any]] = {}
-    trace_steps = ["build_context", "resolve_current_party", "extract_entities"]
-    clarification_tasks: list[dict[str, Any]] = []
+    self_anchor_mentions: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    raw_node_lookup: dict[str, dict[str, Any]] = {}
+    for node in _graph_nodes(raw_graph_payload):
+        node_id = _raw_node_id(node)
+        if node_id:
+            raw_node_lookup[node_id] = node
 
-    for represented_name in represented_names:
-        if self_name and _normalize_key(represented_name) == _normalize_key(self_name):
+    for mention in graph_mentions:
+        label = _normalize_text(mention.get("label"))
+        if not label:
             continue
-        entity = _entity_bucket(
-            conversation_id=conversation_id,
-            canonical_label=represented_name,
-            entity_type="person",
-            role="represented_party",
-            confidence="high",
-            aliases=["委托人", "当事人"],
-            evidence=[
-                {
-                    "message_text": clean_message,
-                    "reason": "律师/第三方转述中明确出现被代表当事人姓名。",
-                }
-            ],
-        )
-        _add_mention(
-            entity,
-            {
-                "raw_label": represented_name,
-                "conversation_id": conversation_id,
-                "source": "message_text",
-                "entity_type": "person",
-            },
-        )
-        entities_by_label[_normalize_key(represented_name)] = entity
+        if _is_self_anchor(label):
+            self_anchor_mentions.append(mention)
+            continue
+        raw_node_id = _normalize_text(mention.get("raw_node_id"))
+        raw_node = raw_node_lookup.get(raw_node_id, {})
+        entity_type = _normalize_text(mention.get("entity_type")) or _entity_type_for_label(label)
+        if entity_type not in {"person", "organization", "role", "authority"}:
+            continue
+        role = _graph_node_role(label, entity_type, raw_node)
+        key = _normalize_key(label)
+        entity = entities_by_label.get(key)
+        if entity is None:
+            entity = _entity_bucket(
+                conversation_id=conversation_id,
+                canonical_label=label,
+                entity_type=entity_type,
+                role=role,
+                confidence="high" if raw_node_id else "medium",
+                source="conversation_graph",
+                evidence=[
+                    {
+                        "source": "conversation_graph",
+                        "raw_node_id": raw_node_id or None,
+                        "raw_label": _normalize_text(mention.get("raw_label")) or label,
+                        "reason": "来自当前会话图谱节点。",
+                    }
+                ],
+            )
+            entities_by_label[key] = entity
+        elif role and not entity.get("role"):
+            entity["role"] = role
+        _add_mention(entity, mention)
+        raw_label = _normalize_text(mention.get("raw_label"))
+        if raw_label and raw_label != label:
+            _merge_aliases(entity, [raw_label])
+        if raw_label.startswith(("但", "但是")):
+            warnings.append(f"graph_extractor_prefixed_org_label:{raw_label}")
 
-    if self_name:
-        aliases = ["我", "本人", "当事人", "劳动者"]
-        entity = _entity_bucket(
-            conversation_id=conversation_id,
-            canonical_label=self_name,
-            entity_type="person",
-            role="current_party",
-            confidence="high",
-            aliases=aliases,
-            evidence=[
-                {
-                    "message_text": clean_message,
-                    "reason": "用户自报姓名并说明自己是当前会话案件当事人。",
-                }
-            ],
-        )
-        _add_mention(
-            entity,
-            {
-                "raw_label": self_name,
-                "conversation_id": conversation_id,
-                "source": "message_text",
-                "entity_type": "person",
-            },
-        )
+    current_party_entities = [
+        entity for entity in entities_by_label.values() if entity.get("role") == "current_party"
+    ]
+    if len(current_party_entities) == 1 and self_anchor_mentions:
+        current_party = current_party_entities[0]
+        _merge_aliases(current_party, [_normalize_text(item.get("raw_label")) for item in self_anchor_mentions])
         for mention in self_anchor_mentions:
-            _add_mention(entity, mention)
-        entities_by_label[_normalize_key(self_name)] = entity
-    elif self_anchor_mentions and not represented_names:
-        placeholder = "当前会话当事人"
-        entity = _entity_bucket(
-            conversation_id=conversation_id,
-            canonical_label=placeholder,
-            entity_type="person",
-            role="current_party",
-            confidence="low",
-            aliases=[_normalize_text(item.get("raw_label")) for item in self_anchor_mentions],
-            evidence=[
-                {
-                    "message_text": clean_message,
-                    "reason": "当前会话存在第一人称或当事人代称，但尚无明确姓名；应由会话层澄清，不进入案卷抽屉 party_naming 主线。",
-                }
-            ],
-        )
-        for mention in self_anchor_mentions:
-            _add_mention(entity, mention)
-        entities_by_label[_normalize_key(placeholder)] = entity
+            _add_mention(current_party, mention)
+
+    clarification_tasks: list[dict[str, Any]] = []
+    if self_anchor_mentions and not current_party_entities:
         clarification_tasks.append(
             {
                 "type": "conversation_current_party_name",
                 "status": "pending",
                 "conversation_id": conversation_id,
                 "raw_labels": _sorted_unique([item.get("raw_label") for item in self_anchor_mentions]),
-                "prompt": "请确认当前会话中的“我/当事人”是谁。",
+                "prompt": "当前会话图谱包含自称/当事人代称，但会话层尚未解析为具体主体。",
+                "source": "conversation_graph",
             }
         )
 
-    represented_name_keys = {_normalize_key(name) for name in represented_names}
-    for mention in graph_mentions + message_mentions:
-        label = _normalize_text(mention.get("label"))
-        if not label or _is_self_anchor(label):
-            continue
-        if self_name and _normalize_key(label) == _normalize_key(self_name):
-            _add_mention(entities_by_label[_normalize_key(self_name)], mention)
-            continue
-        if _normalize_key(label) in represented_name_keys and _normalize_key(label) in entities_by_label:
-            _add_mention(entities_by_label[_normalize_key(label)], mention)
-            continue
-        entity_type = _normalize_text(mention.get("entity_type")) or _entity_type_for_label(label)
-        if entity_type not in {"person", "organization", "role", "authority"}:
-            continue
-        key = _normalize_key(label)
-        entity = entities_by_label.get(key)
-        if entity is None:
-            role = ""
-            if entity_type == "organization":
-                role = "employer" if "公司" in label or "单位" in label else ""
-            elif entity_type in {"person", "role"} and _looks_like_role_or_manager(label):
-                role = "manager_or_hr"
-            entity = _entity_bucket(
-                conversation_id=conversation_id,
-                canonical_label=label,
-                entity_type=entity_type,
-                role=role,
-                confidence="medium",
-                evidence=[],
-            )
-            entities_by_label[key] = entity
-        _add_mention(entity, mention)
-
     entities = list(entities_by_label.values())
-    entity_lookup = {_normalize_key(entity.get("canonical_label")): entity for entity in entities}
+    entities.sort(key=lambda item: (str(item.get("entity_type")), str(item.get("canonical_label"))))
+    relations = _build_relations_from_graph(
+        entities=entities,
+        raw_graph_payload=raw_graph_payload,
+        conversation_id=conversation_id,
+    )
+    return entities, relations, clarification_tasks, warnings
+
+
+def _build_relations_from_graph(
+    *,
+    entities: list[dict[str, Any]],
+    raw_graph_payload: dict[str, Any] | None,
+    conversation_id: int | None,
+) -> list[dict[str, Any]]:
     relations: list[dict[str, Any]] = []
-
-    organizations = [
-        entity for entity in entities if entity.get("entity_type") in {"organization", "authority"}
-    ]
-    role_people = [
-        entity
-        for entity in entities
-        if entity.get("entity_type") in {"person", "role"}
-        and _looks_like_role_or_manager(_normalize_text(entity.get("canonical_label")))
-    ]
-    for role_entity in role_people:
-        source_label = _normalize_text(role_entity.get("canonical_label"))
-        for organization in organizations:
-            target_label = _normalize_text(organization.get("canonical_label"))
-            if not target_label or not source_label:
-                continue
-            if target_label in clean_message and source_label in clean_message:
-                relation_label = "人事/代表/隶属" if "人事" in clean_message or "HR" in source_label.upper() else "代表/隶属"
-                relations.append(
-                    {
-                        "id": f"conversation:{conversation_id or 0}:relation:{_stable_id(source_label, 'affiliation', target_label)}",
-                        "source": role_entity["id"],
-                        "source_label": source_label,
-                        "target": organization["id"],
-                        "target_label": target_label,
-                        "relation": relation_label,
-                        "relation_type": "affiliation",
-                        "confidence": "high" if f"{target_label}的" in clean_message else "medium",
-                        "conversation_id": conversation_id,
-                        "evidence": [
-                            {
-                                "message_text": clean_message,
-                                "reason": f"“{target_label}的人事/负责人{source_label}”语义表明二者是任职或代表关系，不是同一主体。",
-                            }
-                        ],
-                    }
-                )
-
-    current_party = next((entity for entity in entities if entity.get("role") == "current_party"), None)
-    if current_party is not None and any(token in clean_message for token in ("通知我", "口头通知我", "不用来了")):
-        for role_entity in role_people:
-            relations.append(
-                {
-                    "id": f"conversation:{conversation_id or 0}:relation:{_stable_id(role_entity.get('canonical_label'), 'notice', current_party.get('canonical_label'))}",
-                    "source": role_entity["id"],
-                    "source_label": role_entity.get("canonical_label"),
-                    "target": current_party["id"],
-                    "target_label": current_party.get("canonical_label"),
-                    "relation": "通知",
-                    "relation_type": "event_participation",
-                    "confidence": "medium",
-                    "conversation_id": conversation_id,
-                    "evidence": [{"message_text": clean_message, "reason": "消息描述通知行为。"}],
-                }
-            )
-
     for edge in _graph_edges(raw_graph_payload):
         edge_conversation_id = _edge_conversation_id(edge)
         if conversation_id and edge_conversation_id > 0 and edge_conversation_id != conversation_id:
@@ -751,26 +657,237 @@ def build_conversation_entity_state(
                 "target_label": target_entity.get("canonical_label"),
                 "relation": label,
                 "relation_type": relation_type,
-                "confidence": "medium",
+                "confidence": "high" if edge_conversation_id > 0 else "medium",
                 "conversation_id": edge_conversation_id or conversation_id,
+                "origin": "conversation_graph",
                 "evidence": [
                     {
-                        "message_text": "",
+                        "source": "conversation_graph",
                         "raw_edge_id": _normalize_text(edge.get("id")),
                         "reason": "来自当前会话原始图谱关系。",
                     }
                 ],
             }
         )
-
-    entities.sort(key=lambda item: (str(item.get("entity_type")), str(item.get("canonical_label"))))
     relations.sort(key=lambda item: (str(item.get("relation_type")), str(item.get("source_label")), str(item.get("target_label"))))
+    return relations
 
-    party_naming_reason = "conversation_entity_state_resolves_current_party"
-    if clarification_tasks:
-        party_naming_reason = "conversation_clarification_plan_replaces_dossier_party_naming"
-    if third_party and not self_name:
-        party_naming_reason = "third_party_retelling_not_user_self_anchor"
+
+def _build_fallback_entities_from_message(
+    *,
+    message_text: str,
+    conversation_id: int | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    clean_message = _normalize_text(message_text)
+    message_units = _message_units(str(message_text or ""))
+    parsed_units = [
+        {
+            "text": unit,
+            "self_name": _extract_self_name(unit),
+            "third_party": _is_third_party_retelling(unit),
+            "represented_name": _extract_third_party_name(unit) if _is_third_party_retelling(unit) else None,
+        }
+        for unit in message_units
+    ]
+    self_name = next(
+        (
+            _normalize_text(unit.get("self_name"))
+            for unit in parsed_units
+            if unit.get("self_name") and not unit.get("third_party")
+        ),
+        None,
+    ) or next(
+        (_normalize_text(unit.get("self_name")) for unit in parsed_units if unit.get("self_name")),
+        None,
+    )
+    represented_names = _sorted_unique(
+        [
+            unit.get("represented_name")
+            for unit in parsed_units
+            if unit.get("third_party") and unit.get("represented_name")
+        ]
+    )
+    message_mentions = _message_entity_mentions(clean_message, conversation_id)
+    self_anchor_mentions = []
+    if any(anchor in clean_message for anchor in SELF_ANCHOR_LABELS):
+        for anchor in SELF_ANCHOR_LABELS:
+            if anchor in clean_message:
+                self_anchor_mentions.append(
+                    {
+                        "label": anchor,
+                        "entity_type": "person",
+                        "raw_label": anchor,
+                        "raw_node_id": None,
+                        "conversation_id": conversation_id,
+                        "source": "fallback_rules",
+                    }
+                )
+
+    entities_by_label: dict[str, dict[str, Any]] = {}
+    for represented_name in represented_names:
+        if self_name and _normalize_key(represented_name) == _normalize_key(self_name):
+            continue
+        entity = _entity_bucket(
+            conversation_id=conversation_id,
+            canonical_label=represented_name,
+            entity_type="person",
+            role="represented_party",
+            confidence="low",
+            source="fallback_rules",
+            aliases=["委托人", "当事人"],
+            evidence=[{"source": "fallback_rules", "message_text": clean_message}],
+        )
+        _add_mention(
+            entity,
+            {
+                "raw_label": represented_name,
+                "conversation_id": conversation_id,
+                "source": "fallback_rules",
+                "entity_type": "person",
+            },
+        )
+        entities_by_label[_normalize_key(represented_name)] = entity
+
+    if self_name:
+        entity = _entity_bucket(
+            conversation_id=conversation_id,
+            canonical_label=self_name,
+            entity_type="person",
+            role="current_party",
+            confidence="low",
+            source="fallback_rules",
+            aliases=["我", "本人", "当事人", "劳动者"],
+            evidence=[{"source": "fallback_rules", "message_text": clean_message}],
+        )
+        _add_mention(
+            entity,
+            {
+                "raw_label": self_name,
+                "conversation_id": conversation_id,
+                "source": "fallback_rules",
+                "entity_type": "person",
+            },
+        )
+        for mention in self_anchor_mentions:
+            _add_mention(entity, mention)
+        entities_by_label[_normalize_key(self_name)] = entity
+
+    represented_name_keys = {_normalize_key(name) for name in represented_names}
+    for mention in message_mentions:
+        label = _normalize_text(mention.get("label"))
+        if not label or _is_self_anchor(label):
+            continue
+        if self_name and _normalize_key(label) == _normalize_key(self_name):
+            _add_mention(entities_by_label[_normalize_key(self_name)], mention)
+            continue
+        if _normalize_key(label) in represented_name_keys and _normalize_key(label) in entities_by_label:
+            _add_mention(entities_by_label[_normalize_key(label)], mention)
+            continue
+        entity_type = _normalize_text(mention.get("entity_type")) or _entity_type_for_label(label)
+        if entity_type not in {"person", "organization", "role", "authority"}:
+            continue
+        key = _normalize_key(label)
+        entity = entities_by_label.get(key)
+        if entity is None:
+            role = ""
+            if entity_type == "organization":
+                role = "employer" if "公司" in label or "单位" in label else ""
+            elif entity_type in {"person", "role"} and _looks_like_role_or_manager(label):
+                role = "manager_or_hr"
+            entity = _entity_bucket(
+                conversation_id=conversation_id,
+                canonical_label=label,
+                entity_type=entity_type,
+                role=role,
+                confidence="low",
+                source="fallback_rules",
+                evidence=[{"source": "fallback_rules", "message_text": clean_message}],
+            )
+            entities_by_label[key] = entity
+        mention["source"] = "fallback_rules"
+        _add_mention(entity, mention)
+
+    clarification_tasks: list[dict[str, Any]] = []
+    if self_anchor_mentions and not self_name and not represented_names:
+        clarification_tasks.append(
+            {
+                "type": "conversation_current_party_name",
+                "status": "pending",
+                "conversation_id": conversation_id,
+                "raw_labels": _sorted_unique([item.get("raw_label") for item in self_anchor_mentions]),
+                "prompt": "会话图谱不可用，fallback 只提示需要会话层澄清，不进入案卷 canonical graph。",
+                "source": "fallback_rules",
+            }
+        )
+
+    entities = list(entities_by_label.values())
+    entities.sort(key=lambda item: (str(item.get("entity_type")), str(item.get("canonical_label"))))
+    return entities, [], clarification_tasks
+
+
+def build_conversation_entity_state(
+    *,
+    message_text: str = "",
+    message_understanding: dict[str, Any] | None = None,
+    raw_graph_payload: dict[str, Any] | None = None,
+    conversation_id: int | None = None,
+    conversation_mode: str | None = None,
+    persistence_consent: str | None = None,
+) -> dict[str, Any]:
+    normalized_mode = normalize_conversation_mode(conversation_mode)
+    normalized_consent = normalize_persistence_consent(persistence_consent)
+    mu = message_understanding if isinstance(message_understanding, dict) else {}
+    intent = _normalize_key(mu.get("intent"))
+    route_hint = _normalize_text(mu.get("route_hint")).upper()
+
+    if normalized_consent == "temporary":
+        return _empty_state(conversation_id=conversation_id, reason="temporary_conversation")
+    if intent in LEGAL_INTENTS or route_hint == "LEGAL_QA" or normalized_mode == "LEGAL_QA":
+        return _empty_state(conversation_id=conversation_id, reason="legal_qa")
+    if intent in SUPPRESSED_INTENTS or route_hint in {"DOSSIER_MEMORY", "SUBJECT_REFERENCE"}:
+        return _empty_state(conversation_id=conversation_id, reason="non_case_entity_flow")
+
+    graph_available = _graph_has_scoped_content(raw_graph_payload, conversation_id)
+    if graph_available:
+        graph_mentions = _graph_entity_mentions(raw_graph_payload, conversation_id)
+        entities, relations, clarification_tasks, warnings = _build_entities_from_graph(
+            graph_mentions=graph_mentions,
+            raw_graph_payload=raw_graph_payload,
+            conversation_id=conversation_id,
+        )
+        entity_source = "conversation_graph"
+        fallback_reason = None
+        party_naming_reason = (
+            "conversation_graph_projection_requires_current_party_clarification"
+            if clarification_tasks
+            else "conversation_graph_projection"
+        )
+        trace_steps = [
+            "build_context",
+            "read_conversation_graph",
+            "project_graph_entities",
+            "project_graph_relations",
+            "build_conversation_entity_state",
+        ]
+    else:
+        entities, relations, clarification_tasks = _build_fallback_entities_from_message(
+            message_text=message_text,
+            conversation_id=conversation_id,
+        )
+        entity_source = "fallback_rules"
+        fallback_reason = "conversation_graph_unavailable"
+        warnings = ["conversation_graph_unavailable; fallback entities are low confidence and must not become dossier canonical entities"]
+        party_naming_reason = (
+            "fallback_requires_conversation_layer_clarification"
+            if clarification_tasks
+            else "fallback_rules_low_confidence"
+        )
+        trace_steps = [
+            "build_context",
+            "conversation_graph_unavailable",
+            "fallback_rules_projection",
+            "build_conversation_entity_state",
+        ]
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -780,6 +897,8 @@ def build_conversation_entity_state(
         "conversation_id": conversation_id,
         "should_build": True,
         "skip_reason": None,
+        "entity_source": entity_source,
+        "fallback_reason": fallback_reason,
         "entities": entities,
         "relations": relations,
         "clarification_tasks": clarification_tasks,
@@ -789,8 +908,10 @@ def build_conversation_entity_state(
             "legacy_fallback_only": True,
         },
         "trace": {
-            "steps": trace_steps + ["derive_relations", "build_conversation_entity_state"],
-            "warnings": [],
+            "steps": trace_steps,
+            "warnings": warnings,
+            "entity_source": entity_source,
+            "fallback_reason": fallback_reason,
         },
     }
 

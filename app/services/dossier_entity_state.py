@@ -91,6 +91,9 @@ def _entity_from_conversation_entity(
     entity_type = _normalize_text(entity.get("entity_type")) or "unknown"
     role = _normalize_text(entity.get("role"))
     confidence = _normalize_text(entity.get("confidence")) or "medium"
+    source = _normalize_text(entity.get("source")) or "conversation_entity_state"
+    if source == "fallback_rules":
+        return None
     if role == "current_party" and confidence == "low" and label in {"当前会话当事人", "未解析当事人"}:
         return None
     source_entity_id = _entity_identity(entity, conversation_id)
@@ -140,6 +143,7 @@ def _entity_from_conversation_entity(
         "mentions": mentions,
         "evidence": entity.get("evidence") if isinstance(entity.get("evidence"), list) else [],
         "confidence": confidence,
+        "source": source,
         "dossier_id": dossier_id,
     }
 

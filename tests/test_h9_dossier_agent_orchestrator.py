@@ -9,9 +9,27 @@ from app.services.dossier_entity_state import (
 from app.services.dossier_tool_registry import get_dossier_tool_contract
 
 
+def _raw_graph_for_named_party(conversation_id: int, label: str = "张三") -> dict:
+    return {
+        "graph": {
+            "nodes": [
+                {
+                    "id": f"person-{conversation_id}",
+                    "label": label,
+                    "type": "person",
+                    "conversation_id": conversation_id,
+                    "properties": {"role": "current_party"},
+                }
+            ],
+            "edges": [],
+        }
+    }
+
+
 def test_dossier_entity_request_context_keeps_ui_event_separate_from_conversation_state() -> None:
     conversation_state = build_conversation_entity_state(
         message_text="我叫张三，是这起劳动争议里的劳动者。",
+        raw_graph_payload=_raw_graph_for_named_party(805),
         conversation_id=805,
         conversation_mode="TRACKED_CASE",
         persistence_consent="tracked",
@@ -33,6 +51,7 @@ def test_dossier_entity_request_context_keeps_ui_event_separate_from_conversatio
 def test_dossier_coordination_graph_uses_dossier_entity_state_contract() -> None:
     state_805 = build_conversation_entity_state(
         message_text="我叫张三，是这起劳动争议里的劳动者。",
+        raw_graph_payload=_raw_graph_for_named_party(805),
         conversation_id=805,
         conversation_mode="TRACKED_CASE",
         persistence_consent="tracked",
