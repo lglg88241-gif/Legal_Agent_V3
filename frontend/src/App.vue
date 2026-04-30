@@ -497,16 +497,16 @@
             <div class="dossier-coordination-body">
               <div class="dossier-coordination-summary">
                 <span class="dossier-coordination-chip">
-                  已连接 {{ selectedDossierCoordinationStats.connectedEntities }}
+                  案卷实体 {{ selectedDossierCoordinationStats.connectedEntities }}
                 </span>
                 <span class="dossier-coordination-chip">
-                  待确认 {{ selectedDossierCoordinationStats.pendingIdentity }}
+                  跨会话待确认 {{ selectedDossierCoordinationCrossConversationTasks.length }}
                 </span>
                 <span class="dossier-coordination-chip">
-                  待命名 {{ selectedDossierCoordinationStats.pendingNaming }}
+                  来源会话 {{ selectedDossierCoordinationStats.boundConversations }}
                 </span>
                 <span class="dossier-coordination-chip">
-                  未连接 {{ selectedDossierCoordinationStats.isolatedAnchors }}
+                  关系 {{ selectedDossierCoordinationStats.relations }}
                 </span>
               </div>
 
@@ -532,8 +532,8 @@
                 <el-collapse-item name="lists">
                   <template #title>
                     <div class="dossier-collapse-title">
-                      <strong>辅助清单与待处理事项</strong>
-                      <span>图谱作为主视图，下面保留实体卡片和确认任务，便于逐项处理。</span>
+                      <strong>实体详情与兼容任务</strong>
+                      <span>主视图使用 canonical 案卷实体；旧命名、孤立锚点和 participant 候选只作为兼容信息保留。</span>
                     </div>
                   </template>
 
@@ -569,6 +569,35 @@
                         >
                           查看详细对话
                         </el-button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  v-if="selectedDossierCoordinationCrossConversationTasks.length"
+                  class="dossier-coordination-group"
+                >
+                  <div class="dossier-detail-conversations-title">跨会话同一实体确认</div>
+                  <div class="dossier-intelligence-task-list">
+                    <div
+                      v-for="task in selectedDossierCoordinationCrossConversationTasks"
+                      :key="task.id || task.task_key"
+                      class="dossier-intelligence-task-card"
+                    >
+                      <div class="dossier-intelligence-task-header">
+                        <strong>{{ coordinationTaskPairTitle(task) }}</strong>
+                        <span class="dossier-intelligence-task-type">
+                          {{ task.task_type || task.type }}
+                        </span>
+                      </div>
+                      <div class="dossier-intelligence-task-reason">
+                        {{ task.reason || '不同会话出现相同或重叠主体称呼，需要确认是否为同一案卷实体。' }}
+                      </div>
+                      <div class="dossier-intelligence-task-evidence">
+                        <span>{{ `来源会话：${formatGraphConversationListLabel(task.source_conversation_ids || [])}` }}</span>
+                        <span>{{ `来源实体：${coordinationTaskEntitySummary(task.source_entity)}` }}</span>
+                        <span>{{ `候选实体：${coordinationTaskEntitySummary(task.target_entity)}` }}</span>
                       </div>
                     </div>
                   </div>
@@ -864,7 +893,7 @@
             </div>
           </div>
 
-          <div class="dossier-participants-section">
+          <div v-if="!selectedDossierHasCanonicalCoordinationGraph" class="dossier-participants-section">
             <div class="dossier-auto-summary-header">
               <div class="dossier-toolbar-copy">
                 <div class="dossier-detail-conversations-title">主体关系确认</div>
@@ -2023,6 +2052,7 @@ const dossierCoordinationGraphState = reactive({
   entities: [],
   edges: [],
   tasks: [],
+  dossierEntityState: null,
   stats: {
     boundConversations: 0,
     connectedEntities: 0,
@@ -2306,17 +2336,45 @@ const selectedDossierCoordinationEntities = computed(() =>
 const selectedDossierCoordinationTasks = computed(() =>
   Array.isArray(dossierCoordinationGraphState.tasks) ? dossierCoordinationGraphState.tasks : []
 )
+const selectedDossierCanonicalCoordinationEntities = computed(() =>
+  selectedDossierCoordinationEntities.value.filter(
+    (entity) => String(entity?.status || '').trim() === 'canonical'
+  )
+)
+const selectedDossierHasCanonicalCoordinationGraph = computed(
+  () => selectedDossierCanonicalCoordinationEntities.value.length > 0
+)
+const selectedDossierMainCoordinationEntities = computed(() =>
+  selectedDossierHasCanonicalCoordinationGraph.value
+    ? selectedDossierCanonicalCoordinationEntities.value
+    : selectedDossierCoordinationEntities.value
+)
+const selectedDossierCoordinationCrossConversationTasks = computed(() =>
+  selectedDossierCoordinationTasks.value.filter((task) => {
+    const taskType = String(task?.task_type || task?.type || '').trim()
+    return taskType === 'cross_conversation_same_entity'
+  })
+)
 const selectedDossierCoordinationStats = computed(() => ({
   boundConversations: Number(dossierCoordinationGraphState.stats?.boundConversations || 0),
-  connectedEntities: Number(dossierCoordinationGraphState.stats?.connectedEntities || 0),
-  pendingIdentity: Number(dossierCoordinationGraphState.stats?.pendingIdentity || 0),
+  connectedEntities: selectedDossierHasCanonicalCoordinationGraph.value
+    ? selectedDossierCanonicalCoordinationEntities.value.length
+    : Number(dossierCoordinationGraphState.stats?.connectedEntities || 0),
+  pendingIdentity: selectedDossierHasCanonicalCoordinationGraph.value
+    ? selectedDossierCoordinationCrossConversationTasks.value.length
+    : Number(dossierCoordinationGraphState.stats?.pendingIdentity || 0),
   pendingNaming: Number(dossierCoordinationGraphState.stats?.pendingNaming || 0),
   isolatedAnchors: Number(dossierCoordinationGraphState.stats?.isolatedAnchors || 0),
+  relations: Array.isArray(dossierCoordinationGraphState.edges)
+    ? dossierCoordinationGraphState.edges.length
+    : 0,
 }))
 const selectedDossierCoordinationConfirmedEntities = computed(() =>
-  selectedDossierCoordinationEntities.value.filter(
-    (entity) => String(entity?.status || '').trim() === 'confirmed'
-  )
+  selectedDossierHasCanonicalCoordinationGraph.value
+    ? selectedDossierCanonicalCoordinationEntities.value
+    : selectedDossierCoordinationEntities.value.filter(
+        (entity) => String(entity?.status || '').trim() === 'confirmed'
+      )
 )
 const selectedDossierCoordinationPendingIdentityEntities = computed(() =>
   selectedDossierCoordinationEntities.value.filter(
@@ -2346,11 +2404,8 @@ const selectedDossierCoordinationHasSingleSourceHint = computed(
 const selectedDossierCoordinationHasAuxiliaryPanels = computed(
   () =>
     selectedDossierCoordinationConfirmedEntities.value.length > 0 ||
-    selectedDossierCoordinationPendingIdentityEntities.value.length > 0 ||
-    selectedDossierCoordinationPendingNamingEntities.value.length > 0 ||
-    selectedDossierCoordinationIsolatedAnchorEntities.value.length > 0 ||
-    selectedDossierSelfAnchorIdentityTasks.value.length > 0 ||
-    selectedDossierCoordinationPartyNamingTasks.value.length > 0 ||
+    selectedDossierCoordinationCrossConversationTasks.value.length > 0 ||
+    selectedDossierCoordinationHasLegacyCompatibilityItems.value ||
     dossierIntelligenceLoading.value ||
     Boolean(dossierIntelligenceState.error)
 )
@@ -2372,6 +2427,14 @@ const selectedDossierCoordinationPartyNamingTasks = computed(() =>
     (task) => String(task?.task_type || '').trim() === 'party_naming'
   )
 )
+const selectedDossierCoordinationHasLegacyCompatibilityItems = computed(
+  () =>
+    selectedDossierCoordinationPendingIdentityEntities.value.length > 0 ||
+    selectedDossierCoordinationPendingNamingEntities.value.length > 0 ||
+    selectedDossierCoordinationIsolatedAnchorEntities.value.length > 0 ||
+    selectedDossierSelfAnchorIdentityTasks.value.length > 0 ||
+    selectedDossierCoordinationPartyNamingTasks.value.length > 0
+)
 const activePartyNamingRawLabels = computed(() => partyNamingTaskRawLabels(activePartyNamingTask.value))
 const activePartyNamingSuggestedLabels = computed(() => partyNamingTaskSuggestedLabels(activePartyNamingTask.value))
 const activePartyNamingCurrentLabel = computed(() => {
@@ -2392,7 +2455,7 @@ const selectedDossierCoordinationGraphConversationCount = computed(() => {
 })
 const selectedDossierCoordinationGraphPreview = computed(() =>
   buildDossierCoordinationGraphPreview({
-    entities: selectedDossierCoordinationEntities.value,
+    entities: selectedDossierMainCoordinationEntities.value,
     edges: Array.isArray(dossierCoordinationGraphState.edges) ? dossierCoordinationGraphState.edges : [],
     loading: dossierCoordinationGraphLoading.value,
     error: dossierCoordinationGraphState.error,
@@ -2981,6 +3044,7 @@ function findPendingPartyNamingTaskForCurrentConversation() {
   const dossierId = currentConversationDossierId()
   if (conversationId <= 0 || dossierId <= 0) return null
   if (Number(dossierIntelligenceState.dossierId || 0) !== dossierId) return null
+  if (selectedDossierHasCanonicalCoordinationGraph.value) return null
 
   return selectedDossierCoordinationPartyNamingTasks.value.find((task) => {
     if (!isPendingSelfAnchorPartyNamingTask(task)) return false
@@ -3167,6 +3231,7 @@ function resetDossierCoordinationGraphState() {
   dossierCoordinationGraphState.entities = []
   dossierCoordinationGraphState.edges = []
   dossierCoordinationGraphState.tasks = []
+  dossierCoordinationGraphState.dossierEntityState = null
   dossierCoordinationGraphState.stats = {
     boundConversations: 0,
     connectedEntities: 0,
@@ -3193,12 +3258,16 @@ function applyDossierCoordinationGraphPayload(dossierId, payload) {
   dossierCoordinationGraphState.tasks = Array.isArray(coordinationGraph.tasks)
     ? coordinationGraph.tasks
     : []
+  dossierCoordinationGraphState.dossierEntityState =
+    payload?.dossier_entity_state && typeof payload.dossier_entity_state === 'object'
+      ? payload.dossier_entity_state
+      : null
   dossierCoordinationGraphState.stats = {
-    boundConversations: Number(stats.bound_conversations || 0),
-    connectedEntities: Number(stats.connected_entities || 0),
-    pendingIdentity: Number(stats.pending_identity || 0),
-    pendingNaming: Number(stats.pending_naming || 0),
-    isolatedAnchors: Number(stats.isolated_anchors || 0),
+    boundConversations: Number(stats.bound_conversations || stats.boundConversations || 0),
+    connectedEntities: Number(stats.connected_entities || stats.connectedEntities || stats.canonical_entities || 0),
+    pendingIdentity: Number(stats.pending_identity || stats.pendingIdentity || 0),
+    pendingNaming: Number(stats.pending_naming || stats.pendingNaming || 0),
+    isolatedAnchors: Number(stats.isolated_anchors || stats.isolatedAnchors || 0),
   }
   dossierCoordinationGraphState.view = String(payload?.view || 'coordination').trim() || 'coordination'
   dossierCoordinationGraphState.generatedAt = payload?.generated_at || ''
@@ -4046,6 +4115,8 @@ function coordinationEntitySourceConversations(entity) {
 
 function coordinationEntityStatusLabel(status) {
   switch (String(status || '').trim()) {
+    case 'canonical':
+      return '案卷实体'
     case 'confirmed':
       return '已连接主体'
     case 'pending_identity':
@@ -4087,6 +4158,32 @@ function coordinationEntityIdentityReason(entity) {
 
 function coordinationEntityHasDetailConversation(entity) {
   return coordinationEntityDetailConversationId(entity) > 0
+}
+
+function coordinationTaskEntitySummary(entity) {
+  if (!entity || typeof entity !== 'object') return '未标注'
+  const label = String(entity.label || entity.canonical_label || '').trim() || '未命名实体'
+  const role = String(entity.role || '').trim()
+  const entityType = formatGraphNodeType(entity.entity_type)
+  const aliases = Array.isArray(entity.aliases)
+    ? entity.aliases.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+  const suffix = [
+    role ? `角色：${role}` : '',
+    entityType ? `类型：${entityType}` : '',
+    aliases.length ? `别名：${aliases.join(' / ')}` : '',
+  ].filter(Boolean)
+  return suffix.length ? `${label}（${suffix.join('，')}）` : label
+}
+
+function coordinationTaskPairTitle(task) {
+  const sourceLabel =
+    String(task?.source_entity?.label || task?.source_entity?.canonical_label || '').trim() ||
+    '来源实体'
+  const targetLabel =
+    String(task?.target_entity?.label || task?.target_entity?.canonical_label || '').trim() ||
+    '候选实体'
+  return `${sourceLabel} 和 ${targetLabel} 是否为同一案卷实体？`
 }
 
 function selfAnchorIdentityTaskPrompt(task) {
@@ -4301,6 +4398,7 @@ function matchCoordinationEntityIdForDisplayNode(node, participantLookup, rawNod
 
 function buildCoordinationGraphLegendItems(nodes) {
   const baseItems = [
+    { category: 'canonical', label: '案卷实体', color: '#2563eb' },
     { category: 'confirmed', label: '已连接主体', color: '#2563eb' },
     { category: 'pending_identity', label: '待确认主体', color: '#f59e0b' },
     { category: 'pending_naming', label: '待命名主体', color: '#7c3aed' },
@@ -4376,7 +4474,9 @@ function appendCoordinationRelationDetails(graphNodes, graphEdges) {
         relationLabels.push(label)
       }
       for (const evidence of normalizeCoordinationEdgeEvidence(edge)) {
-        const summary = String(evidence?.summary || '').trim()
+        const summary = String(
+          evidence?.summary || evidence?.reason || evidence?.message_text || evidence?.raw_edge_id || ''
+        ).trim()
         if (summary && !evidenceSummaries.includes(summary)) {
           evidenceSummaries.push(summary)
         }
