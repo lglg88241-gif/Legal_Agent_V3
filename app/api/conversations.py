@@ -30,6 +30,8 @@ from app.services.conversation_mode import (
     validate_conversation_mode,
     validate_persistence_consent,
 )
+from app.services.conversation_entity_state import build_conversation_entity_state
+from app.services.conversation_display_graph import build_conversation_display_graph
 from app.services.graph_extractor import delete_case_graph, get_case_graph
 from app.services.llm_service import llm_service
 
@@ -362,10 +364,18 @@ async def get_conversation_graph(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
 
     graph = await get_case_graph(conversation.id)
+    entity_state = build_conversation_entity_state(
+        conversation_id=conversation.id,
+        message_text="",
+        raw_graph_payload={"graph": graph},
+        conversation_mode=getattr(conversation, "conversation_mode", None),
+        persistence_consent=getattr(conversation, "persistence_consent", None),
+    )
+    display_graph = build_conversation_display_graph(graph, entity_state)
     return {
         "status": "success",
         "conversation_id": conversation.id,
-        **graph,
+        **display_graph,
     }
 
 
