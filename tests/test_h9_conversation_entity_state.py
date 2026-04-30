@@ -50,6 +50,36 @@ def test_self_named_party_becomes_conversation_current_party_entity_from_graph()
     assert state["clarification_tasks"] == []
 
 
+def test_self_named_laborer_alias_resolves_to_current_party() -> None:
+    state = build_conversation_entity_state(
+        message_text="我叫张三，是这起劳动争议里的劳动者。我和B公司签了劳动合同，但B公司一直没有给我缴纳社保。",
+        raw_graph_payload=_graph(
+            [
+                {
+                    "id": "person-808",
+                    "label": "张三",
+                    "type": "person",
+                    "conversation_id": 808,
+                    "properties": {"role": "current_party"},
+                },
+                {"id": "worker-808", "label": "劳动者", "type": "person", "conversation_id": 808},
+                {"id": "company-808", "label": "B公司", "type": "organization", "conversation_id": 808},
+            ]
+        ),
+        conversation_id=808,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    assert state["entity_source"] == "conversation_graph"
+    assert {"张三", "B公司"} == _labels(state)
+    zhangsan = _entity(state, "张三")
+    assert zhangsan["role"] == "current_party"
+    assert "劳动者" in zhangsan["aliases"]
+    assert "劳动者" not in [entity["canonical_label"] for entity in state["entities"] if entity["canonical_label"] != "张三"]
+    assert state["party_naming_decision"]["should_create_party_naming"] is False
+
+
 def test_manager_company_affiliation_resolved_from_graph_relations() -> None:
     state = build_conversation_entity_state(
         message_text="B公司的人事王经理口头通知我不用来了。",

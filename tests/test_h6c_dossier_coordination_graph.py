@@ -618,3 +618,100 @@ def test_coordination_graph_uses_canonical_dossier_entity_state_only() -> None:
     assert result["tasks"] == []
     assert result["stats"]["canonical_entities"] == 1
     assert result["trace"]["mode"] == "agentic_dossier_entity_state"
+
+
+def test_coordination_graph_does_not_emit_pending_naming_for_resolved_laborer_alias() -> None:
+    dossier_entity_state = build_dossier_entity_state(
+        conversation_entity_states=[
+            {
+                "should_build": True,
+                "conversation_id": 808,
+                "entities": [
+                    {
+                        "id": "conversation:808:entity:zhangsan",
+                        "canonical_label": "张三",
+                        "entity_type": "person",
+                        "role": "current_party",
+                        "confidence": "high",
+                        "source": "conversation_graph",
+                        "aliases": ["我", "劳动者"],
+                        "mentions": [
+                            {
+                                "id": "conversation:808:mention:zhangsan",
+                                "conversation_id": 808,
+                                "raw_label": "张三",
+                                "raw_node_id": "person-808",
+                                "source": "conversation_graph",
+                            },
+                            {
+                                "id": "conversation:808:mention:worker",
+                                "conversation_id": 808,
+                                "raw_label": "劳动者",
+                                "raw_node_id": "worker-808",
+                                "source": "conversation_graph",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "conversation:808:entity:company",
+                        "canonical_label": "B公司",
+                        "entity_type": "organization",
+                        "role": "employer",
+                        "confidence": "high",
+                        "source": "conversation_graph",
+                        "aliases": [],
+                        "mentions": [
+                            {
+                                "id": "conversation:808:mention:company",
+                                "conversation_id": 808,
+                                "raw_label": "B公司",
+                                "raw_node_id": "company-808",
+                                "source": "conversation_graph",
+                            }
+                        ],
+                    },
+                ],
+                "relations": [],
+            }
+        ],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+    raw_graph_payload = _make_raw_graph_payload(
+        {
+            "nodes": [
+                {"id": "person-808", "label": "张三", "type": "person", "conversation_id": 808},
+                {"id": "worker-808", "label": "劳动者", "type": "person", "conversation_id": 808},
+                {"id": "company-808", "label": "B公司", "type": "organization", "conversation_id": 808},
+            ],
+            "edges": [],
+        }
+    )
+
+    result = build_dossier_coordination_graph(
+        raw_graph_payload=raw_graph_payload,
+        display_graph=_build_display_graph(raw_graph_payload),
+        participant_candidates=[],
+        intelligence_payload={
+            "confirmation_tasks": [
+                {
+                    "task_type": "party_naming",
+                    "current_label": "劳动者",
+                    "evidence": {
+                        "source_conversation_ids": [808],
+                        "raw_node_ids": ["worker-808"],
+                        "raw_labels": ["劳动者"],
+                    },
+                }
+            ]
+        },
+        bound_conversation_ids=[808],
+        dossier_entity_state=dossier_entity_state,
+    )
+
+    labels = {entity["label"] for entity in result["entities"]}
+    assert {"张三", "B公司"} == labels
+    assert not any(entity["label"] == "劳动者" for entity in result["entities"])
+    assert not any(task.get("task_type") == "party_naming" for task in result["tasks"])
+    assert result["stats"]["pending_naming"] == 0

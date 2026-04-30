@@ -25,6 +25,7 @@ SELF_ANCHOR_LABELS = {
     "劳动者本人",
     "我方当事人",
 }
+CURRENT_PARTY_DEFAULT_ALIASES = ("我", "本人", "当事人", "劳动者", "申请人")
 LEGAL_INTENTS = {"legal_question", "advice_question", "document_request"}
 SUPPRESSED_INTENTS = {"subject_reference", "clarification_response"}
 ORG_SUFFIXES = (
@@ -585,6 +586,13 @@ def _build_entities_from_graph(
     current_party_entities = [
         entity for entity in entities_by_label.values() if entity.get("role") == "current_party"
     ]
+    if len(current_party_entities) == 1:
+        current_party = current_party_entities[0]
+        if (
+            _normalize_text(current_party.get("entity_type")) == "person"
+            and _is_specific_person_label(_normalize_text(current_party.get("canonical_label")))
+        ):
+            _merge_aliases(current_party, list(CURRENT_PARTY_DEFAULT_ALIASES))
     if len(current_party_entities) == 1 and self_anchor_mentions:
         current_party = current_party_entities[0]
         _merge_aliases(current_party, [_normalize_text(item.get("raw_label")) for item in self_anchor_mentions])

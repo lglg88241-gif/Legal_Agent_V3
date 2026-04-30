@@ -32,7 +32,10 @@ from app.services.dossier_entity_state import (
     coordination_graph_from_dossier_entity_state,
 )
 from app.services.dossier_graph import get_dossier_graph_payload
-from app.services.dossier_intelligence import _build_party_naming_task
+from app.services.dossier_intelligence import (
+    _build_party_naming_task,
+    _suppress_resolved_current_party_party_naming_tasks,
+)
 
 _TRACE_MODE = "rules"
 _TRACE_PROVIDER = "rules"
@@ -2116,6 +2119,14 @@ async def build_dossier_coordination_graph_for_user(
             db,
             conversation_id=conversation_id,
         )
+        conversation_entity_state = build_conversation_entity_state(
+            message_text=message_text,
+            raw_graph_payload=raw_graph_payload,
+            conversation_id=conversation_id,
+            conversation_mode=getattr(conversation, "conversation_mode", None) or "TRACKED_CASE",
+            persistence_consent=getattr(conversation, "persistence_consent", None) or "tracked",
+        )
+        conversation_entity_states.append(conversation_entity_state)
         onboarding_decision = build_dossier_entity_onboarding_decision(
             message_text=message_text,
             raw_graph_payload=raw_graph_payload,
@@ -2131,18 +2142,10 @@ async def build_dossier_coordination_graph_for_user(
             display_graph,
             onboarding_decision=onboarding_decision,
             conversation_id=conversation_id,
+            conversation_entity_state=conversation_entity_state,
         )
         if party_naming_task is not None:
             confirmation_tasks.append(party_naming_task)
-        conversation_entity_states.append(
-            build_conversation_entity_state(
-                message_text=message_text,
-                raw_graph_payload=raw_graph_payload,
-                conversation_id=conversation_id,
-                conversation_mode=getattr(conversation, "conversation_mode", None) or "TRACKED_CASE",
-                persistence_consent=getattr(conversation, "persistence_consent", None) or "tracked",
-            )
-        )
 
     dossier_entity_state = build_dossier_entity_state(
         conversation_entity_states=conversation_entity_states,
@@ -2153,6 +2156,10 @@ async def build_dossier_coordination_graph_for_user(
             for decision in decisions
         ],
         conversation_summaries=conversation_summaries,
+    )
+    confirmation_tasks = _suppress_resolved_current_party_party_naming_tasks(
+        confirmation_tasks,
+        conversation_entity_states=conversation_entity_states,
     )
 
     coordination_graph = build_dossier_coordination_graph(

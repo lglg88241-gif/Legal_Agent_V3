@@ -65,6 +65,36 @@ def test_dossier_agent_consumes_conversation_entity_state_not_party_naming_tasks
     assert dossier_state["trace"]["steps"][0] == "read_conversation_entity_state"
 
 
+def test_laborer_alias_does_not_create_separate_dossier_entity() -> None:
+    conversation_state = _conversation_state(
+        808,
+        [
+            {
+                "id": "person-808",
+                "label": "张三",
+                "type": "person",
+                "conversation_id": 808,
+                "properties": {"role": "current_party"},
+            },
+            {"id": "worker-808", "label": "劳动者", "type": "person", "conversation_id": 808},
+            {"id": "company-808", "label": "B公司", "type": "organization", "conversation_id": 808},
+        ],
+        message="我叫张三，是这起劳动争议里的劳动者。我和B公司签了劳动合同，但B公司一直没有给我缴纳社保。",
+    )
+
+    dossier_state = build_dossier_entity_state(
+        conversation_entity_states=[conversation_state],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+
+    zhangsan_entities = _entity_by_label(dossier_state, "张三")
+    assert len(zhangsan_entities) == 1
+    assert "劳动者" in zhangsan_entities[0]["aliases"]
+    assert not _entity_by_label(dossier_state, "劳动者")
+
+
 def test_cross_conversation_same_entity_candidate_and_confirm_merge() -> None:
     state_805 = _named_party_state(805)
     state_806 = _conversation_state(

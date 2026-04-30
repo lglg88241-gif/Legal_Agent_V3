@@ -22,6 +22,7 @@ from app.services.conversation_store import (
     serialize_dossier_participant,
     serialize_dossier_participant_mention,
 )
+from app.services.conversation_entity_state import build_conversation_entity_state
 from app.services.dossier_display_graph import build_dossier_display_graph
 from app.services.dossier_entity_onboarding_agent import (
     build_dossier_entity_onboarding_decision,
@@ -615,12 +616,142 @@ def _collect_self_anchor_evidence(
     }
 
 
+def _party_naming_task_labels(task: dict[str, Any]) -> set[str]:
+    if not isinstance(task, dict):
+        return set()
+    evidence = task.get("evidence") if isinstance(task.get("evidence"), dict) else {}
+    values: list[Any] = [
+        task.get("current_label"),
+        task.get("raw_label"),
+        task.get("label"),
+    ]
+    values.extend(task.get("raw_labels") if isinstance(task.get("raw_labels"), list) else [])
+    values.extend(evidence.get("raw_labels") if isinstance(evidence.get("raw_labels"), list) else [])
+    return {_normalize_text(value) for value in values if _normalize_text(value)}
+
+
+def _party_naming_task_conversation_ids(
+    task: dict[str, Any],
+    *,
+    conversation_id: int | None = None,
+) -> set[int]:
+    if not isinstance(task, dict):
+        return set()
+    evidence = task.get("evidence") if isinstance(task.get("evidence"), dict) else {}
+    values: list[Any] = []
+    values.extend(
+        task.get("source_conversation_ids")
+        if isinstance(task.get("source_conversation_ids"), list)
+        else []
+    )
+    values.extend(
+        evidence.get("source_conversation_ids")
+        if isinstance(evidence.get("source_conversation_ids"), list)
+        else []
+    )
+    normalized = {_positive_int(value) for value in values if _positive_int(value) > 0}
+    fallback_conversation_id = _positive_int(conversation_id)
+    if not normalized and fallback_conversation_id > 0:
+        normalized.add(fallback_conversation_id)
+    return normalized
+
+
+def _current_party_alias_scope(
+    conversation_entity_states: list[dict[str, Any]] | None,
+) -> dict[int, set[str]]:
+    alias_scope: dict[int, set[str]] = {}
+    for state in conversation_entity_states or []:
+        if not isinstance(state, dict) or not state.get("should_build", True):
+            continue
+        state_conversation_id = _positive_int(state.get("conversation_id"))
+        if state_conversation_id <= 0:
+            continue
+        for entity in state.get("entities") if isinstance(state.get("entities"), list) else []:
+            if not isinstance(entity, dict):
+                continue
+            if _normalize_text(entity.get("role")) != "current_party":
+                continue
+            if _normalize_text(entity.get("source")) == "fallback_rules":
+                continue
+            aliases: list[Any] = [
+                entity.get("canonical_label"),
+                entity.get("label"),
+            ]
+            aliases.extend(entity.get("aliases") if isinstance(entity.get("aliases"), list) else [])
+            aliases.extend(
+                entity.get("source_labels")
+                if isinstance(entity.get("source_labels"), list)
+                else []
+            )
+            for mention in entity.get("mentions") if isinstance(entity.get("mentions"), list) else []:
+                if not isinstance(mention, dict):
+                    continue
+                aliases.append(mention.get("raw_label"))
+                aliases.append(mention.get("label"))
+            normalized_aliases = {
+                _normalize_text(value)
+                for value in aliases
+                if _normalize_text(value)
+            }
+            if not normalized_aliases:
+                continue
+            alias_scope.setdefault(state_conversation_id, set()).update(normalized_aliases)
+    return alias_scope
+
+
+def _party_naming_covered_by_resolved_current_party(
+    task: dict[str, Any],
+    *,
+    conversation_entity_states: list[dict[str, Any]] | None,
+    conversation_id: int | None = None,
+) -> bool:
+    if not isinstance(task, dict):
+        return False
+    task_type = _normalize_text(task.get("task_type") or task.get("type"))
+    if task_type != "party_naming":
+        return False
+    raw_labels = _party_naming_task_labels(task)
+    self_anchor_labels = {label for label in raw_labels if label in _SELF_ANCHOR_LABELS}
+    if not self_anchor_labels:
+        return False
+    alias_scope = _current_party_alias_scope(conversation_entity_states)
+    if not alias_scope:
+        return False
+    conversation_ids = _party_naming_task_conversation_ids(task, conversation_id=conversation_id)
+    scoped_aliases: set[str] = set()
+    if conversation_ids:
+        for scoped_conversation_id in conversation_ids:
+            scoped_aliases.update(alias_scope.get(scoped_conversation_id, set()))
+    else:
+        for aliases in alias_scope.values():
+            scoped_aliases.update(aliases)
+    return self_anchor_labels.issubset(scoped_aliases)
+
+
+def _suppress_resolved_current_party_party_naming_tasks(
+    tasks: list[dict[str, Any]],
+    *,
+    conversation_entity_states: list[dict[str, Any]] | None,
+    conversation_id: int | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        task
+        for task in tasks
+        if not _party_naming_covered_by_resolved_current_party(
+            task,
+            conversation_entity_states=conversation_entity_states,
+            conversation_id=conversation_id,
+        )
+    ]
+
+
 def _build_party_naming_task(
     raw_graph_payload: dict[str, Any] | None,
     display_graph: dict[str, Any] | None,
     *,
     onboarding_decision: dict[str, Any] | None = None,
     conversation_id: int | None = None,
+    conversation_entity_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if _has_confirmed_self_naming(raw_graph_payload):
         return None
@@ -642,6 +773,19 @@ def _build_party_naming_task(
     if evidence is None:
         return None
 
+    if _party_naming_covered_by_resolved_current_party(
+        {
+            "task_type": "party_naming",
+            "current_label": evidence["raw_labels"][0],
+            "raw_labels": evidence.get("raw_labels", []),
+            "source_conversation_ids": evidence.get("source_conversation_ids", []),
+            "evidence": evidence,
+        },
+        conversation_entity_states=[conversation_entity_state] if isinstance(conversation_entity_state, dict) else [],
+        conversation_id=conversation_id,
+    ):
+        return None
+
     current_label = evidence["raw_labels"][0]
     if not _is_self_anchor_candidate_label(current_label):
         return None
@@ -661,7 +805,6 @@ def _build_party_naming_task(
             )
             or reason
         )
-        source = _normalize_text(onboarding_decision.get("source")) or source
     return {
         "type": "party_naming",
         "task_type": "party_naming",
@@ -1853,12 +1996,66 @@ async def build_dossier_intelligence(
     warnings.extend(summary_warnings)
     steps.append(_step("build_summary", "success", source=summary_payload["source"]))
 
-    onboarding_decision = await _build_onboarding_decision_for_intelligence(
-        db,
-        dossier_id=dossier.id,
-        conversation_id=conversation_id,
-        raw_graph_payload=raw_graph_payload,
+    onboarding_message_text, onboarding_message_understanding = (
+        await _build_onboarding_context_for_conversation(
+            db,
+            conversation_id=conversation_id,
+        )
     )
+    onboarding_decision = build_dossier_entity_onboarding_decision(
+        message_text=onboarding_message_text,
+        message_understanding=onboarding_message_understanding,
+        raw_graph_payload=raw_graph_payload,
+        conversation_id=conversation_id,
+        dossier_id=dossier.id,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+        graph_updated=True,
+    )
+    conversation_entity_state = build_conversation_entity_state(
+        message_text=onboarding_message_text,
+        message_understanding=onboarding_message_understanding,
+        raw_graph_payload=raw_graph_payload,
+        conversation_id=conversation_id,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+    conversation_entity_states = [conversation_entity_state]
+    if _positive_int(conversation_id) <= 0:
+        conversation_entity_states = []
+        raw_graph = raw_graph_payload.get("graph") if isinstance(raw_graph_payload, dict) else {}
+        raw_nodes = (raw_graph.get("nodes") if isinstance(raw_graph, dict) else []) or []
+        raw_edges = (raw_graph.get("edges") if isinstance(raw_graph, dict) else []) or []
+        scoped_conversation_ids = {
+            _positive_int(node.get("conversation_id"))
+            for node in raw_nodes
+            if isinstance(node, dict)
+        }
+        scoped_conversation_ids.update(
+            _positive_int(edge.get("conversation_id"))
+            or _positive_int(
+                (edge.get("properties") if isinstance(edge.get("properties"), dict) else {}).get(
+                    "conversation_id"
+                )
+            )
+            for edge in raw_edges
+            if isinstance(edge, dict)
+        )
+        for scoped_conversation_id in sorted(
+            scoped_id for scoped_id in scoped_conversation_ids if scoped_id > 0
+        ):
+            if scoped_conversation_id <= 0:
+                continue
+            conversation_entity_states.append(
+                build_conversation_entity_state(
+                    message_text="",
+                    message_understanding=None,
+                    raw_graph_payload=raw_graph_payload,
+                    conversation_id=scoped_conversation_id,
+                    conversation_mode="TRACKED_CASE",
+                    persistence_consent="tracked",
+                )
+            )
     steps.append(
         _step(
             "build_entity_onboarding_decision",
@@ -1875,6 +2072,14 @@ async def build_dossier_intelligence(
             ),
         )
     )
+    steps.append(
+        _step(
+            "build_conversation_entity_state",
+            "success" if conversation_entity_states else "skipped",
+            entity_source=conversation_entity_state.get("entity_source"),
+            entity_count=sum(len(state.get("entities") or []) for state in conversation_entity_states),
+        )
+    )
 
     confirmation_tasks: list[dict[str, Any]] = []
     party_naming_task = _build_party_naming_task(
@@ -1882,6 +2087,9 @@ async def build_dossier_intelligence(
         display_graph,
         onboarding_decision=onboarding_decision,
         conversation_id=conversation_id,
+        conversation_entity_state=conversation_entity_state
+        if _positive_int(conversation_id) > 0
+        else None,
     )
     if party_naming_task is not None:
         confirmation_tasks.append(party_naming_task)
@@ -1971,6 +2179,11 @@ async def build_dossier_intelligence(
         party_naming_task.setdefault("confidence", "high")
         party_naming_task.setdefault("should_show_to_user", True)
     confirmation_tasks = _dedupe_confirmation_tasks(confirmation_tasks)
+    confirmation_tasks = _suppress_resolved_current_party_party_naming_tasks(
+        confirmation_tasks,
+        conversation_entity_states=conversation_entity_states,
+        conversation_id=conversation_id,
+    )
     steps.append(
         _step(
             "build_confirmation_tasks",
