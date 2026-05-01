@@ -5,12 +5,14 @@
 - 进展文档：[docs/personalized_workspace_progress.md](docs/personalized_workspace_progress.md)
 - 答辩提纲：[docs/defense_outline.md](docs/defense_outline.md)
 
-当前 `feat/personalized-legal-workspace` 分支已经形成从 H2 到 H4i 的个性化工作台闭环，包括：
+当前 `feat/personalized-legal-workspace` 分支已经形成个性化法律工作台闭环，包括：
 
 - mode consent 与 `temporary / tracked / unknown` 持久化边界
 - Dossier 案卷模型、会话绑定、手动摘要与智能摘要
 - dossier_context / dossier_graph_summary 注入 advisor
-- dossier 级只读图谱聚合、participant resolution 与 schema hardening
+- 会话图谱、案卷图谱聚合、participant resolution 与 schema hardening
+- canonical 案卷主体工作区：已连接主体、跨会话同一主体确认、高置信待确认、手动合并与来源会话跳转
+- 图谱写入前的语义引用防护：口语化 `我 / 当事人 / 他 / 公司` 不再整批污染或整批阻断会话图谱
 
 ## 项目简介
 
@@ -112,6 +114,22 @@ Surgery G 系列的核心变化，是把 LLM 从“文本精校员”升级为�
 - D5 可操作性显著提升，说明 grounded prompt 与 GPT-5.4 的组合明显增强了“下一步怎么做”的建议能力。
 - D7 案例引用保持满分，说明 grounded RAG 改造没有牺牲案例引用质量。
 
+### 最新工作台回归
+
+2026-05-01 针对案卷图谱、主体归并、普通法律问答和工作台生命周期做过一轮回归：
+
+| 验证项 | 结果 |
+|---|---|
+| 离线 pytest | `788 passed` |
+| `python -m compileall -q app tests` | 通过 |
+| `git diff --check` | 通过，仅 Windows 换行提示 |
+| `legal_qa` | `6/6 cases`, `38/38 checks`，保留 1 个延迟观察项 |
+| `workspace_participant` | `1/1 cases`, `14/14 checks` |
+| `workspace_archive` | `1/1 cases`, `4/4 checks` |
+| `workspace_delete` | `1/1 cases`, `6/6 checks` |
+
+`workspace_participant` 是案卷主体归并最敏感的现场套件，会验证跨会话同名责任主体候选、来源图谱证据、确认写入、display graph overlay 和 participant mention provenance。若改动图谱、案卷、主体确认或前端案卷抽屉，至少需要重跑该套件。
+
 ## 运行方式
 
 ### 环境变量
@@ -169,19 +187,33 @@ python -m vllm.entrypoints.openai.api_server --model Qwen/Qwen2.5-3B-Instruct --
 测试命令：
 
 ```powershell
-$env:PYTHONPATH='.'; uv run pytest tests/ -q
+python -m pytest -q --durations=20
+python -m compileall -q app tests
 ```
 
-全量 benchmark：
+现代 benchmark runner：
 
 ```powershell
-$env:PYTHONPATH='.'; $env:PYTHONIOENCODING='utf-8'; uv run python e2e_tests/quality_benchmark.py
+python e2e_tests\run_benchmarks.py --profile quick --check-readiness --suite-timeout 360
+python e2e_tests\run_benchmarks.py --profile full --check-readiness --suite-timeout 420
+```
+
+常用专项回归：
+
+```powershell
+python e2e_tests\run_benchmarks.py --only legal_qa --check-readiness --suite-timeout 360
+python e2e_tests\run_benchmarks.py --only workspace_participant --check-readiness --suite-timeout 420
+python e2e_tests\run_benchmarks.py --only workspace_archive --check-readiness --suite-timeout 360
+python e2e_tests\run_benchmarks.py --only workspace_delete --check-readiness --suite-timeout 360
 ```
 
 报告输出：
 
 ```text
-e2e_tests/results/quality_benchmark_report.json
+e2e_tests/results/latest_runner_report.json
+e2e_tests/results/latest_workspace_participant_runner_report.json
+e2e_tests/results/latest_workspace_archive_runner_report.json
+e2e_tests/results/latest_workspace_delete_runner_report.json
 ```
 
 ## 典型回答示例
@@ -204,12 +236,24 @@ e2e_tests/results/quality_benchmark_report.json
 
 ## 个性化工作台进展
 
-围绕个性化法律工作台，当前版本已经形成从普通会话、模式识别、用户同意，到案卷绑定、案卷摘要和案卷图谱聚合的最小闭环。
+围绕个性化法律工作台，当前版本已经形成从普通会话、模式识别、用户同意，到案卷绑定、案卷摘要、会话图谱和案卷主体归并的闭环。
 
 - `temporary / tracked / unknown` 三种持久化语义已经分离：`temporary` 只保留普通消息，不写结构化案情和图谱；`tracked` 允许持续跟踪；`unknown` 保持旧行为兼容 benchmark。
 - Dossier / 案卷已成为持续跟踪的正式承载对象：支持创建案卷、绑定会话、基于案卷新建会话、查看绑定会话列表，以及手动摘要与 AI 自动摘要并存。
 - advisor 在绑定案卷的会话中会读取 `dossier_context` 和 `dossier_graph_summary`，但这些信息只作为背景上下文，不替代法律 RAG 检索到的法条与案例依据。
 - 对案卷内的 `participant aliases`，系统明确采用“案卷局部身份”语义：称呼只在当前案卷内生效，不等同真实姓名，也不会跨案卷自动合并同名主体。
+- 会话图谱的 `category` 是案卷图谱的类型契约：只有能承担责任的人、组织、公司法人、负责人等责任主体应进入案卷主体归并主线；证据、软件渠道、金额、日期、事件和后果不能被提升为责任主体。
+- 案卷抽屉已经收口到 canonical 主线：案卷规范实体图、已连接主体、高置信待确认、一般跨会话候选、手动合并入口和来源会话跳转。
+- 跨会话同一主体确认只处理不同会话中的同一责任主体；同一会话来源的实体不需要做跨会话合并。
+
+### 图谱引用防护
+
+口语化案情补充会经过 `graph_reference_guard`：
+
+- 如果模型已经能把 `我 / 当事人 / 公司` 解析为明确主体，例如 `张三 / 蓝海科技`，图谱动作会在写入前重写为真实主体。
+- 如果第一人称仍未命名，系统允许把事实写到受保护的 `当事人` 自我锚点，同时继续产生命名确认任务，避免整段事实丢失。
+- 如果是 `他 / 她 / 对方 / 人事 / 经理 / 公司` 等可能指向多个责任主体的泛称，只阻断包含该泛称的边；同一句中明确的 `A公司 -> 劳动合同` 等事实仍会写入。
+- 如果抽取结果把 `微信 / 钉钉 / 飞书 / 邮件 / 工资流水 / 聊天记录 / 6万元 / 2024年4月4日 / 拖欠工资 / 经济损失` 识别为主体，规范化层会把它们压回客体、事件或后果，避免污染案卷主体节点。
 
 H4f 进一步修复了三个关键体验问题：
 
