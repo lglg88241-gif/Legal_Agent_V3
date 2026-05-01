@@ -91,6 +91,7 @@ def _run_subject_reference_task(
     dossier_context: dict[str, Any],
     dossier_graph_context: dict[str, Any],
     message_understanding_result: dict[str, Any] | None = None,
+    current_conversation_graph: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     celery_module = _load_celery_module()
     persisted: dict[str, Any] = {}
@@ -117,6 +118,7 @@ def _run_subject_reference_task(
             "dossier_context": dossier_context,
             "dossier_graph_summary": "",
             "dossier_graph_context": dossier_graph_context,
+            "current_conversation_graph": current_conversation_graph,
         }
 
     class FailIfCalledLegalAgent:
@@ -186,6 +188,18 @@ def test_subject_reference_routes_through_current_conversation_graph_first(
             "matched_nodes": [],
         },
         message_understanding_result=_subject_reference_result(),
+        current_conversation_graph={
+            "nodes": [
+                {
+                    "id": "company-b",
+                    "conversation_id": 9,
+                    "display_label": "B公司",
+                    "raw_label": "B公司",
+                    "type": "organization",
+                }
+            ],
+            "edges": [],
+        },
     )
 
     assert result["status"] == "success"

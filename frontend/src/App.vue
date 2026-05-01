@@ -222,7 +222,7 @@
     v-model="dossierDrawerVisible"
     title="案卷"
     size="420px"
-    destroy-on-close
+    :before-close="handleCloseDossierDrawer"
   >
     <div class="dossier-drawer">
       <div class="dossier-toolbar">
@@ -477,853 +477,22 @@
             </div>
           </div>
 
-          <div class="dossier-canonical-section">
-            <div class="dossier-auto-summary-header">
-              <div class="dossier-toolbar-copy">
-                <div class="dossier-detail-conversations-title">案卷规范实体图</div>
-                <span class="dossier-toolbar-subtitle">
-                  这里只展示案卷中的责任主体和关键主体关系，例如个人、公司、单位、机构及其代表关系。劳动合同、社保、金额、通知等事实信息会作为详情证据展示，不作为主节点。
-                </span>
-              </div>
-              <el-button
-                size="small"
-                plain
-                :loading="dossierCanonicalGraphLoading || dossierIntelligenceLoading"
-                @click="handleRefreshDossierCanonical"
-              >
-                刷新规范实体图
-              </el-button>
-            </div>
-            <div class="dossier-canonical-body">
-              <div class="dossier-coordination-summary">
-                <span class="dossier-coordination-chip">
-                  案卷实体 {{ selectedDossierCanonicalStats.connectedEntities }}
-                </span>
-                <span class="dossier-coordination-chip">
-                  跨会话待确认 {{ selectedDossierCanonicalCrossConversationTasks.length }}
-                </span>
-                <span class="dossier-coordination-chip">
-                  来源会话 {{ selectedDossierCanonicalStats.boundConversations }}
-                </span>
-                <span class="dossier-coordination-chip">
-                  关系 {{ selectedDossierCanonicalStats.relations }}
-                </span>
-              </div>
-
-              <div
-                v-if="selectedDossierCanonicalHasSingleSourceHint"
-                class="dossier-coordination-hint"
-              >
-                当前仅有一个来源会话，跨会话连接将在绑定更多会话后出现。
-              </div>
-
-              <div class="dossier-canonical-graph-shell">
-                <KnowledgeGraphPanel
-                  :graph="selectedDossierCanonicalGraphPreview"
-                  @node-action="handleOpenCoordinationGraphNodeConversation"
-                />
-              </div>
-
-              <el-collapse
-                v-if="selectedDossierCanonicalHasAuxiliaryPanels"
-                v-model="dossierCanonicalSections"
-                class="dossier-coordination-collapse"
-              >
-                <el-collapse-item name="lists">
-                  <template #title>
-                    <div class="dossier-collapse-title">
-                      <strong>实体详情与兼容任务</strong>
-                      <span>主视图使用 canonical 案卷实体；旧命名、孤立锚点和 participant 候选只作为兼容信息保留。</span>
-                    </div>
-                  </template>
-
-                  <div class="dossier-coordination-list-body">
-                <div
-                  v-if="selectedDossierConfirmedCanonicalEntities.length"
-                  class="dossier-coordination-group"
-                >
-                  <div class="dossier-detail-conversations-title">已连接主体</div>
-                  <div class="dossier-coordination-entity-list">
-                    <div
-                      v-for="entity in selectedDossierConfirmedCanonicalEntities"
-                      :key="entity.id"
-                      class="dossier-coordination-entity-card"
-                    >
-                      <div class="dossier-coordination-entity-main">
-                        <div class="dossier-coordination-entity-title">
-                          <strong>{{ entity.label || '未命名主体' }}</strong>
-                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
-                        </div>
-                        <div class="dossier-coordination-entity-meta">
-                          <span>{{ `详细对话：${coordinationEntityDetailConversationLabel(entity)}` }}</span>
-                          <span v-if="entity.best_conversation_reason">{{ entity.best_conversation_reason }}</span>
-                        </div>
-                      </div>
-                      <div class="dossier-coordination-entity-actions">
-                        <el-button
-                          size="small"
-                          type="primary"
-                          text
-                          :disabled="!coordinationEntityHasDetailConversation(entity)"
-                          @click="handleOpenCoordinationEntityConversation(entity)"
-                        >
-                          查看详细对话
-                        </el-button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  v-if="selectedDossierCanonicalCrossConversationTasks.length"
-                  class="dossier-coordination-group"
-                >
-                  <div class="dossier-detail-conversations-title">跨会话同一实体确认</div>
-                  <div class="dossier-intelligence-task-list">
-                    <div
-                      v-for="task in selectedDossierCanonicalCrossConversationTasks"
-                      :key="task.id || task.task_key"
-                      class="dossier-intelligence-task-card"
-                    >
-                      <div class="dossier-intelligence-task-header">
-                        <strong>{{ coordinationTaskPairTitle(task) }}</strong>
-                        <span class="dossier-intelligence-task-type">
-                          {{ task.task_type || task.type }}
-                        </span>
-                      </div>
-                      <div class="dossier-intelligence-task-reason">
-                        {{ task.reason || '不同会话出现相同或重叠主体称呼，需要确认是否为同一案卷实体。' }}
-                      </div>
-                      <div class="dossier-intelligence-task-evidence">
-                        <span>{{ `来源会话：${formatGraphConversationListLabel(task.source_conversation_ids || [])}` }}</span>
-                        <span>{{ `来源实体：${coordinationTaskEntitySummary(task.source_entity)}` }}</span>
-                        <span>{{ `候选实体：${coordinationTaskEntitySummary(task.target_entity)}` }}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  v-if="selectedDossierPendingCanonicalIdentityEntities.length"
-                  class="dossier-coordination-group"
-                >
-                  <div class="dossier-detail-conversations-title">待确认连接</div>
-                  <div class="dossier-coordination-entity-list">
-                    <div
-                      v-for="entity in selectedDossierPendingCanonicalIdentityEntities"
-                      :key="entity.id"
-                      class="dossier-coordination-entity-card"
-                    >
-                      <div class="dossier-coordination-entity-main">
-                        <div class="dossier-coordination-entity-title">
-                          <strong>{{ entity.label || '待确认主体' }}</strong>
-                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
-                        </div>
-                        <div class="dossier-coordination-entity-meta">
-                          <span>{{ `来源称呼：${coordinationEntitySourceLabelText(entity)}` }}</span>
-                          <span v-if="coordinationEntityIdentityReason(entity)">
-                            {{ coordinationEntityIdentityReason(entity) }}
-                          </span>
-                        </div>
-                      </div>
-                      <div class="dossier-coordination-entity-actions">
-                        <el-button size="small" type="primary" text @click="handleOpenCoordinationIdentity">
-                          去确认
-                        </el-button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  v-if="selectedDossierPendingCanonicalNamingEntities.length"
-                  class="dossier-coordination-group"
-                >
-                  <div class="dossier-detail-conversations-title">待命名主体</div>
-                  <div class="dossier-coordination-entity-list">
-                    <div
-                      v-for="entity in selectedDossierPendingCanonicalNamingEntities"
-                      :key="entity.id"
-                      class="dossier-coordination-entity-card"
-                    >
-                      <div class="dossier-coordination-entity-main">
-                        <div class="dossier-coordination-entity-title">
-                          <strong>{{ entity.label || '待命名主体' }}</strong>
-                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
-                        </div>
-                        <div class="dossier-coordination-entity-meta">
-                          <span>{{ `来源称呼：${coordinationEntitySourceLabelText(entity)}` }}</span>
-                          <span v-if="entity.best_conversation_reason">{{ entity.best_conversation_reason }}</span>
-                        </div>
-                      </div>
-                      <div class="dossier-coordination-entity-actions">
-                        <el-button size="small" type="primary" text @click="handleOpenCoordinationNaming">
-                          去命名
-                        </el-button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  v-if="selectedDossierSelfAnchorIdentityTasks.length"
-                  class="dossier-coordination-group"
-                >
-                  <div class="dossier-detail-conversations-title">待确认事项</div>
-                  <div class="dossier-intelligence-task-list">
-                    <div
-                      v-for="(task, index) in selectedDossierSelfAnchorIdentityTasks"
-                      :key="`dossier-self-identity-task-${index}`"
-                      class="dossier-intelligence-task-card"
-                    >
-                      <div class="dossier-intelligence-task-header">
-                        <strong>{{ task.title || '确认当事人是否为同一人' }}</strong>
-                        <span class="dossier-intelligence-task-type">{{ task.task_type }}</span>
-                      </div>
-                      <div class="dossier-intelligence-task-reason">
-                        {{ selfAnchorIdentityTaskPrompt(task) }}
-                      </div>
-                      <div class="dossier-intelligence-task-meta">
-                        <span>{{ task.reason || '暂无原因说明' }}</span>
-                        <span v-if="task.confidence">{{ `置信度：${task.confidence}` }}</span>
-                      </div>
-                      <div class="dossier-intelligence-task-evidence">
-                        <span>
-                          {{
-                            `source_node：${task?.source_node?.graph_node_label || task?.source_node?.raw_label || '当事人'} / ${formatGraphConversationLabel(task?.source_node?.conversation_id)}`
-                          }}
-                        </span>
-                        <span>
-                          {{
-                            `target_participant：${task?.target_participant?.display_label || '已命名当事人'}`
-                          }}
-                        </span>
-                      </div>
-                      <div
-                        v-if="selfIdentityTaskIsDifferentMode(task)"
-                        class="dossier-intelligence-task-input"
-                      >
-                        <el-input
-                          v-model="selfIdentityTaskState(task).differentDraft"
-                          maxlength="50"
-                          clearable
-                          placeholder="请输入另一个当事人的名称，例如：李四"
-                          :disabled="selfIdentityTaskIsSubmitting(task)"
-                        />
-                      </div>
-                      <div
-                        v-if="selfIdentityTaskError(task)"
-                        class="dossier-graph-warning dossier-graph-warning-soft"
-                      >
-                        {{ selfIdentityTaskError(task) }}
-                      </div>
-                      <div class="dossier-intelligence-task-actions">
-                        <div class="dossier-inline-actions">
-                          <el-button
-                            size="small"
-                            type="primary"
-                            :loading="selfIdentityTaskIsSubmittingAction(task, 'confirm_same')"
-                            :disabled="selfIdentityTaskIsSubmitting(task)"
-                            @click="handleConfirmSelfIdentitySame(task)"
-                          >
-                            是，同一个人
-                          </el-button>
-                          <el-button
-                            size="small"
-                            :disabled="selfIdentityTaskIsSubmitting(task)"
-                            @click="handleOpenSelfIdentityDifferent(task)"
-                          >
-                            不是，另一个人
-                          </el-button>
-                          <el-button
-                            v-if="selfIdentityTaskIsDifferentMode(task)"
-                            size="small"
-                            type="primary"
-                            plain
-                            :loading="selfIdentityTaskIsSubmittingAction(task, 'confirm_different')"
-                            :disabled="selfIdentityTaskIsSubmitting(task)"
-                            @click="handleConfirmSelfIdentityDifferent(task)"
-                          >
-                            确认创建
-                          </el-button>
-                          <el-button
-                            size="small"
-                            text
-                            :disabled="selfIdentityTaskIsSubmitting(task)"
-                            @click="handleDismissSelfIdentityTask(task)"
-                          >
-                            暂不处理
-                          </el-button>
-                        </div>
-                        <span>确认后会刷新案卷智能概览、图谱预览和主体映射。</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  v-if="selectedDossierCanonicalIsolatedAnchorEntities.length"
-                  class="dossier-coordination-group"
-                >
-                  <div class="dossier-detail-conversations-title">未连接主体锚点</div>
-                  <div class="dossier-coordination-entity-list">
-                    <div
-                      v-for="entity in selectedDossierCanonicalIsolatedAnchorEntities"
-                      :key="entity.id"
-                      class="dossier-coordination-entity-card"
-                    >
-                      <div class="dossier-coordination-entity-main">
-                        <div class="dossier-coordination-entity-title">
-                          <strong>{{ entity.label || '未连接主体' }}</strong>
-                          <span>{{ `${coordinationEntityConversationCount(entity)} 个来源会话` }}</span>
-                        </div>
-                        <div class="dossier-coordination-entity-meta">
-                          <span>{{ `详细对话：${coordinationEntityDetailConversationLabel(entity)}` }}</span>
-                          <span>该会话暂未与其他会话形成确认连接</span>
-                        </div>
-                      </div>
-                      <div class="dossier-coordination-entity-actions">
-                        <el-button
-                          size="small"
-                          type="primary"
-                          text
-                          :disabled="!coordinationEntityHasDetailConversation(entity)"
-                          @click="handleOpenCoordinationEntityConversation(entity)"
-                        >
-                          查看详细对话
-                        </el-button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div
-                  v-if="
-                    selectedDossierPendingCanonicalNamingEntities.length ||
-                    selectedDossierCanonicalPartyNamingTasks.length ||
-                    dossierIntelligenceLoading ||
-                    dossierIntelligenceState.error
-                  "
-                  ref="dossierCanonicalNamingRef"
-                  class="dossier-coordination-group dossier-coordination-task-section"
-                >
-                  <div class="dossier-detail-conversations-title">待命名确认</div>
-                  <div
-                    v-if="selectedDossierCanonicalPartyNamingTasks.length"
-                    class="dossier-intelligence-task-list"
-                  >
-                    <div
-                      v-for="(task, index) in selectedDossierCanonicalPartyNamingTasks"
-                      :key="`dossier-party-naming-task-${index}`"
-                      class="dossier-intelligence-task-card"
-                    >
-                      <div class="dossier-intelligence-task-header">
-                        <strong>需要命名的当事人</strong>
-                        <span class="dossier-intelligence-task-type">{{ task.task_type }}</span>
-                      </div>
-                      <div class="dossier-intelligence-task-meta">
-                        <span>{{ `当前称呼：${task.current_label || '未标注'}` }}</span>
-                        <span>
-                          {{
-                            `建议称呼：${Array.isArray(task.suggested_labels) && task.suggested_labels.length
-                              ? task.suggested_labels.join(' / ')
-                              : '暂无建议'}`
-                          }}
-                        </span>
-                      </div>
-                      <div class="dossier-intelligence-task-reason">
-                        {{ task.reason || '暂无原因说明' }}
-                      </div>
-                      <div class="dossier-intelligence-task-evidence">
-                        <span>
-                          {{
-                            `raw_labels：${Array.isArray(task?.evidence?.raw_labels) && task.evidence.raw_labels.length
-                              ? task.evidence.raw_labels.join(' / ')
-                              : '暂无'}`
-                          }}
-                        </span>
-                        <span>
-                          {{
-                            `source_conversation_ids：${formatDossierIntelligenceEvidenceList(task?.evidence?.source_conversation_ids)}`
-                          }}
-                        </span>
-                        <span>
-                          {{
-                            `raw_node_ids：${formatDossierIntelligenceEvidenceList(task?.evidence?.raw_node_ids)}`
-                          }}
-                        </span>
-                      </div>
-                      <div class="dossier-intelligence-task-input">
-                        <el-input
-                          v-model="dossierPartyNamingDrafts[dossierIntelligenceTaskKey(task)]"
-                          maxlength="50"
-                          clearable
-                          placeholder="请输入该主体在本案中的名称或代称"
-                          :disabled="isPartyNamingSubmitting(task)"
-                        />
-                      </div>
-                      <div class="dossier-intelligence-task-actions">
-                        <el-button
-                          size="small"
-                          type="primary"
-                          :loading="isPartyNamingSubmitting(task)"
-                          :disabled="!canSubmitPartyNaming(task)"
-                          @click="handleConfirmPartyNaming(task)"
-                        >
-                          确认命名
-                        </el-button>
-                        <span>确认后会写入案卷主体 overlay，并刷新实体连接和图谱预览。</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div v-else-if="dossierIntelligenceLoading" class="dossier-list-status">
-                    正在加载命名确认任务...
-                  </div>
-                  <div
-                    v-else-if="dossierIntelligenceState.error"
-                    class="dossier-graph-warning dossier-graph-warning-soft"
-                  >
-                    {{ dossierIntelligenceState.error }}
-                  </div>
-                  <div v-else class="dossier-coordination-empty">暂无待处理命名任务</div>
-                </div>
-                  </div>
-                </el-collapse-item>
-              </el-collapse>
-            </div>
-          </div>
-
-          <div v-if="!selectedDossierHasCanonicalGraph" class="dossier-participants-section">
-            <div class="dossier-auto-summary-header">
-              <div class="dossier-toolbar-copy">
-                <div class="dossier-detail-conversations-title">主体关系确认</div>
-                <span class="dossier-toolbar-subtitle">
-                  优先确认不同会话图谱中的实体是否指向同一主体；系统不会自动合并。
-                </span>
-              </div>
-              <div class="dossier-inline-actions">
-                <el-button
-                  size="small"
-                  type="primary"
-                  :disabled="!selectedDossierPendingParticipantCount"
-                  @click="openParticipantCandidateDialog"
-                >
-                  处理线索
-                </el-button>
-                <el-button
-                  size="small"
-                  plain
-                  :loading="dossierParticipantRegistryLoading || dossierParticipantCandidatesLoading"
-                  @click="handleRefreshParticipantTasks"
-                >
-                  刷新
-                </el-button>
-              </div>
-            </div>
-            <div class="dossier-participants-hint">
-              当前只在案卷内确认跨会话主体关系，不会自动与其他案卷的同名实体合并。
-            </div>
-            <div class="dossier-participants-hint">
-              其他任务类型线索和 generic 泛称仍会保留，但不会直接变成已确认主体。
-            </div>
-            <div class="dossier-participant-summary-grid">
-              <div class="dossier-participant-summary-card">
-                <span>已确认主体</span>
-                <strong>{{ selectedDossierResolvedParticipants.length }}</strong>
-              </div>
-              <div class="dossier-participant-summary-card">
-                <span>跨会话候选</span>
-                <strong>{{ selectedDossierCrossConversationCandidates.length }}</strong>
-              </div>
-              <div class="dossier-participant-summary-card">
-                <span>其他主体线索</span>
-                <strong>{{ selectedDossierRawLabelCandidates.length }}</strong>
-              </div>
-            </div>
-            <div
-              v-if="selectedDossierPendingParticipantCount"
-              class="dossier-participant-task-entry"
-            >
-              <div class="dossier-participant-task-entry-copy">
-                <strong>{{ `发现 ${selectedDossierPendingParticipantCount} 条待确认主体线索` }}</strong>
-                <span>
-                  {{
-                    `跨会话 ${selectedDossierCrossConversationCandidates.length} · 其他线索 ${selectedDossierRawLabelCandidates.length}`
-                  }}
-                </span>
-                <span v-if="selectedDossierPendingCandidatePreview.length">
-                  {{ `示例：${selectedDossierPendingCandidatePreview.join(' / ')}` }}
-                </span>
-              </div>
-              <div class="dossier-inline-actions">
-                <el-button size="small" type="primary" @click="openParticipantCandidateDialog">
-                  处理线索
-                </el-button>
-                <el-button size="small" plain @click="handleOpenParticipantDebugPanel">
-                  高级详情
-                </el-button>
-              </div>
-            </div>
-            <div v-else class="dossier-participant-task-entry is-empty">
-              <div class="dossier-participant-task-entry-copy">
-                <strong>暂无待确认主体线索</strong>
-                <span>如果刚绑定了新会话或新增了事实，可刷新后重新检查。</span>
-              </div>
-              <div class="dossier-inline-actions">
-                <el-button size="small" plain @click="handleRefreshParticipantTasks">
-                  刷新
-                </el-button>
-                <el-button size="small" plain @click="handleOpenParticipantDebugPanel">
-                  高级详情
-                </el-button>
-              </div>
-            </div>
-          </div>
-
-          <div class="dossier-resolved-participants-section">
-            <el-collapse v-model="dossierAdvancedSections" class="dossier-debug-collapse">
-              <el-collapse-item name="advanced">
-                <template #title>
-                  <div class="dossier-collapse-title">
-                    <strong>高级图谱详情 / 调试信息</strong>
-                    <span>已确认主体、手动新建主体、节点列表和关系列表默认折叠到这里。</span>
-                  </div>
-                </template>
-
-                <div class="dossier-resolved-participants-body">
-                  <div v-if="dossierParticipantRegistryState.error" class="dossier-graph-error">
-                    {{ dossierParticipantRegistryState.error }}
-                  </div>
-                  <div v-else-if="dossierParticipantRegistryLoading" class="dossier-list-status">
-                    正在加载主体确认...
-                  </div>
-                  <el-collapse v-else v-model="dossierParticipantSections" class="dossier-participant-collapse">
-                    <el-collapse-item name="aliases">
-                      <template #title>
-                        <div class="dossier-collapse-title">
-                          <strong>案卷称呼锚点</strong>
-                          <span>固定“我 / 对方 / 公司”等常用称呼，便于后续称呼任务更稳定。</span>
-                        </div>
-                      </template>
-                      <div class="dossier-inline-actions dossier-inline-actions-spread">
-                        <div class="dossier-participants-hint">
-                          这些称呼是当前案卷内的锚点，可使用化名或角色名，不等同于真实姓名。
-                        </div>
-                        <el-button
-                          size="small"
-                          type="primary"
-                          plain
-                          :loading="dossierParticipantsSaving"
-                          @click="handleUpdateDossierParticipants"
-                        >
-                          保存当事人称呼
-                        </el-button>
-                      </div>
-                      <div class="dossier-participants-grid">
-                        <el-input
-                          v-model="dossierParticipantForm.primary_label"
-                          maxlength="100"
-                          placeholder="主要当事人称呼，例如：我"
-                        />
-                        <el-input
-                          v-model="dossierParticipantForm.primary_role"
-                          maxlength="100"
-                          placeholder="主要当事人角色，例如：劳动者"
-                        />
-                        <el-input
-                          v-model="dossierParticipantForm.opposing_label"
-                          maxlength="100"
-                          placeholder="对方称呼，例如：公司"
-                        />
-                        <el-input
-                          v-model="dossierParticipantForm.opposing_role"
-                          maxlength="100"
-                          placeholder="对方角色，例如：用人单位"
-                        />
-                      </div>
-                    </el-collapse-item>
-
-                    <el-collapse-item name="participants">
-                      <template #title>
-                        <div class="dossier-collapse-title">
-                          <strong>已确认主体</strong>
-                          <span>{{ `共 ${selectedDossierResolvedParticipants.length} 个，可继续编辑显示名、角色和立场。` }}</span>
-                        </div>
-                      </template>
-                      <div class="dossier-resolved-participant-list">
-                        <div
-                          v-for="participant in selectedDossierResolvedParticipants"
-                          :key="participant.id"
-                          class="dossier-resolved-participant-card"
-                        >
-                          <div class="dossier-resolved-participant-grid">
-                            <el-input
-                              v-model="participant.label"
-                              maxlength="100"
-                              placeholder="主体称呼"
-                            />
-                            <el-input
-                              v-model="participant.role"
-                              maxlength="100"
-                              placeholder="角色"
-                            />
-                            <el-select v-model="participant.party_side" placeholder="立场">
-                              <el-option
-                                v-for="option in dossierParticipantPartySideOptions"
-                                :key="option.value"
-                                :label="option.label"
-                                :value="option.value"
-                              />
-                            </el-select>
-                            <el-select v-model="participant.entity_type" placeholder="类型">
-                              <el-option
-                                v-for="option in dossierParticipantEntityTypeOptions"
-                                :key="option.value"
-                                :label="option.label"
-                                :value="option.value"
-                              />
-                            </el-select>
-                          </div>
-                          <el-input
-                            v-model="participant.description"
-                            maxlength="1000"
-                            placeholder="备注（可选）"
-                          />
-                          <div class="dossier-resolved-participant-actions">
-                            <span>
-                              {{ `已确认 mentions：${selectedDossierParticipantMentionCountMap[participant.id] || 0}` }}
-                            </span>
-                            <el-button
-                              size="small"
-                              type="primary"
-                              plain
-                              :loading="dossierParticipantActionLoading"
-                              @click="handleUpdateResolvedParticipant(participant)"
-                            >
-                              保存主体
-                            </el-button>
-                          </div>
-                        </div>
-                        <div v-if="!selectedDossierResolvedParticipants.length" class="dossier-graph-empty">
-                          暂无已确认主体，可先处理称呼任务，或手动新建一个主体。
-                        </div>
-                      </div>
-                    </el-collapse-item>
-
-                    <el-collapse-item name="create">
-                      <template #title>
-                        <div class="dossier-collapse-title">
-                          <strong>手动新建主体</strong>
-                          <span>只有在确实需要时再创建，不要求真实姓名。</span>
-                        </div>
-                      </template>
-                      <div class="dossier-participant-create-card">
-                        <div class="dossier-resolved-participant-grid">
-                          <el-input
-                            v-model="dossierParticipantCreateForm.label"
-                            maxlength="100"
-                            placeholder="主体称呼，例如：A公司 / 张三 / 我"
-                          />
-                          <el-input
-                            v-model="dossierParticipantCreateForm.role"
-                            maxlength="100"
-                            placeholder="角色，例如：用人单位 / HR / 劳动者"
-                          />
-                          <el-select v-model="dossierParticipantCreateForm.party_side" placeholder="立场">
-                            <el-option
-                              v-for="option in dossierParticipantPartySideOptions"
-                              :key="option.value"
-                              :label="option.label"
-                              :value="option.value"
-                            />
-                          </el-select>
-                          <el-select v-model="dossierParticipantCreateForm.entity_type" placeholder="类型">
-                            <el-option
-                              v-for="option in dossierParticipantEntityTypeOptions"
-                              :key="option.value"
-                              :label="option.label"
-                              :value="option.value"
-                            />
-                          </el-select>
-                        </div>
-                        <el-input
-                          v-model="dossierParticipantCreateForm.description"
-                          maxlength="1000"
-                          placeholder="备注（可选）"
-                        />
-                        <div class="dossier-resolved-participant-actions">
-                          <span>不要求真实姓名，可使用化名或角色名。</span>
-                          <el-button
-                            size="small"
-                            type="primary"
-                            :loading="dossierParticipantActionLoading"
-                            @click="handleCreateResolvedParticipant"
-                          >
-                            新建主体
-                          </el-button>
-                        </div>
-                      </div>
-                    </el-collapse-item>
-
-                    <el-collapse-item name="graph">
-                      <template #title>
-                        <div class="dossier-collapse-title">
-                          <strong>图谱节点 / 关系调试详情</strong>
-                          <span>默认折叠，仅在需要排查时查看。</span>
-                        </div>
-                      </template>
-                      <div class="dossier-inline-actions dossier-inline-actions-spread">
-                        <div class="dossier-graph-hint">
-                          当前展示的是案卷下已绑定会话的聚合图谱统计，只读查看，不会改动图谱写入。
-                        </div>
-                        <el-button
-                          size="small"
-                          type="primary"
-                          plain
-                          :loading="dossierGraphLoading"
-                          @click="handleRefreshDossierGraph"
-                        >
-                          刷新图谱状态
-                        </el-button>
-                      </div>
-
-                      <div v-if="dossierGraphLoading && !dossierGraphLoaded" class="dossier-list-status">
-                        正在加载图谱状态...
-                      </div>
-                      <div v-else-if="dossierGraphState.error" class="dossier-graph-error">
-                        {{ dossierGraphState.error }}
-                      </div>
-                      <div v-else class="dossier-graph-body">
-                        <div class="dossier-graph-stats">
-                          <div class="dossier-graph-stat">
-                            <span class="dossier-graph-stat-label">绑定会话</span>
-                            <strong class="dossier-graph-stat-value">
-                              {{ dossierGraphState.conversationCount }}
-                            </strong>
-                          </div>
-                          <div class="dossier-graph-stat">
-                            <span class="dossier-graph-stat-label">实体节点</span>
-                            <strong class="dossier-graph-stat-value">
-                              {{ dossierGraphState.nodeCount }}
-                            </strong>
-                          </div>
-                          <div class="dossier-graph-stat">
-                            <span class="dossier-graph-stat-label">关系边</span>
-                            <strong class="dossier-graph-stat-value">
-                              {{ dossierGraphState.edgeCount }}
-                            </strong>
-                          </div>
-                        </div>
-
-                        <div
-                          v-if="selectedDossierGraphGeneratedAtLabel || dossierGraphLoading"
-                          class="dossier-graph-meta"
-                        >
-                          <span v-if="selectedDossierGraphGeneratedAtLabel">
-                            {{ `最近聚合：${selectedDossierGraphGeneratedAtLabel}` }}
-                          </span>
-                          <span v-if="dossierGraphLoading">刷新中...</span>
-                        </div>
-
-                        <div v-if="dossierGraphState.warning" class="dossier-graph-warning">
-                          {{ dossierGraphState.warning }}
-                        </div>
-                        <div v-if="selectedDossierPendingParticipantCount" class="dossier-graph-warning dossier-graph-warning-soft">
-                          {{ `有 ${selectedDossierPendingParticipantCount} 条主体线索待确认，确认后图谱会更清晰。` }}
-                        </div>
-
-                        <div class="dossier-graph-aliases">
-                          <div class="dossier-graph-alias-item">
-                            <span>主要当事人</span>
-                            <strong>{{ selectedDossierGraphPrimaryAlias }}</strong>
-                          </div>
-                          <div class="dossier-graph-alias-item">
-                            <span>对方</span>
-                            <strong>{{ selectedDossierGraphOpposingAlias }}</strong>
-                          </div>
-                        </div>
-
-                        <div class="dossier-graph-preview">
-                          <div class="dossier-graph-preview-header">
-                            <div class="dossier-detail-conversations-title">图谱预览</div>
-                            <span
-                              v-if="selectedDossierGraphPreviewTruncated"
-                              class="dossier-graph-preview-note"
-                            >
-                              仅展示部分图谱
-                            </span>
-                          </div>
-                          <div class="dossier-graph-preview-hint">
-                            节点和关系来自案卷绑定会话中的结构化案情，可能包含系统推断的未确认关系。
-                          </div>
-                          <div class="dossier-graph-preview-hint">
-                            同名“我 / 公司 / 对方”只在当前案卷内按用户确认称呼展示，不会自动与其他案卷同名主体合并。
-                          </div>
-
-                          <div v-if="selectedDossierGraphHasPreview" class="dossier-graph-preview-body">
-                            <div class="dossier-graph-preview-section">
-                              <div class="dossier-graph-preview-subtitle">节点</div>
-                              <div class="dossier-graph-node-chips">
-                                <div
-                                  v-for="node in selectedDossierGraphPreviewNodes"
-                                  :key="node.id"
-                                  class="dossier-graph-node-chip"
-                                  :title="formatGraphPropertiesTitle(node.properties)"
-                                >
-                                  <strong>{{ graphNodePrimaryLabel(node) }}</strong>
-                                  <span>{{ formatGraphPreviewNodeKind(node) }}</span>
-                                  <span v-if="node.confirmed">已确认主体</span>
-                                  <span v-else-if="node.pending_confirmation">待确认</span>
-                                  <span v-if="graphNodeRawLabelsSummary(node)">
-                                    {{ `原始标签：${graphNodeRawLabelsSummary(node)}` }}
-                                  </span>
-                                  <span>
-                                    {{ `来源：${formatGraphConversationListLabel(graphNodeConversationIds(node))}` }}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div class="dossier-graph-preview-section">
-                              <div class="dossier-graph-preview-subtitle">关系</div>
-                              <div v-if="selectedDossierGraphPreviewEdges.length" class="dossier-graph-edge-list">
-                                <div
-                                  v-for="edge in selectedDossierGraphPreviewEdges"
-                                  :key="edge.id"
-                                  class="dossier-graph-edge-item"
-                                  :title="formatGraphPropertiesTitle(edge.properties)"
-                                >
-                                  <span class="dossier-graph-edge-source">{{ edge.sourceLabel }}</span>
-                                  <span class="dossier-graph-edge-relation">{{ edge.relationLabel }}</span>
-                                  <span class="dossier-graph-edge-target">{{ edge.targetLabel }}</span>
-                                  <span class="dossier-graph-edge-meta">
-                                    {{ formatGraphConversationListLabel(edge.conversationIds) }}
-                                  </span>
-                                </div>
-                              </div>
-                              <div v-else class="dossier-graph-preview-empty">
-                                暂无关系边预览
-                              </div>
-                            </div>
-
-                            <div
-                              v-if="selectedDossierGraphPreviewTruncated"
-                              class="dossier-graph-preview-truncation"
-                            >
-                              仅展示前 12 个节点和前 20 条关系，完整数据已聚合。
-                            </div>
-                          </div>
-                          <div v-else class="dossier-graph-preview-empty">
-                            {{ selectedDossierGraphEmptyText || '暂无图谱数据' }}
-                          </div>
-                        </div>
-                      </div>
-                    </el-collapse-item>
-                  </el-collapse>
-                </div>
-              </el-collapse-item>
-            </el-collapse>
-          </div>
+          <DossierCanonicalDrawer
+            :loading="dossierCanonicalGraphLoading"
+            :intelligence-loading="dossierIntelligenceLoading"
+            :graph-preview="selectedDossierCanonicalGraphPreview"
+            :stats="selectedDossierCanonicalStats"
+            :has-single-source-hint="selectedDossierCanonicalHasSingleSourceHint"
+            :confirmed-entities="selectedDossierConfirmedCanonicalEntities"
+            :cross-conversation-tasks="selectedDossierCanonicalCrossConversationTasks"
+            :helpers="canonicalDrawerHelpers"
+            @refresh-canonical="handleRefreshDossierCanonical"
+            @open-graph-node-conversation="handleOpenCanonicalGraphNodeConversation"
+            @open-entity-conversation="handleOpenCanonicalEntityConversation"
+            @open-manual-merge="handleOpenManualMerge"
+            @confirm-cross-conversation-same-entity="handleConfirmCrossConversationSameEntity"
+            @reject-cross-conversation-same-entity="handleRejectCrossConversationSameEntity"
+          />
 
           <div class="dossier-detail-conversations">
             <div class="dossier-detail-conversations-title">绑定会话</div>
@@ -1366,375 +535,72 @@
   </el-drawer>
 
   <el-dialog
-    v-model="dossierParticipantCandidateDialogVisible"
-    title="主体关系确认"
-    width="720px"
+    v-model="canonicalManualMergeDialogVisible"
+    title="合并到其他实体"
+    width="560px"
+    :close-on-click-modal="!canonicalManualMergeSubmitting"
+    :close-on-press-escape="!canonicalManualMergeSubmitting"
+    @closed="resetCanonicalManualMergeDialog"
   >
-    <div class="dossier-participants-hint">
-      这些卡片代表案卷内待确认的主体线索。系统优先展示跨会话主体同一性候选，不会自动合并。
-    </div>
-    <div
-      v-if="selectedDossierRawLabelCandidates.length"
-      class="dossier-participants-hint"
-    >
-      {{ `另外 ${selectedDossierRawLabelCandidates.length} 条其他主体线索已降级到高级/调试详情，不作为普通用户主确认任务。` }}
-    </div>
-    <div
-      v-if="selectedDossierParticipantCandidates.length"
-      class="dossier-participant-task-list"
-    >
-      <div
-        v-for="candidate in selectedDossierParticipantCandidates"
-        :key="candidateKey(candidate)"
-        class="dossier-participant-task-card"
-      >
-        <div class="dossier-participant-task-header">
-          <div class="dossier-participant-task-copy">
-            <strong>{{ candidateCardTitle(candidate) }}</strong>
-            <span>{{ candidateCardSubtitle(candidate) }}</span>
-          </div>
-          <div class="dossier-participant-task-tags">
-            <el-tag
-              v-if="isCrossConversationCandidate(candidate)"
-              size="small"
-              type="success"
-            >
-              跨会话
-            </el-tag>
-            <el-tag size="small" :type="candidateLabelKindTagType(candidate)">
-              {{ candidateLabelKindLabel(candidate) }}
-            </el-tag>
-            <el-tag
-              v-if="candidateConfidenceLabel(candidate)"
-              size="small"
-              effect="plain"
-            >
-              {{ `置信度 ${candidateConfidenceLabel(candidate)}` }}
-            </el-tag>
-            <el-tag size="small" effect="plain">
-              {{ `${candidate.mentions?.length || 0} mentions` }}
-            </el-tag>
-          </div>
-        </div>
-        <div class="dossier-participant-task-description">
-          {{ candidateIntroText(candidate) }}
-        </div>
-        <div class="dossier-participant-task-meta">
-          {{ candidate.reason || '系统未提供额外说明。' }}
-        </div>
-
-        <template v-if="isCrossConversationCandidate(candidate)">
-          <div class="dossier-participant-resolution-pair">
-            <div class="dossier-participant-resolution-node">
-              <span class="dossier-participant-resolution-node-title">来源节点</span>
-              <strong>{{ formatGraphNodeLabel(candidate.source_node) }}</strong>
-              <span>{{ formatGraphConversationLabel(candidate.source_node?.conversation_id) }}</span>
-              <span>{{ `原始称呼：${candidate.source_node?.raw_label || formatGraphNodeLabel(candidate.source_node)}` }}</span>
-              <span>{{ `节点类型：${formatGraphNodeType(candidate.source_node?.graph_node_type || candidate.source_node?.entity_type)}` }}</span>
-            </div>
-            <div class="dossier-participant-resolution-arrow">⇄</div>
-            <div class="dossier-participant-resolution-node">
-              <span class="dossier-participant-resolution-node-title">候选节点</span>
-              <strong>{{ formatGraphNodeLabel(candidate.target_node) }}</strong>
-              <span>{{ formatGraphConversationLabel(candidate.target_node?.conversation_id) }}</span>
-              <span>{{ `原始称呼：${candidate.target_node?.raw_label || formatGraphNodeLabel(candidate.target_node)}` }}</span>
-              <span>{{ `节点类型：${formatGraphNodeType(candidate.target_node?.graph_node_type || candidate.target_node?.entity_type)}` }}</span>
-            </div>
-          </div>
-
-          <div
-            v-if="candidateRecommendedParticipantLabel(candidate)"
-            class="dossier-participant-task-meta"
-          >
-            {{ `系统建议归入：${candidateRecommendedParticipantLabel(candidate)}` }}
-          </div>
-          <div
-            v-if="candidateActionBlockedReason(candidate)"
-            class="dossier-participant-task-meta"
-          >
-            {{ `当前不能直接确认：${candidateActionBlockedReason(candidate)}` }}
-          </div>
-
-          <el-select
-            v-if="candidate.can_link_existing && selectedDossierResolvedParticipants.length"
-            v-model="dossierParticipantCandidateSelections[candidateKey(candidate)]"
-            clearable
-            placeholder="如需改绑到其他已有主体，请手动选择"
-          >
-            <el-option
-              v-for="participant in selectedDossierResolvedParticipants"
-              :key="participant.id"
-              :label="participantDisplayLabel(participant)"
-              :value="participant.id"
-            />
-          </el-select>
-        </template>
-
-        <template v-else>
-          <div class="dossier-participant-task-meta">
-            {{ `提及会话：${candidateMentionsConversationLabel(candidate)}` }}
-          </div>
-        </template>
-
-        <div
-          v-if="candidateMatchCandidates(candidate).length"
-          class="dossier-participant-task-match-list"
-        >
-          <div class="dossier-participant-task-match-title">候选已有主体</div>
-          <div class="dossier-participant-task-match-chips">
-            <button
-              v-for="match in candidateMatchCandidates(candidate)"
-              :key="`${candidateKey(candidate)}-match-${match.participant_id}`"
-              type="button"
-              class="dossier-participant-match-chip"
-              :class="{ selected: dossierParticipantCandidateSelections[candidateKey(candidate)] === match.participant_id }"
-              @click="handleUseMatchCandidate(candidate, match.participant_id)"
-            >
-              <strong>{{ matchCandidateDisplayLabel(match) }}</strong>
-              <span>{{ match.reason || match.match_type || '候选映射' }}</span>
-            </button>
-          </div>
-        </div>
-
-        <template v-if="isCrossConversationCandidate(candidate)">
-          <div
-            v-if="isParticipantCandidateCreateOpen(candidate)"
-            class="dossier-participant-inline-create-card"
-          >
-            <div class="dossier-resolved-participant-grid">
-              <el-input
-                v-model="dossierParticipantCandidateCreateDraft.label"
-                maxlength="100"
-                placeholder="独立主体称呼"
-              />
-              <el-input
-                v-model="dossierParticipantCandidateCreateDraft.role"
-                maxlength="100"
-                placeholder="角色（可选）"
-              />
-              <el-select
-                v-model="dossierParticipantCandidateCreateDraft.party_side"
-                placeholder="立场"
-              >
-                <el-option
-                  v-for="option in dossierParticipantPartySideOptions"
-                  :key="option.value"
-                  :label="option.label"
-                  :value="option.value"
-                />
-              </el-select>
-              <el-select
-                v-model="dossierParticipantCandidateCreateDraft.entity_type"
-                placeholder="类型"
-              >
-                <el-option
-                  v-for="option in dossierParticipantEntityTypeOptions"
-                  :key="option.value"
-                  :label="option.label"
-                  :value="option.value"
-                />
-              </el-select>
-            </div>
-            <div class="dossier-participant-task-actions">
-              <span>只有确认这两个会话中的实体应归入新主体时才创建。</span>
-              <div class="dossier-inline-actions">
-                <el-button size="small" @click="resetParticipantCandidateCreateDraft">
-                  取消
-                </el-button>
-                <el-button
-                  size="small"
-                  type="primary"
-                  :loading="dossierParticipantActionLoading"
-                  @click="handleResolveParticipantCandidateCreate(candidate)"
-                >
-                  确认新建
-                </el-button>
-              </div>
-            </div>
-          </div>
-
-          <div class="dossier-participant-task-actions">
-            <el-button
-              size="small"
-              type="primary"
-              plain
-              :disabled="!crossCandidateExistingParticipantId(candidate) && !canCreateParticipantFromCandidate(candidate)"
-              :loading="dossierParticipantActionLoading"
-              @click="handleResolveCrossConversationCandidate(candidate)"
-            >
-              是，同一个主体
-            </el-button>
-            <el-button
-              v-if="canCreateParticipantFromCandidate(candidate)"
-              size="small"
-              type="primary"
-              :loading="dossierParticipantActionLoading"
-              @click="startParticipantCandidateCreate(candidate)"
-            >
-              新建为独立主体
-            </el-button>
-            <el-button size="small" @click="handleRejectCrossConversationCandidate(candidate)">
-              不是同一个
-            </el-button>
-            <el-button size="small" @click="handleIgnoreParticipantCandidate(candidate)">
-              暂不处理
-            </el-button>
-          </div>
-        </template>
-
-        <template v-else-if="candidateLabelKind(candidate) === 'specific'">
-          <el-select
-            v-if="candidate.can_link_existing && selectedDossierResolvedParticipants.length"
-            v-model="dossierParticipantCandidateSelections[candidateKey(candidate)]"
-            clearable
-            placeholder="先选择要映射的已有主体"
-          >
-            <el-option
-              v-for="participant in selectedDossierResolvedParticipants"
-              :key="participant.id"
-              :label="participantDisplayLabel(participant)"
-              :value="participant.id"
-            />
-          </el-select>
-
-          <div
-            v-if="isParticipantCandidateCreateOpen(candidate)"
-            class="dossier-participant-inline-create-card"
-          >
-            <div class="dossier-resolved-participant-grid">
-              <el-input
-                v-model="dossierParticipantCandidateCreateDraft.label"
-                maxlength="100"
-                placeholder="独立主体称呼"
-              />
-              <el-input
-                v-model="dossierParticipantCandidateCreateDraft.role"
-                maxlength="100"
-                placeholder="角色（可选）"
-              />
-              <el-select
-                v-model="dossierParticipantCandidateCreateDraft.party_side"
-                placeholder="立场"
-              >
-                <el-option
-                  v-for="option in dossierParticipantPartySideOptions"
-                  :key="option.value"
-                  :label="option.label"
-                  :value="option.value"
-                />
-              </el-select>
-              <el-select
-                v-model="dossierParticipantCandidateCreateDraft.entity_type"
-                placeholder="类型"
-              >
-                <el-option
-                  v-for="option in dossierParticipantEntityTypeOptions"
-                  :key="option.value"
-                  :label="option.label"
-                  :value="option.value"
-                />
-              </el-select>
-            </div>
-            <div class="dossier-participant-task-actions">
-              <span>只有确认它是独立主体时才新建。</span>
-              <div class="dossier-inline-actions">
-                <el-button size="small" @click="resetParticipantCandidateCreateDraft">
-                  取消
-                </el-button>
-                <el-button
-                  size="small"
-                  type="primary"
-                  :loading="dossierParticipantActionLoading"
-                  @click="handleResolveParticipantCandidateCreate(candidate)"
-                >
-                  确认新建
-                </el-button>
-              </div>
-            </div>
-          </div>
-
-          <div class="dossier-participant-task-actions">
-            <el-button
-              size="small"
-              type="primary"
-              plain
-              :disabled="!dossierParticipantCandidateSelections[candidateKey(candidate)]"
-              :loading="dossierParticipantActionLoading"
-              @click="handleResolveSpecificCandidateToExisting(candidate)"
-            >
-              是，同一个
-            </el-button>
-            <el-button
-              v-if="canCreateParticipantFromCandidate(candidate)"
-              size="small"
-              type="primary"
-              :loading="dossierParticipantActionLoading"
-              @click="startParticipantCandidateCreate(candidate)"
-            >
-              新建为独立主体
-            </el-button>
-            <el-button size="small" @click="handleIgnoreParticipantCandidate(candidate)">
-              暂不处理
-            </el-button>
-          </div>
-        </template>
-
-        <template v-else>
-          <el-select
-            v-if="selectedDossierOpponentParticipants.length > 1"
-            v-model="dossierParticipantCandidateSelections[candidateKey(candidate)]"
-            clearable
-            placeholder="如需指向对方，请先选择一个对方主体"
-          >
-            <el-option
-              v-for="participant in selectedDossierOpponentParticipants"
-              :key="participant.id"
-              :label="participantDisplayLabel(participant)"
-              :value="participant.id"
-            />
-          </el-select>
-
-          <div class="dossier-participant-task-actions">
-            <el-button
-              size="small"
-              type="primary"
-              plain
-              :loading="dossierParticipantActionLoading"
-              @click="handleResolveGenericCandidateToSelf(candidate)"
-            >
-              指我
-            </el-button>
-            <el-button
-              size="small"
-              type="primary"
-              plain
-              :loading="dossierParticipantActionLoading"
-              @click="handleResolveGenericCandidateToOpponent(candidate)"
-            >
-              指对方
-            </el-button>
-            <el-button size="small" @click="handleMarkNonEntityCandidate(candidate)">
-              不是具体主体
-            </el-button>
-            <el-button size="small" @click="handleIgnoreParticipantCandidate(candidate)">
-              暂不处理
-            </el-button>
-          </div>
-        </template>
-        </div>
+    <div class="canonical-merge-dialog">
+      <div class="canonical-merge-source">
+        <span>来源实体</span>
+        <strong>{{ canonicalManualMergeSourceLabel }}</strong>
+        <small>{{ canonicalManualMergeSourceHint }}</small>
       </div>
-    <div v-else class="dossier-graph-empty">
-      {{
-        selectedDossierRawLabelCandidates.length
-          ? '当前没有待确认的跨会话主体关系。其他主体线索已放入高级/调试详情。'
-          : '当前没有待确认的主体线索。'
-      }}
+
+      <el-select
+        v-model="canonicalManualMergeTargetId"
+        class="canonical-merge-target-select"
+        filterable
+        placeholder="选择要合并到的目标实体"
+        :disabled="canonicalManualMergeSubmitting"
+      >
+        <el-option
+          v-for="entity in canonicalManualMergeTargetOptions"
+          :key="entity.id"
+          :label="entity.label"
+          :value="entity.id"
+        >
+          <div class="canonical-merge-option">
+            <strong>{{ entity.label }}</strong>
+            <span>{{ entity.meta }}</span>
+          </div>
+        </el-option>
+      </el-select>
+
+      <div v-if="canonicalManualMergeSelectedTarget" class="canonical-merge-preview">
+        <span>目标实体</span>
+        <strong>{{ canonicalManualMergeSelectedTarget.label }}</strong>
+        <small>{{ canonicalManualMergeSelectedTarget.meta }}</small>
+      </div>
+
+      <el-alert
+        v-if="canonicalManualMergeError"
+        type="error"
+        :title="canonicalManualMergeError"
+        show-icon
+        :closable="false"
+      />
     </div>
 
     <template #footer>
-      <el-button @click="dossierParticipantCandidateDialogVisible = false">
-        关闭
-      </el-button>
+      <div class="party-naming-actions">
+        <el-button
+          :disabled="canonicalManualMergeSubmitting"
+          @click="canonicalManualMergeDialogVisible = false"
+        >
+          取消
+        </el-button>
+        <el-button
+          type="primary"
+          :loading="canonicalManualMergeSubmitting"
+          :disabled="!canonicalManualMergeTargetId"
+          @click="submitCanonicalManualMerge"
+        >
+          确认合并
+        </el-button>
+      </div>
     </template>
   </el-dialog>
 
@@ -1909,7 +775,7 @@ import {
 import { ElMessage, ElMessageBox } from 'element-plus'
 import AnalysisPanel from './components/AnalysisPanel.vue'
 import ChatMessage from './components/ChatMessage.vue'
-import KnowledgeGraphPanel from './components/KnowledgeGraphPanel.vue'
+import DossierCanonicalDrawer from './components/DossierCanonicalDrawer.vue'
 import SessionList from './components/SessionList.vue'
 import {
   archiveDossier,
@@ -1919,9 +785,9 @@ import {
   confirmDossierPartyNaming,
   confirmDossierSelfIdentity,
   decideDossierCrossConversationResolution,
+  manualMergeDossierCanonicalEntities,
   createConversation,
   createDossier,
-  createDossierParticipant,
   deleteConversation,
   generateDossierSummary,
   getConversationGraph,
@@ -1930,15 +796,10 @@ import {
   getConversations,
   getDossierCanonicalGraph,
   getDossierDetail,
-  getDossierDisplayGraph,
   getDossierIntelligence,
-  getDossierGraph,
-  getDossierParticipantCandidates,
-  getDossierParticipants,
   getDossiers,
   hardDeleteDossier,
   getLocalModelStatus,
-  resolveDossierParticipants,
   searchConversations,
   getSystemStatus,
   sendMessage,
@@ -1946,7 +807,6 @@ import {
   setLocalModelStatus,
   submitFeedback,
   updateDossier,
-  updateDossierParticipant,
   updateDossierParticipants,
   updateConversationTitle,
 } from './api/index.js'
@@ -1967,6 +827,9 @@ const messageListRef = ref(null)
 const statusTimer = ref(null)
 const graphRefreshTimer = ref(null)
 const graphRefreshStopTimer = ref(null)
+const graphRefreshInFlight = ref(false)
+const handledGraphClarificationKeys = ref(new Set())
+const graphClarificationPromptOpen = ref(false)
 const graphSidebarCollapsed = ref(false)
 const latestGraphRequestId = ref(0)
 const conversationListLoading = ref(false)
@@ -1979,58 +842,33 @@ const dossierSearchKeyword = ref('')
 const dossierStatusFilter = ref('all')
 const dossierSaving = ref(false)
 const dossierBindingId = ref(null)
-const DOSSIER_GRAPH_PREVIEW_NODE_LIMIT = 12
-const DOSSIER_GRAPH_PREVIEW_EDGE_LIMIT = 20
 const DOSSIER_COORDINATION_GRAPH_EDGE_LIMIT = 28
-const DOSSIER_COORDINATION_GRAPH_EXTRA_NODE_LIMIT = 10
 const selectedDossierId = ref(null)
 const selectedDossierDetail = ref(null)
 const dossierDetailLoading = ref(false)
 const dossierDetailSaving = ref(false)
-const dossierParticipantsSaving = ref(false)
-const dossierParticipantRegistryLoading = ref(false)
-const dossierParticipantCandidatesLoading = ref(false)
-const dossierParticipantActionLoading = ref(false)
-const dossierAdvancedSections = ref([])
-const dossierParticipantSections = ref([])
-const dossierParticipantCandidateDialogVisible = ref(false)
-const dossierParticipantCandidateCreateKey = ref('')
 const dossierSummaryGenerating = ref(false)
-const dossierGraphLoading = ref(false)
-const dossierGraphLoaded = ref(false)
 const dossierCanonicalGraphLoading = ref(false)
-const dossierCanonicalSections = ref([])
 const dossierIntelligenceLoading = ref(false)
+const dossierCanonicalCrossTaskSubmittingKey = ref('')
+const canonicalManualMergeDialogVisible = ref(false)
+const canonicalManualMergeSourceEntity = ref(null)
+const canonicalManualMergeTargetId = ref('')
+const canonicalManualMergeSubmitting = ref(false)
+const canonicalManualMergeError = ref('')
 const dossierPartyNamingSubmittingKey = ref('')
+const dossierDrawerClosing = ref(false)
 const partyNamingModalVisible = ref(false)
 const activePartyNamingTask = ref(null)
+const selfIdentityModalVisible = ref(false)
+const activeSelfIdentityTask = ref(null)
 const partyNamingInput = ref('')
 const partyNamingSubmitting = ref(false)
 const partyNamingError = ref('')
 const dismissedPartyNamingTaskIds = ref(new Set())
-const dossierCanonicalNamingRef = ref(null)
 const dossierSelfIdentityTaskStates = reactive({})
 const trackedOnboardingVisible = ref(false)
 const trackedOnboardingSubmitting = ref(false)
-const dossierGraphState = reactive({
-  dossierId: null,
-  conversationCount: 0,
-  nodeCount: 0,
-  edgeCount: 0,
-  nodes: [],
-  edges: [],
-  view: 'raw',
-  generatedAt: '',
-  warning: '',
-  error: '',
-  participantAliases: {},
-})
-const dossierParticipantRegistryState = reactive({
-  participants: [],
-  mentions: [],
-  candidates: [],
-  error: '',
-})
 const dossierIntelligenceState = reactive({
   dossierId: null,
   summary: {
@@ -2084,26 +922,6 @@ const dossierDetailForm = reactive({
   summary: '',
   status: 'active',
 })
-const dossierParticipantForm = reactive({
-  primary_label: '',
-  primary_role: '',
-  opposing_label: '',
-  opposing_role: '',
-})
-const dossierParticipantCreateForm = reactive({
-  label: '',
-  role: '',
-  party_side: 'unknown',
-  entity_type: 'unknown',
-  description: '',
-})
-const dossierParticipantCandidateCreateDraft = reactive({
-  label: '',
-  role: '',
-  party_side: 'unknown',
-  entity_type: 'unknown',
-  description: '',
-})
 const trackedOnboardingForm = reactive({
   title: '',
   primary_label: '',
@@ -2118,20 +936,6 @@ const trackedOnboardingState = reactive({
   draftText: '',
   dossierId: null,
 })
-const dossierParticipantCandidateSelections = reactive({})
-const dossierParticipantCandidateDismissed = reactive({})
-const dossierParticipantPartySideOptions = [
-  { label: '主张方', value: 'claimant' },
-  { label: '对方', value: 'opponent' },
-  { label: '中立', value: 'neutral' },
-  { label: '未分类', value: 'unknown' },
-]
-const dossierParticipantEntityTypeOptions = [
-  { label: '自然人', value: 'person' },
-  { label: '组织', value: 'organization' },
-  { label: '机构', value: 'authority' },
-  { label: '未分类', value: 'unknown' },
-]
 let trackedOnboardingResolver = null
 const localModel = reactive({
   enabled: false,
@@ -2239,95 +1043,9 @@ const dossierListEmptyDescription = computed(() => {
   }
   return '没有找到符合条件的案卷'
 })
-const selectedDossierResolvedParticipants = computed(() =>
-  Array.isArray(dossierParticipantRegistryState.participants)
-    ? dossierParticipantRegistryState.participants
-    : []
-)
-const selectedDossierParticipantMentions = computed(() =>
-  Array.isArray(dossierParticipantRegistryState.mentions)
-    ? dossierParticipantRegistryState.mentions
-    : []
-)
-const selectedDossierAllParticipantCandidates = computed(() =>
-  Array.isArray(dossierParticipantRegistryState.candidates)
-    ? sortParticipantCandidates(
-        dossierParticipantRegistryState.candidates.filter(
-          (candidate) => !dossierParticipantCandidateDismissed[candidateKey(candidate)]
-        )
-      )
-    : []
-)
-const selectedDossierParticipantCandidates = computed(() =>
-  selectedDossierAllParticipantCandidates.value.filter((candidate) => isCrossConversationCandidate(candidate))
-)
-const selectedDossierPendingParticipantCount = computed(
-  () => selectedDossierParticipantCandidates.value.length
-)
-const selectedDossierCrossConversationCandidates = computed(() =>
-  selectedDossierParticipantCandidates.value
-)
-const selectedDossierRawLabelCandidates = computed(() =>
-  selectedDossierAllParticipantCandidates.value.filter((candidate) => !isCrossConversationCandidate(candidate))
-)
-const selectedDossierSpecificParticipantCandidates = computed(() =>
-  selectedDossierAllParticipantCandidates.value.filter(
-    (candidate) => String(candidate?.label_kind || '').trim().toLowerCase() === 'specific'
-  )
-)
-const selectedDossierGenericParticipantCandidates = computed(() =>
-  selectedDossierAllParticipantCandidates.value.filter(
-    (candidate) => String(candidate?.label_kind || '').trim().toLowerCase() === 'generic'
-  )
-)
-const selectedDossierPendingCandidatePreview = computed(() =>
-  selectedDossierParticipantCandidates.value
-    .slice(0, 4)
-    .map((candidate) => candidateRawLabel(candidate))
-    .filter(Boolean)
-)
-const selectedDossierParticipantMentionCountMap = computed(() => {
-  const lookup = {}
-  for (const mention of selectedDossierParticipantMentions.value) {
-    const participantId = Number(mention?.participant_id || 0)
-    if (!participantId) continue
-    lookup[participantId] = (lookup[participantId] || 0) + 1
-  }
-  return lookup
-})
-const selectedDossierGraphParticipantAliases = computed(() => {
-  const aliases = dossierGraphState.participantAliases
-  if (aliases && Object.keys(aliases).length) {
-    return aliases
-  }
-  return selectedDossierDetail.value?.participant_aliases || {}
-})
-const selectedDossierGraphGeneratedAtLabel = computed(() =>
-  formatDossierConversationTime(dossierGraphState.generatedAt)
-)
-const selectedDossierGraphPrimaryAlias = computed(() =>
-  formatParticipantAliasSummary(selectedDossierGraphParticipantAliases.value?.primary_party)
-)
-const selectedDossierGraphOpposingAlias = computed(() =>
-  formatParticipantAliasSummary(selectedDossierGraphParticipantAliases.value?.opposing_party)
-)
-const selectedDossierIntelligenceSummary = computed(() => dossierIntelligenceState.summary || {})
 const selectedDossierIntelligenceConfirmationTasks = computed(() =>
   Array.isArray(dossierIntelligenceState.confirmationTasks)
     ? dossierIntelligenceState.confirmationTasks
-    : []
-)
-const selectedDossierIntelligenceDisplayGraphNotes = computed(() =>
-  Array.isArray(dossierIntelligenceState.displayGraphNotes)
-    ? dossierIntelligenceState.displayGraphNotes
-    : []
-)
-const selectedDossierIntelligenceTraceSteps = computed(() =>
-  Array.isArray(dossierIntelligenceState.traceSteps) ? dossierIntelligenceState.traceSteps : []
-)
-const selectedDossierIntelligenceTraceWarnings = computed(() =>
-  Array.isArray(dossierIntelligenceState.traceWarnings)
-    ? dossierIntelligenceState.traceWarnings
     : []
 )
 const selectedDossierCanonicalEntities = computed(() =>
@@ -2376,23 +1094,40 @@ const selectedDossierConfirmedCanonicalEntities = computed(() =>
         (entity) => String(entity?.status || '').trim() === 'confirmed'
       )
 )
-const selectedDossierPendingCanonicalIdentityEntities = computed(() =>
-  selectedDossierCanonicalEntities.value.filter(
-    (entity) => String(entity?.status || '').trim() === 'pending_identity'
-  )
+const canonicalManualMergeSourceId = computed(() =>
+  canonicalEntityStableId(canonicalManualMergeSourceEntity.value)
 )
-const selectedDossierPendingCanonicalNamingEntities = computed(() =>
-  selectedDossierCanonicalEntities.value.filter(
-    (entity) => String(entity?.status || '').trim() === 'pending_naming'
-  )
+const canonicalManualMergeSourceLabel = computed(() =>
+  canonicalEntityDisplayLabel(canonicalManualMergeSourceEntity.value)
 )
-const selectedDossierCanonicalIsolatedAnchorEntities = computed(() =>
-  selectedDossierCanonicalEntities.value.filter(
-    (entity) => ['isolated_anchor', 'generic_label', 'unconfirmed_label'].includes(String(entity?.status || '').trim())
-  )
+const canonicalManualMergeSourceHint = computed(() => {
+  const sourceEntity = canonicalManualMergeSourceEntity.value
+  if (!sourceEntity) return ''
+  const conversationCount = canonicalEntityConversationCount(sourceEntity)
+  const sourceLabels = canonicalEntitySourceLabelText(sourceEntity)
+  return `${conversationCount} 个来源会话；来源称呼：${sourceLabels}`
+})
+const canonicalManualMergeTargetOptions = computed(() =>
+  selectedDossierConfirmedCanonicalEntities.value
+    .map((entity) => {
+      const id = canonicalEntityStableId(entity)
+      if (!id || id === canonicalManualMergeSourceId.value) return null
+      if (!canonicalEntitiesAreCrossConversationMergeCandidates(canonicalManualMergeSourceEntity.value, entity)) {
+        return null
+      }
+      return {
+        id,
+        entity,
+        label: canonicalEntityDisplayLabel(entity),
+        meta: `${canonicalEntityConversationCount(entity)} 个来源会话；${canonicalEntitySourceLabelText(entity)}`,
+      }
+    })
+    .filter(Boolean)
 )
-const selectedDossierCanonicalGraphIsEmpty = computed(
-  () => selectedDossierCanonicalEntities.value.length === 0
+const canonicalManualMergeSelectedTarget = computed(() =>
+  canonicalManualMergeTargetOptions.value.find(
+    (item) => item.id === canonicalManualMergeTargetId.value
+  ) || null
 )
 const selectedDossierCanonicalHasSingleSourceHint = computed(
   () =>
@@ -2400,14 +1135,6 @@ const selectedDossierCanonicalHasSingleSourceHint = computed(
     !dossierCanonicalGraphState.error &&
     selectedDossierCanonicalGraphConversationCount.value === 1 &&
     selectedDossierCanonicalGraphPreview.value.nodes.length > 0
-)
-const selectedDossierCanonicalHasAuxiliaryPanels = computed(
-  () =>
-    selectedDossierConfirmedCanonicalEntities.value.length > 0 ||
-    selectedDossierCanonicalCrossConversationTasks.value.length > 0 ||
-    selectedDossierCanonicalHasLegacyCompatibilityItems.value ||
-    dossierIntelligenceLoading.value ||
-    Boolean(dossierIntelligenceState.error)
 )
 const selectedDossierCanonicalIdentityTaskLookup = computed(() => {
   const lookup = {}
@@ -2426,14 +1153,6 @@ const selectedDossierCanonicalPartyNamingTasks = computed(() =>
   selectedDossierIntelligenceConfirmationTasks.value.filter(
     (task) => String(task?.task_type || '').trim() === 'party_naming'
   )
-)
-const selectedDossierCanonicalHasLegacyCompatibilityItems = computed(
-  () =>
-    selectedDossierPendingCanonicalIdentityEntities.value.length > 0 ||
-    selectedDossierPendingCanonicalNamingEntities.value.length > 0 ||
-    selectedDossierCanonicalIsolatedAnchorEntities.value.length > 0 ||
-    selectedDossierSelfAnchorIdentityTasks.value.length > 0 ||
-    selectedDossierCanonicalPartyNamingTasks.value.length > 0
 )
 const activePartyNamingRawLabels = computed(() => partyNamingTaskRawLabels(activePartyNamingTask.value))
 const activePartyNamingSuggestedLabels = computed(() => partyNamingTaskSuggestedLabels(activePartyNamingTask.value))
@@ -2454,7 +1173,7 @@ const selectedDossierCanonicalGraphConversationCount = computed(() => {
   return Number(selectedDossierConversationCount.value || 0)
 })
 const selectedDossierCanonicalGraphPreview = computed(() =>
-  buildDossierCoordinationGraphPreview({
+  buildDossierCanonicalGraphPreview({
     entities: selectedDossierPrimaryCanonicalEntities.value,
     edges: Array.isArray(dossierCanonicalGraphState.edges) ? dossierCanonicalGraphState.edges : [],
     loading: dossierCanonicalGraphLoading.value,
@@ -2469,79 +1188,6 @@ const selectedDossierSelfAnchorIdentityTasks = computed(() =>
       !selfIdentityTaskIsDismissed(task)
   )
 )
-const selectedDossierSelfAnchorParticipants = computed(() =>
-  selectedDossierResolvedParticipants.value.filter(
-    (participant) => String(participant?.label || '').trim() === '我'
-  )
-)
-const selectedDossierOpponentParticipants = computed(() =>
-  selectedDossierResolvedParticipants.value.filter(
-    (participant) => String(participant?.party_side || '').trim() === 'opponent'
-  )
-)
-const selectedDossierGraphIsEmpty = computed(
-  () => dossierGraphLoaded.value && dossierGraphState.nodeCount === 0 && dossierGraphState.edgeCount === 0
-)
-const selectedDossierGraphPreviewNodes = computed(() =>
-  Array.isArray(dossierGraphState.nodes)
-    ? dossierGraphState.nodes.slice(0, DOSSIER_GRAPH_PREVIEW_NODE_LIMIT)
-    : []
-)
-const selectedDossierGraphNodeLookup = computed(() => {
-  const lookup = {}
-  for (const node of Array.isArray(dossierGraphState.nodes) ? dossierGraphState.nodes : []) {
-    const nodeId = String(node?.id || '').trim()
-    if (!nodeId) continue
-    lookup[nodeId] = node
-  }
-  return lookup
-})
-const selectedDossierGraphPreviewEdges = computed(() => {
-  const lookup = selectedDossierGraphNodeLookup.value
-  const edges = Array.isArray(dossierGraphState.edges)
-    ? dossierGraphState.edges.slice(0, DOSSIER_GRAPH_PREVIEW_EDGE_LIMIT)
-    : []
-
-  return edges.map((edge) => {
-    const sourceId = String(edge?.source || '').trim()
-    const targetId = String(edge?.target || '').trim()
-    const sourceNode = lookup[sourceId] || null
-    const targetNode = lookup[targetId] || null
-    const properties = edge?.properties && typeof edge.properties === 'object' ? edge.properties : {}
-
-    return {
-      ...edge,
-      sourceLabel: graphNodePrimaryLabel(sourceNode) || sourceId || 'Unknown',
-      targetLabel: graphNodePrimaryLabel(targetNode) || targetId || 'Unknown',
-      relationLabel: String(edge?.label || edge?.type || 'CASE_RELATION').trim() || 'CASE_RELATION',
-      conversationIds: [
-        ...normalizeGraphConversationIds(edge?.conversation_ids),
-        ...normalizeGraphConversationIds(edge?.source_conversation_ids),
-        ...normalizeGraphConversationIds(edge?.target_conversation_ids),
-        ...normalizeGraphConversationIds(properties.conversation_id),
-        ...graphNodeConversationIds(sourceNode),
-        ...graphNodeConversationIds(targetNode),
-      ].filter((value, index, array) => array.indexOf(value) === index),
-    }
-  })
-})
-const selectedDossierGraphHasPreview = computed(
-  () =>
-    selectedDossierGraphPreviewNodes.value.length > 0 ||
-    selectedDossierGraphPreviewEdges.value.length > 0
-)
-const selectedDossierGraphPreviewTruncated = computed(
-  () =>
-    dossierGraphState.nodeCount > DOSSIER_GRAPH_PREVIEW_NODE_LIMIT ||
-    dossierGraphState.edgeCount > DOSSIER_GRAPH_PREVIEW_EDGE_LIMIT
-)
-const selectedDossierGraphEmptyText = computed(() => {
-  if (!selectedDossierGraphIsEmpty.value) return ''
-  if (dossierGraphState.warning) {
-    return dossierGraphState.warning
-  }
-  return '当前案卷还没有形成结构化关系。继续在持续跟踪会话中补充案情后，系统会自动整理。'
-})
 const conversationListEmptyText = computed(() =>
   conversationSearchKeyword.value.trim() ? '没有找到相关会话' : '暂无会话'
 )
@@ -2575,10 +1221,7 @@ onUnmounted(() => {
 
 watch(dossierDrawerVisible, (visible) => {
   if (!visible) {
-    dossierParticipantCandidateDialogVisible.value = false
-    dossierAdvancedSections.value = []
-    dossierCanonicalSections.value = []
-    resetParticipantCandidateCreateDraft()
+    dossierDrawerClosing.value = false
   }
 })
 
@@ -2718,46 +1361,6 @@ function isTrackedDossierConversation(conversation) {
   )
 }
 
-function ensureDossierParticipantSection(sectionName) {
-  if (!sectionName) return
-  if (!dossierAdvancedSections.value.includes('advanced')) {
-    dossierAdvancedSections.value = ['advanced']
-  }
-  const current = Array.isArray(dossierParticipantSections.value)
-    ? [...dossierParticipantSections.value]
-    : []
-  if (!current.includes(sectionName)) {
-    current.push(sectionName)
-    dossierParticipantSections.value = current
-  }
-}
-
-function toggleDossierParticipantSection(sectionName) {
-  if (!sectionName) return
-  const current = Array.isArray(dossierParticipantSections.value)
-    ? [...dossierParticipantSections.value]
-    : []
-  if (current.includes(sectionName)) {
-    dossierParticipantSections.value = current.filter((item) => item !== sectionName)
-    return
-  }
-  current.push(sectionName)
-  dossierParticipantSections.value = current
-}
-
-function openParticipantCandidateDialog() {
-  if (!selectedDossierPendingParticipantCount.value) {
-    if (selectedDossierRawLabelCandidates.value.length) {
-      openParticipantAdvancedPanel('participants')
-      ElMessage.info('当前没有待确认的跨会话主体关系，其他主体线索已放入高级/调试详情')
-      return
-    }
-    ElMessage.info('当前没有待确认的主体线索')
-    return
-  }
-  dossierParticipantCandidateDialogVisible.value = true
-}
-
 function resetDossierForm() {
   dossierForm.title = ''
   dossierForm.case_type = ''
@@ -2776,35 +1379,11 @@ function defaultParticipantDrafts(caseType = '') {
   }
 }
 
-function applyParticipantAliasesToForm(form, participantAliases = {}, caseType = '') {
-  const defaults = defaultParticipantDrafts(caseType)
-  const primary = participantAliases?.primary_party || {}
-  const opposing = participantAliases?.opposing_party || {}
-  form.primary_label = primary.label || defaults.primary_label
-  form.primary_role = primary.role || defaults.primary_role
-  form.opposing_label = opposing.label || defaults.opposing_label
-  form.opposing_role = opposing.role || defaults.opposing_role
-}
-
-function resetDossierParticipantForm(caseType = '') {
-  applyParticipantAliasesToForm(dossierParticipantForm, {}, caseType)
-}
-
-function resetDossierParticipantCreateForm() {
-  dossierParticipantCreateForm.label = ''
-  dossierParticipantCreateForm.role = ''
-  dossierParticipantCreateForm.party_side = 'unknown'
-  dossierParticipantCreateForm.entity_type = 'unknown'
-  dossierParticipantCreateForm.description = ''
-}
-
 function resetDossierDetailForm() {
   dossierDetailForm.title = ''
   dossierDetailForm.case_type = ''
   dossierDetailForm.summary = ''
   dossierDetailForm.status = 'active'
-  resetDossierParticipantForm()
-  resetDossierParticipantCreateForm()
 }
 
 function resetTrackedOnboardingForm(caseType = '') {
@@ -2829,7 +1408,6 @@ function applySelectedDossierDetail(dossier) {
   selectedDossierDetail.value = dossier || null
   if (!dossier) {
     resetDossierDetailForm()
-    resetDossierParticipantRegistryState()
     resetDossierIntelligenceState()
     resetDossierCanonicalGraphState()
     return
@@ -2839,59 +1417,6 @@ function applySelectedDossierDetail(dossier) {
   dossierDetailForm.case_type = dossier.case_type || ''
   dossierDetailForm.summary = dossier.summary || ''
   dossierDetailForm.status = dossier.status || 'active'
-  applyParticipantAliasesToForm(
-    dossierParticipantForm,
-    dossier.participant_aliases || {},
-    dossier.case_type || ''
-  )
-  applyDossierParticipantRegistryPayload({
-    participants: dossier.confirmed_participants || [],
-    mentions: dossier.participant_mentions || [],
-  })
-}
-
-function resetDossierParticipantRegistryState() {
-  dossierParticipantRegistryState.participants = []
-  dossierParticipantRegistryState.mentions = []
-  dossierParticipantRegistryState.candidates = []
-  dossierParticipantRegistryState.error = ''
-  dossierAdvancedSections.value = []
-  dossierParticipantSections.value = []
-  dossierParticipantCandidateDialogVisible.value = false
-  resetDossierParticipantCreateForm()
-  resetParticipantCandidateCreateDraft()
-  Object.keys(dossierParticipantCandidateSelections).forEach((key) => {
-    delete dossierParticipantCandidateSelections[key]
-  })
-  Object.keys(dossierParticipantCandidateDismissed).forEach((key) => {
-    delete dossierParticipantCandidateDismissed[key]
-  })
-}
-
-function applyDossierParticipantRegistryPayload(payload) {
-  dossierParticipantRegistryState.participants = Array.isArray(payload?.participants)
-    ? payload.participants
-    : []
-  dossierParticipantRegistryState.mentions = Array.isArray(payload?.mentions)
-    ? payload.mentions
-    : []
-  dossierParticipantRegistryState.error = ''
-}
-
-function applyDossierParticipantCandidatesPayload(payload) {
-  dossierParticipantRegistryState.candidates = Array.isArray(payload?.candidates)
-    ? payload.candidates
-    : []
-  dossierParticipantRegistryState.error = ''
-  resetParticipantCandidateCreateDraft()
-  Object.keys(dossierParticipantCandidateSelections).forEach((key) => {
-    delete dossierParticipantCandidateSelections[key]
-  })
-  for (const candidate of dossierParticipantRegistryState.candidates) {
-    const key = candidateKey(candidate)
-    if (!key) continue
-    dossierParticipantCandidateSelections[key] = null
-  }
 }
 
 function resetDossierIntelligenceState() {
@@ -2910,6 +1435,12 @@ function resetDossierIntelligenceState() {
   dossierIntelligenceState.traceWarnings = []
   dossierIntelligenceState.error = ''
   dossierPartyNamingSubmittingKey.value = ''
+  dossierCanonicalCrossTaskSubmittingKey.value = ''
+  canonicalManualMergeDialogVisible.value = false
+  canonicalManualMergeSourceEntity.value = null
+  canonicalManualMergeTargetId.value = ''
+  canonicalManualMergeSubmitting.value = false
+  canonicalManualMergeError.value = ''
   partyNamingModalVisible.value = false
   activePartyNamingTask.value = null
   partyNamingInput.value = ''
@@ -3039,12 +1570,50 @@ function currentConversationDossierId() {
   return Number(currentConversation.value?.dossier_id || 0)
 }
 
+function closePartyNamingModalState() {
+  partyNamingModalVisible.value = false
+  activePartyNamingTask.value = null
+  partyNamingInput.value = ''
+  partyNamingError.value = ''
+}
+
+function closeSelfIdentityModalState() {
+  selfIdentityModalVisible.value = false
+  activeSelfIdentityTask.value = null
+}
+
+function closeCanonicalManualMergeDialogState() {
+  canonicalManualMergeDialogVisible.value = false
+  if (!canonicalManualMergeSubmitting.value) {
+    canonicalManualMergeSourceEntity.value = null
+    canonicalManualMergeTargetId.value = ''
+    canonicalManualMergeError.value = ''
+  }
+}
+
+function activeSelfIdentityTasks() {
+  return selectedDossierSelfAnchorIdentityTasks.value.filter((task) => !selfIdentityTaskIsSubmitting(task))
+}
+
+function handleCloseDossierDrawer(done) {
+  if (dossierDrawerClosing.value) return
+  dossierDrawerClosing.value = true
+  closeCanonicalManualMergeDialogState()
+  closePartyNamingModalState()
+  closeSelfIdentityModalState()
+  for (const task of activeSelfIdentityTasks()) {
+    const state = ensureSelfIdentityTaskState(task)
+    state.differentMode = false
+    state.error = ''
+  }
+  done()
+}
+
 function findPendingPartyNamingTaskForCurrentConversation() {
   const conversationId = Number(currentConversationId.value || 0)
   const dossierId = currentConversationDossierId()
   if (conversationId <= 0 || dossierId <= 0) return null
   if (Number(dossierIntelligenceState.dossierId || 0) !== dossierId) return null
-  if (selectedDossierHasCanonicalGraph.value) return null
 
   return selectedDossierCanonicalPartyNamingTasks.value.find((task) => {
     if (!isPendingSelfAnchorPartyNamingTask(task)) return false
@@ -3054,7 +1623,7 @@ function findPendingPartyNamingTaskForCurrentConversation() {
 }
 
 function detectPendingPartyNamingForCurrentConversation() {
-  if (partyNamingSubmitting.value || partyNamingModalVisible.value) return
+  if (dossierDrawerClosing.value || partyNamingSubmitting.value || partyNamingModalVisible.value) return
 
   const task = findPendingPartyNamingTaskForCurrentConversation()
   if (!task) return
@@ -3245,18 +1814,18 @@ function resetDossierCanonicalGraphState() {
 }
 
 function applyDossierCanonicalGraphPayload(dossierId, payload) {
-  const coordinationGraph = payload?.canonical_graph || payload?.coordination_graph || {}
-  const stats = coordinationGraph?.stats || {}
+  const canonicalGraph = payload?.canonical_graph || payload?.coordination_graph || {}
+  const stats = canonicalGraph?.stats || {}
 
   dossierCanonicalGraphState.dossierId = dossierId
-  dossierCanonicalGraphState.entities = Array.isArray(coordinationGraph.entities)
-    ? coordinationGraph.entities
+  dossierCanonicalGraphState.entities = Array.isArray(canonicalGraph.entities)
+    ? canonicalGraph.entities
     : []
-  dossierCanonicalGraphState.edges = Array.isArray(coordinationGraph.edges)
-    ? coordinationGraph.edges
+  dossierCanonicalGraphState.edges = Array.isArray(canonicalGraph.edges)
+    ? canonicalGraph.edges
     : []
-  dossierCanonicalGraphState.tasks = Array.isArray(coordinationGraph.tasks)
-    ? coordinationGraph.tasks
+  dossierCanonicalGraphState.tasks = Array.isArray(canonicalGraph.tasks)
+    ? canonicalGraph.tasks
     : []
   dossierCanonicalGraphState.dossierEntityState =
     payload?.dossier_entity_state && typeof payload.dossier_entity_state === 'object'
@@ -3272,86 +1841,6 @@ function applyDossierCanonicalGraphPayload(dossierId, payload) {
   dossierCanonicalGraphState.view = String(payload?.view || 'canonical').trim() || 'canonical'
   dossierCanonicalGraphState.generatedAt = payload?.generated_at || ''
   dossierCanonicalGraphState.error = ''
-}
-
-function resetDossierGraphState() {
-  dossierGraphState.dossierId = null
-  dossierGraphState.conversationCount = 0
-  dossierGraphState.nodeCount = 0
-  dossierGraphState.edgeCount = 0
-  dossierGraphState.nodes = []
-  dossierGraphState.edges = []
-  dossierGraphState.view = 'raw'
-  dossierGraphState.generatedAt = ''
-  dossierGraphState.warning = ''
-  dossierGraphState.error = ''
-  dossierGraphState.participantAliases = {}
-  dossierGraphLoaded.value = false
-}
-
-function deriveDossierGraphConversationCount(nodes, edges) {
-  const conversationIds = [
-    ...nodes.flatMap((node) => graphNodeConversationIds(node)),
-    ...edges.flatMap((edge) => normalizeGraphConversationIds(edge?.conversation_ids)),
-    ...edges.flatMap((edge) => normalizeGraphConversationIds(edge?.source_conversation_ids)),
-    ...edges.flatMap((edge) => normalizeGraphConversationIds(edge?.target_conversation_ids)),
-  ].filter((value, index, array) => array.indexOf(value) === index)
-
-  if (conversationIds.length) {
-    return conversationIds.length
-  }
-  return Number(selectedDossierConversationCount.value || 0)
-}
-
-function applyDossierGraphPayload(dossierId, payload, options = {}) {
-  const stats = payload?.graph?.stats || {}
-  const graph = payload?.graph || {}
-  const participantAliases = payload?.participant_aliases
-  dossierGraphState.dossierId = dossierId
-  dossierGraphState.conversationCount =
-    Number(stats.conversation_count || 0) ||
-    deriveDossierGraphConversationCount(
-      Array.isArray(graph.nodes) ? graph.nodes : [],
-      Array.isArray(graph.edges) ? graph.edges : []
-    )
-  dossierGraphState.nodeCount = Number(stats.node_count || 0)
-  dossierGraphState.edgeCount = Number(stats.edge_count || 0)
-  dossierGraphState.nodes = Array.isArray(graph.nodes) ? graph.nodes : []
-  dossierGraphState.edges = Array.isArray(graph.edges) ? graph.edges : []
-  dossierGraphState.view = 'raw'
-  dossierGraphState.generatedAt = payload?.generated_at || ''
-  dossierGraphState.warning =
-    typeof options?.warning === 'string' && options.warning
-      ? options.warning
-      : typeof payload?.warning === 'string'
-        ? payload.warning
-        : ''
-  dossierGraphState.error = ''
-  dossierGraphState.participantAliases =
-    participantAliases && typeof participantAliases === 'object'
-      ? participantAliases
-      : selectedDossierDetail.value?.participant_aliases || {}
-  dossierGraphLoaded.value = true
-}
-
-function applyDossierDisplayGraphPayload(dossierId, payload) {
-  const displayGraph = payload?.display_graph || {}
-  const stats = displayGraph?.stats || {}
-  const nodes = Array.isArray(displayGraph.nodes) ? displayGraph.nodes : []
-  const edges = Array.isArray(displayGraph.edges) ? displayGraph.edges : []
-
-  dossierGraphState.dossierId = dossierId
-  dossierGraphState.conversationCount = deriveDossierGraphConversationCount(nodes, edges)
-  dossierGraphState.nodeCount = Number(stats.display_node_count || nodes.length || 0)
-  dossierGraphState.edgeCount = Number(stats.display_edge_count || edges.length || 0)
-  dossierGraphState.nodes = nodes
-  dossierGraphState.edges = edges
-  dossierGraphState.view = String(payload?.view || 'display').trim() || 'display'
-  dossierGraphState.generatedAt = payload?.generated_at || ''
-  dossierGraphState.warning = typeof payload?.warning === 'string' ? payload.warning : ''
-  dossierGraphState.error = ''
-  dossierGraphState.participantAliases = selectedDossierDetail.value?.participant_aliases || {}
-  dossierGraphLoaded.value = true
 }
 
 function resetAnalysis() {
@@ -3380,10 +1869,33 @@ function resetGraph() {
   currentGraph.error = ''
 }
 
+function graphSnapshotSignature(graph = currentGraph) {
+  const nodes = Array.isArray(graph?.nodes) ? graph.nodes : []
+  const edges = Array.isArray(graph?.edges) ? graph.edges : []
+  const nodeParts = nodes
+    .map((node) => {
+      const id = node?.id ?? ''
+      const label = node?.label ?? node?.name ?? ''
+      const type = node?.type ?? node?.category ?? ''
+      return `${id}:${label}:${type}`
+    })
+    .sort()
+  const edgeParts = edges
+    .map((edge) => {
+      const source = edge?.source ?? edge?.from ?? edge?.source_id ?? ''
+      const target = edge?.target ?? edge?.to ?? edge?.target_id ?? ''
+      const label = edge?.label ?? edge?.relation ?? edge?.type ?? ''
+      return `${source}:${label}:${target}`
+    })
+    .sort()
+  return JSON.stringify({ nodes: nodeParts, edges: edgeParts })
+}
+
 function clearCurrentConversationState() {
   currentConversationId.value = null
   currentSessionId.value = ''
   messages.value = []
+  handledGraphClarificationKeys.value = new Set()
   resetAnalysis()
   resetGraph()
 }
@@ -3423,6 +1935,7 @@ function stopGraphRefreshPolling(options = {}) {
     clearTimeout(graphRefreshStopTimer.value)
     graphRefreshStopTimer.value = null
   }
+  graphRefreshInFlight.value = false
   if (options?.status) {
     setGraphSyncState(options.status, options.summary || '')
     if (options.status !== 'error' && options.refreshDossierAfterGraph !== false) {
@@ -3462,6 +1975,13 @@ function buildMessageViewModel(message, index = 0) {
       metadata.execution_trace && typeof metadata.execution_trace === 'object'
         ? metadata.execution_trace
         : null,
+    pendingClarification:
+      metadata.pending_clarification && typeof metadata.pending_clarification === 'object'
+        ? metadata.pending_clarification
+        : null,
+    clarificationQuestions: Array.isArray(metadata.clarification_questions)
+      ? metadata.clarification_questions
+      : [],
     pending: false,
   }
 }
@@ -3556,11 +2076,10 @@ async function refreshDossiers(options = {}) {
     setDossiers(nextDossiers)
 
     if (!nextDossiers.length) {
-      selectedDossierId.value = null
-      applySelectedDossierDetail(null)
-      resetDossierGraphState()
-      return
-    }
+    selectedDossierId.value = null
+    applySelectedDossierDetail(null)
+    return
+  }
 
     const preferredId =
       options.preferredDossierId ??
@@ -3584,7 +2103,6 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
   if (!dossierId) {
     selectedDossierId.value = null
     applySelectedDossierDetail(null)
-    resetDossierGraphState()
     resetDossierCanonicalGraphState()
     resetDossierIntelligenceState()
     return
@@ -3604,7 +2122,6 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
   } catch (error) {
     console.error('Failed to fetch dossier detail:', error)
     applySelectedDossierDetail(null)
-    resetDossierGraphState()
     resetDossierCanonicalGraphState()
     resetDossierIntelligenceState()
     if (!options.silent) {
@@ -3614,116 +2131,11 @@ async function loadSelectedDossierDetail(dossierId, options = {}) {
     dossierDetailLoading.value = false
   }
 
-  if (detailLoaded && options.loadParticipants !== false) {
-    // 旧接口：不再默认加载 participants 和 participant_candidates
-    // await loadSelectedDossierParticipants(dossierId, { silent: true })
-    // await loadSelectedDossierParticipantCandidates(dossierId, { silent: true })
-  }
-  if (detailLoaded && options.loadGraph !== false) {
-    // 旧接口：不再默认加载 raw graph（仅用于调试）
-    // await loadSelectedDossierGraph(dossierId, { silent: true })
-  }
-  if (detailLoaded && options.loadCoordinationGraph !== false) {
+  if (detailLoaded && options.loadCanonicalGraph !== false) {
     await loadSelectedDossierCanonicalGraph(dossierId, { silent: true })
   }
   if (detailLoaded && options.loadIntelligence !== false) {
-    // 旧接口：不再默认加载 intelligence（仅用于 party_naming，H9 已 suppress）
-    // await loadSelectedDossierIntelligence(dossierId)
-  }
-}
-
-async function loadSelectedDossierParticipants(dossierId, options = {}) {
-  if (!dossierId) {
-    resetDossierParticipantRegistryState()
-    return
-  }
-
-  dossierParticipantRegistryLoading.value = true
-  dossierParticipantRegistryState.error = ''
-  try {
-    const { data } = await getDossierParticipants(dossierId)
-    applyDossierParticipantRegistryPayload(data)
-  } catch (error) {
-    console.error('Failed to fetch dossier participants:', error)
-    dossierParticipantRegistryState.error =
-      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
-        ? error.response.data.detail
-        : '主体列表加载失败，请稍后重试'
-    if (!options.silent) {
-      ElMessage.error(dossierParticipantRegistryState.error)
-    }
-  } finally {
-    dossierParticipantRegistryLoading.value = false
-  }
-}
-
-async function loadSelectedDossierParticipantCandidates(dossierId, options = {}) {
-  if (!dossierId) {
-    dossierParticipantRegistryState.candidates = []
-    return
-  }
-
-  dossierParticipantCandidatesLoading.value = true
-  dossierParticipantRegistryState.error = ''
-  try {
-    const { data } = await getDossierParticipantCandidates(dossierId)
-    applyDossierParticipantCandidatesPayload(data)
-  } catch (error) {
-    console.error('Failed to fetch dossier participant candidates:', error)
-    dossierParticipantRegistryState.error =
-      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
-        ? error.response.data.detail
-        : '主体候选加载失败，请稍后重试'
-    if (!options.silent) {
-      ElMessage.error(dossierParticipantRegistryState.error)
-    }
-  } finally {
-    dossierParticipantCandidatesLoading.value = false
-  }
-}
-
-async function loadSelectedDossierGraph(dossierId, options = {}) {
-  if (!dossierId) {
-    resetDossierGraphState()
-    return
-  }
-
-  const isSameDossier = dossierGraphState.dossierId === dossierId
-  if (!isSameDossier) {
-    resetDossierGraphState()
-    dossierGraphState.dossierId = dossierId
-  }
-
-  dossierGraphLoading.value = true
-  dossierGraphState.error = ''
-  dossierGraphState.warning = ''
-  try {
-    try {
-      const { data } = await getDossierDisplayGraph(dossierId)
-      applyDossierDisplayGraphPayload(dossierId, data)
-      return
-    } catch (displayGraphError) {
-      console.warn('Failed to fetch dossier display graph, falling back to raw graph:', displayGraphError)
-    }
-
-    const { data } = await getDossierGraph(dossierId)
-    applyDossierGraphPayload(dossierId, data, {
-      warning: '展示图谱暂不可用，当前回退为原始案卷图谱。',
-    })
-  } catch (error) {
-    console.error('Failed to fetch dossier graph:', error)
-    dossierGraphState.dossierId = dossierId
-    dossierGraphState.warning = ''
-    dossierGraphState.error =
-      typeof error?.response?.data?.detail === 'string' && error.response.data.detail
-        ? error.response.data.detail
-        : '图谱状态加载失败，请稍后重试'
-    dossierGraphLoaded.value = true
-    if (!options.silent) {
-      ElMessage.error(dossierGraphState.error)
-    }
-  } finally {
-    dossierGraphLoading.value = false
+    await loadSelectedDossierIntelligence(dossierId)
   }
 }
 
@@ -3750,7 +2162,7 @@ async function loadSelectedDossierCanonicalGraph(dossierId, options = {}) {
     dossierCanonicalGraphState.error =
       typeof error?.response?.data?.detail === 'string' && error.response.data.detail
         ? error.response.data.detail
-        : '案卷实体连接暂不可用'
+        : '案卷规范实体图暂不可用'
     if (!options.silent) {
       ElMessage.error(dossierCanonicalGraphState.error)
     }
@@ -3786,11 +2198,6 @@ async function loadSelectedDossierIntelligence(dossierId) {
   }
 }
 
-async function handleRefreshDossierGraph() {
-  if (!selectedDossierId.value) return
-  await loadSelectedDossierGraph(selectedDossierId.value)
-}
-
 async function handleRefreshDossierCanonical() {
   if (!selectedDossierId.value) return
   await Promise.allSettled([
@@ -3799,26 +2206,15 @@ async function handleRefreshDossierCanonical() {
   ])
 }
 
-async function handleRefreshDossierIntelligence() {
-  if (!selectedDossierId.value) return
-  await loadSelectedDossierIntelligence(selectedDossierId.value)
-}
-
 async function refreshSelectedDossierAfterPartyNaming(dossierId) {
   await Promise.allSettled([
     loadSelectedDossierCanonicalGraph(dossierId, { silent: true }),
-    // 旧接口：party_naming 后只需刷新 coordination graph
-    // loadSelectedDossierIntelligence(dossierId),
-    // loadSelectedDossierParticipants(dossierId, { silent: true }),
-    // loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
-    // loadSelectedDossierGraph(dossierId, { silent: true }),
+    loadSelectedDossierIntelligence(dossierId),
   ])
 
   const refreshErrors = [
     dossierCanonicalGraphState.error,
-    // dossierIntelligenceState.error,
-    // dossierParticipantRegistryState.error,
-    // dossierGraphState.error,
+    dossierIntelligenceState.error,
   ].filter((value) => String(value || '').trim())
 
   if (refreshErrors.length) {
@@ -3830,22 +2226,33 @@ async function refreshSelectedDossierAfterPartyNaming(dossierId) {
 async function refreshSelectedDossierAfterSelfIdentity(dossierId) {
   await Promise.allSettled([
     loadSelectedDossierCanonicalGraph(dossierId, { silent: true }),
-    // 旧接口：self_identity 后只需刷新 coordination graph
-    // loadSelectedDossierIntelligence(dossierId),
-    // loadSelectedDossierParticipants(dossierId, { silent: true }),
-    // loadSelectedDossierParticipantCandidates(dossierId, { silent: true }),
-    // loadSelectedDossierGraph(dossierId, { silent: true }),
+    loadSelectedDossierIntelligence(dossierId),
   ])
 
   const refreshErrors = [
     dossierCanonicalGraphState.error,
-    // dossierIntelligenceState.error,
-    // dossierParticipantRegistryState.error,
-    // dossierGraphState.error,
+    dossierIntelligenceState.error,
   ].filter((value) => String(value || '').trim())
 
   if (refreshErrors.length) {
     console.error('Failed to refresh dossier views after self identity confirmation:', refreshErrors)
+  }
+  return refreshErrors.length === 0
+}
+
+async function refreshSelectedDossierAfterCanonicalMerge(dossierId) {
+  await Promise.allSettled([
+    loadSelectedDossierCanonicalGraph(dossierId, { silent: true }),
+    loadSelectedDossierIntelligence(dossierId),
+  ])
+
+  const refreshErrors = [
+    dossierCanonicalGraphState.error,
+    dossierIntelligenceState.error,
+  ].filter((value) => String(value || '').trim())
+
+  if (refreshErrors.length) {
+    console.error('Failed to refresh dossier views after canonical merge:', refreshErrors)
   }
   return refreshErrors.length === 0
 }
@@ -3885,6 +2292,260 @@ function selfIdentityTaskErrorMessage(error, fallback = '确认失败') {
     error?.message ||
     fallback
   )
+}
+
+function canonicalCrossConversationTaskKey(task) {
+  return String(task?.task_key || task?.id || '').trim()
+}
+
+function canonicalCrossConversationTaskConfidenceLabel(task) {
+  const confidence = String(task?.confidence || '').trim().toLowerCase()
+  switch (confidence) {
+    case 'high':
+      return '高'
+    case 'medium':
+      return '中'
+    case 'low':
+      return '低'
+    default:
+      return '待评估'
+  }
+}
+
+function canonicalCrossConversationTaskScoreText(task) {
+  const score = Number(task?.score)
+  if (!Number.isFinite(score) || score <= 0) return ''
+  return `评分：${score.toFixed(2)}`
+}
+
+function isCanonicalCrossConversationTaskSubmitting(task) {
+  return dossierCanonicalCrossTaskSubmittingKey.value === canonicalCrossConversationTaskKey(task)
+}
+
+function canonicalManualMergePayload(task) {
+  const sourceEntity = task?.source_entity && typeof task.source_entity === 'object'
+    ? task.source_entity
+    : {}
+  const targetEntity = task?.target_entity && typeof task.target_entity === 'object'
+    ? task.target_entity
+    : {}
+  return {
+    task_key: canonicalCrossConversationTaskKey(task) || null,
+    reason: String(task?.reason || '').trim() || 'user_confirmed_same_entity',
+    source_entity: {
+      id: String(sourceEntity.id || '').trim(),
+      label: String(sourceEntity.label || sourceEntity.canonical_label || '').trim(),
+      entity_type: String(sourceEntity.entity_type || '').trim() || null,
+      role: String(sourceEntity.role || '').trim() || null,
+      source_entity_ids: Array.isArray(sourceEntity.source_entity_ids)
+        ? sourceEntity.source_entity_ids.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+      source_conversation_ids: normalizeGraphConversationIds(sourceEntity.source_conversation_ids),
+    },
+    target_entity: {
+      id: String(targetEntity.id || '').trim(),
+      label: String(targetEntity.label || targetEntity.canonical_label || '').trim(),
+      entity_type: String(targetEntity.entity_type || '').trim() || null,
+      role: String(targetEntity.role || '').trim() || null,
+      source_entity_ids: Array.isArray(targetEntity.source_entity_ids)
+        ? targetEntity.source_entity_ids.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+      source_conversation_ids: normalizeGraphConversationIds(targetEntity.source_conversation_ids),
+    },
+  }
+}
+
+function canonicalManualMergeValidationError(task) {
+  const payload = canonicalManualMergePayload(task)
+  if (!payload.source_entity.id || !payload.target_entity.id) {
+    return '缺少待合并实体标识'
+  }
+  if (!payload.source_entity.label || !payload.target_entity.label) {
+    return '缺少待合并实体名称'
+  }
+  if (!payload.source_entity.source_entity_ids.length || !payload.target_entity.source_entity_ids.length) {
+    return '缺少实体来源信息，暂时无法合并'
+  }
+  if (!payload.source_entity.source_conversation_ids.length || !payload.target_entity.source_conversation_ids.length) {
+    return '缺少来源会话信息，暂时无法合并'
+  }
+  return ''
+}
+
+function canonicalManualMergeErrorMessage(error, fallback = '确认同一实体失败') {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) {
+    return detail.trim()
+  }
+  if (Array.isArray(detail) && detail.length) {
+    return detail
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object') return item.msg || item.message || ''
+        return ''
+      })
+      .filter(Boolean)
+      .join('；') || fallback
+  }
+  return error?.message || fallback
+}
+
+function canonicalEntityDisplayLabel(entity) {
+  const label = String(entity?.label || entity?.canonical_label || '').trim()
+  return label || '未命名主体'
+}
+
+function canonicalEntityStableId(entity) {
+  return String(entity?.id || entity?.entity_id || '').trim()
+}
+
+function canonicalEntitySourceEntityIds(entity) {
+  return Array.isArray(entity?.source_entity_ids)
+    ? entity.source_entity_ids.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+}
+
+function canonicalEntitiesShareSourceConversation(left, right) {
+  const leftIds = new Set(normalizeGraphConversationIds(left?.source_conversation_ids))
+  if (!leftIds.size) return false
+  return normalizeGraphConversationIds(right?.source_conversation_ids).some((conversationId) =>
+    leftIds.has(conversationId)
+  )
+}
+
+function canonicalEntitiesAreCrossConversationMergeCandidates(left, right) {
+  if (!left || !right) return false
+  if (!canonicalEntityStableId(left) || !canonicalEntityStableId(right)) return false
+  const leftConversations = normalizeGraphConversationIds(left?.source_conversation_ids)
+  const rightConversations = normalizeGraphConversationIds(right?.source_conversation_ids)
+  if (!leftConversations.length || !rightConversations.length) return false
+  return !canonicalEntitiesShareSourceConversation(left, right)
+}
+
+function canonicalEntityManualMergePayloadEntity(entity) {
+  const id = canonicalEntityStableId(entity)
+  return {
+    id,
+    entity_id: id,
+    label: canonicalEntityDisplayLabel(entity),
+    entity_type: String(entity?.entity_type || '').trim() || null,
+    role: String(entity?.role || '').trim() || null,
+    source_entity_ids: canonicalEntitySourceEntityIds(entity),
+    source_conversation_ids: normalizeGraphConversationIds(entity?.source_conversation_ids),
+  }
+}
+
+function canonicalManualMergeEntityValidationError(payloadEntity, label) {
+  if (!payloadEntity.id) return `${label}缺少实体标识，暂时无法合并`
+  if (!payloadEntity.label) return `${label}缺少实体名称，暂时无法合并`
+  if (!payloadEntity.source_entity_ids.length) return `${label}缺少来源实体信息，暂时无法合并`
+  if (!payloadEntity.source_conversation_ids.length) return `${label}缺少来源会话信息，暂时无法合并`
+  return ''
+}
+
+function canonicalDecisionNodePayload(node, fallbackEntity = null) {
+  const conversationId = Number(node?.conversation_id || 0)
+  const graphNodeId = String(node?.graph_node_id || '').trim()
+  if (conversationId <= 0 || !graphNodeId) return null
+
+  const fallbackLabel = canonicalEntityDisplayLabel(fallbackEntity)
+  const graphNodeLabel = String(node?.graph_node_label || node?.label || node?.raw_label || '').trim() || fallbackLabel
+  const graphNodeType = String(
+    node?.graph_node_type || node?.entity_type || fallbackEntity?.entity_type || ''
+  ).trim() || null
+  const rawLabel = String(node?.raw_label || node?.label || graphNodeLabel || fallbackLabel).trim() || fallbackLabel
+
+  return {
+    conversation_id: conversationId,
+    graph_node_id: graphNodeId,
+    raw_label: rawLabel,
+    graph_node_label: graphNodeLabel || null,
+    graph_node_type: graphNodeType,
+  }
+}
+
+function canonicalEntityToCrossConversationNodes(entity) {
+  const mentions = Array.isArray(entity?.mentions)
+    ? entity.mentions.filter((item) => item && typeof item === 'object')
+    : []
+
+  const fromMentions = mentions
+    .map((mention) => canonicalDecisionNodePayload(mention, entity))
+    .filter(Boolean)
+
+  if (fromMentions.length) {
+    return fromMentions.filter((item, index, list) =>
+      list.findIndex(
+        (candidate) =>
+          candidate.conversation_id === item.conversation_id &&
+          candidate.graph_node_id === item.graph_node_id
+      ) === index
+    )
+  }
+
+  const conversationIds = normalizeGraphConversationIds(entity?.source_conversation_ids)
+  const sourceEntityIds = Array.isArray(entity?.source_entity_ids)
+    ? entity.source_entity_ids.map((item) => String(item || '').trim()).filter(Boolean)
+    : []
+
+  const fallbackNodes = []
+  const count = Math.min(conversationIds.length, sourceEntityIds.length)
+  for (let index = 0; index < count; index += 1) {
+    const node = canonicalDecisionNodePayload({
+      conversation_id: conversationIds[index],
+      graph_node_id: sourceEntityIds[index],
+      raw_label: canonicalEntityDisplayLabel(entity),
+      graph_node_label: canonicalEntityDisplayLabel(entity),
+      graph_node_type: String(entity?.entity_type || '').trim() || null,
+    }, entity)
+    if (node) fallbackNodes.push(node)
+  }
+
+  return fallbackNodes.filter((item, index, list) =>
+    list.findIndex(
+      (candidate) =>
+        candidate.conversation_id === item.conversation_id &&
+        candidate.graph_node_id === item.graph_node_id
+    ) === index
+  )
+}
+
+function canonicalRejectTaskNodePairs(task) {
+  const subjectNode = canonicalDecisionNodePayload(task?.subject_node, task?.source_entity)
+  const objectNode = canonicalDecisionNodePayload(task?.object_node, task?.target_entity)
+  if (subjectNode && objectNode) {
+    return [{ sourceNode: subjectNode, targetNode: objectNode }]
+  }
+
+  const sourceNodes = canonicalEntityToCrossConversationNodes(task?.source_entity)
+  const targetNodes = canonicalEntityToCrossConversationNodes(task?.target_entity)
+  const pairs = []
+
+  for (const sourceNode of sourceNodes) {
+    for (const targetNode of targetNodes) {
+      if (
+        sourceNode.conversation_id === targetNode.conversation_id &&
+        sourceNode.graph_node_id === targetNode.graph_node_id
+      ) {
+        continue
+      }
+      pairs.push({ sourceNode, targetNode })
+    }
+  }
+
+  return pairs
+}
+
+function canonicalRejectValidationError(task) {
+  const sourceLabel = canonicalEntityDisplayLabel(task?.source_entity)
+  const targetLabel = canonicalEntityDisplayLabel(task?.target_entity)
+  if (!sourceLabel || !targetLabel) {
+    return '缺少候选实体名称，暂时无法标记'
+  }
+  if (!canonicalRejectTaskNodePairs(task).length) {
+    return '该候选缺少来源节点信息，暂时无法标记为不同实体'
+  }
+  return ''
 }
 
 function partyNamingErrorMessage(error, fallback = '确认主体名称失败') {
@@ -3966,12 +2627,6 @@ async function submitPartyNamingTask(task, displayLabel, options = {}) {
     dossierPartyNamingSubmittingKey.value = ''
     partyNamingSubmitting.value = false
   }
-}
-
-async function handleConfirmPartyNaming(task) {
-  const taskKey = dossierIntelligenceTaskKey(task)
-  const displayLabel = String(dossierPartyNamingDrafts[taskKey] || '').trim()
-  await submitPartyNamingTask(task, displayLabel)
 }
 
 async function handleConfirmPartyNamingModal() {
@@ -4085,21 +2740,227 @@ async function handleConfirmSelfIdentityDifferent(task) {
   }
 }
 
-function coordinationEntityConversationCount(entity) {
+async function handleConfirmCrossConversationSameEntity(task) {
+  const dossierId = Number(selectedDossierId.value || 0)
+  if (dossierId <= 0) {
+    ElMessage.error('当前案卷不可用')
+    return
+  }
+
+  const validationError = canonicalManualMergeValidationError(task)
+  if (validationError) {
+    ElMessage.error(validationError)
+    return
+  }
+
+  const payload = canonicalManualMergePayload(task)
+  const sourceLabel = payload.source_entity.label || '来源实体'
+  const targetLabel = payload.target_entity.label || '候选实体'
+  const confidenceLabel = canonicalCrossConversationTaskConfidenceLabel(task)
+  const scoreText = canonicalCrossConversationTaskScoreText(task)
+
+  try {
+    await ElMessageBox.confirm(
+      `确认将“${sourceLabel}”与“${targetLabel}”标记为同一案卷实体？${scoreText ? `\n\n${scoreText}，置信度：${confidenceLabel}` : ''}`,
+      '确认同一实体',
+      {
+        confirmButtonText: '确认合并',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  dossierCanonicalCrossTaskSubmittingKey.value = canonicalCrossConversationTaskKey(task)
+  try {
+    const { data } = await manualMergeDossierCanonicalEntities(dossierId, payload)
+    if (data?.status && data.status !== 'success') {
+      throw new Error(data.message || '确认同一实体失败')
+    }
+
+    const refreshed = await refreshSelectedDossierAfterCanonicalMerge(dossierId)
+    if (refreshed) {
+      ElMessage.success(`已确认“${sourceLabel}”与“${targetLabel}”为同一实体`)
+    } else {
+      ElMessage.warning(`已确认“${sourceLabel}”与“${targetLabel}”为同一实体，但部分视图刷新失败，请手动刷新`)
+    }
+  } catch (error) {
+    console.error('Failed to confirm canonical cross-conversation same entity:', error)
+    ElMessage.error(canonicalManualMergeErrorMessage(error))
+  } finally {
+    dossierCanonicalCrossTaskSubmittingKey.value = ''
+  }
+}
+
+async function handleRejectCrossConversationSameEntity(task) {
+  const dossierId = Number(selectedDossierId.value || currentConversationDossierId() || 0)
+  if (dossierId <= 0) {
+    ElMessage.error('当前案卷不可用')
+    return
+  }
+
+  const validationError = canonicalRejectValidationError(task)
+  if (validationError) {
+    ElMessage.error(validationError)
+    return
+  }
+
+  const taskKey = canonicalCrossConversationTaskKey(task)
+  const sourceLabel = canonicalEntityDisplayLabel(task?.source_entity)
+  const targetLabel = canonicalEntityDisplayLabel(task?.target_entity)
+  const nodePairs = canonicalRejectTaskNodePairs(task)
+
+  try {
+    await ElMessageBox.confirm(
+      `确认将“${sourceLabel}”与“${targetLabel}”标记为不是同一实体？`,
+      '标记为不同实体',
+      {
+        confirmButtonText: '确认',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+  } catch {
+    return
+  }
+
+  dossierCanonicalCrossTaskSubmittingKey.value = taskKey
+  try {
+    await Promise.all(
+      nodePairs.map(({ sourceNode, targetNode }) =>
+        decideDossierCrossConversationResolution(dossierId, {
+          subject: 'cross_conversation_identity',
+          decision: 'not_same',
+          source_node: sourceNode,
+          target_node: targetNode,
+          candidate_key: taskKey || null,
+          task_key: taskKey || null,
+          reason: 'user_marked_not_same',
+        })
+      )
+    )
+
+    const refreshed = await refreshSelectedDossierAfterCanonicalMerge(dossierId)
+    if (refreshed) {
+      ElMessage.success(`已将“${sourceLabel}”与“${targetLabel}”标记为不同实体`)
+    } else {
+      ElMessage.warning(`已将“${sourceLabel}”与“${targetLabel}”标记为不同实体，但部分视图刷新失败，请手动刷新`)
+    }
+  } catch (error) {
+    console.error('Failed to reject canonical cross-conversation same entity:', error)
+    ElMessage.error(canonicalManualMergeErrorMessage(error, '标记失败，请稍后重试'))
+  } finally {
+    dossierCanonicalCrossTaskSubmittingKey.value = ''
+  }
+}
+
+function resetCanonicalManualMergeDialog() {
+  if (canonicalManualMergeSubmitting.value) return
+  canonicalManualMergeSourceEntity.value = null
+  canonicalManualMergeTargetId.value = ''
+  canonicalManualMergeError.value = ''
+}
+
+function handleOpenManualMerge(sourceEntity) {
+  const dossierId = Number(selectedDossierId.value || 0)
+  if (dossierId <= 0) {
+    ElMessage.error('当前案卷不可用')
+    return
+  }
+
+  const sourceEntityId = canonicalEntityStableId(sourceEntity)
+  if (!sourceEntityId) {
+    ElMessage.error('缺少来源实体标识，暂时无法合并')
+    return
+  }
+
+  canonicalManualMergeSourceEntity.value = sourceEntity
+  canonicalManualMergeTargetId.value = ''
+  canonicalManualMergeError.value = ''
+  if (!canonicalManualMergeTargetOptions.value.length) {
+    canonicalManualMergeSourceEntity.value = null
+    ElMessage.warning('当前没有可跨会话合并的其他实体')
+    return
+  }
+  canonicalManualMergeDialogVisible.value = true
+}
+
+async function submitCanonicalManualMerge() {
+  const dossierId = Number(selectedDossierId.value || 0)
+  if (dossierId <= 0) {
+    canonicalManualMergeError.value = '当前案卷不可用'
+    return
+  }
+
+  const sourceEntity = canonicalManualMergeSourceEntity.value
+  const targetEntity = canonicalManualMergeSelectedTarget.value?.entity
+  if (!sourceEntity || !targetEntity) {
+    canonicalManualMergeError.value = '请选择要合并的来源实体和目标实体'
+    return
+  }
+
+  const sourcePayload = canonicalEntityManualMergePayloadEntity(sourceEntity)
+  const targetPayload = canonicalEntityManualMergePayloadEntity(targetEntity)
+  const validationError =
+    canonicalManualMergeEntityValidationError(sourcePayload, '来源实体') ||
+    canonicalManualMergeEntityValidationError(targetPayload, '目标实体')
+  if (validationError) {
+    canonicalManualMergeError.value = validationError
+    return
+  }
+
+  if (sourcePayload.id === targetPayload.id) {
+    canonicalManualMergeError.value = '来源实体和目标实体不能相同'
+    return
+  }
+
+  const payload = {
+    reason: 'user_manual_selected_target',
+    source_entity: sourcePayload,
+    target_entity: targetPayload,
+  }
+
+  canonicalManualMergeSubmitting.value = true
+  canonicalManualMergeError.value = ''
+  try {
+    const { data } = await manualMergeDossierCanonicalEntities(dossierId, payload)
+    if (data?.status && data.status !== 'success') {
+      throw new Error(data.message || '手动合并失败')
+    }
+
+    const refreshed = await refreshSelectedDossierAfterCanonicalMerge(dossierId)
+    canonicalManualMergeDialogVisible.value = false
+    if (refreshed) {
+      ElMessage.success(`已将“${sourcePayload.label}”合并到“${targetPayload.label}”`)
+    } else {
+      ElMessage.warning(`已将“${sourcePayload.label}”合并到“${targetPayload.label}”，但部分视图刷新失败，请手动刷新`)
+    }
+  } catch (error) {
+    console.error('Failed to manual merge canonical entities:', error)
+    canonicalManualMergeError.value = canonicalManualMergeErrorMessage(error, '手动合并失败')
+    ElMessage.error(canonicalManualMergeError.value)
+  } finally {
+    canonicalManualMergeSubmitting.value = false
+  }
+}
+
+function canonicalEntityConversationCount(entity) {
   return normalizeGraphConversationIds(entity?.source_conversation_ids).length
 }
 
-function coordinationEntitySourceLabels(entity) {
+function canonicalEntitySourceLabels(entity) {
   const labels = Array.isArray(entity?.source_labels) ? entity.source_labels : []
   return labels.map((item) => String(item || '').trim()).filter(Boolean)
 }
 
-function coordinationEntitySourceLabelText(entity) {
-  const labels = coordinationEntitySourceLabels(entity)
+function canonicalEntitySourceLabelText(entity) {
+  const labels = canonicalEntitySourceLabels(entity)
   return labels.length ? labels.join(' / ') : '暂无来源称呼'
 }
 
-function coordinationEntitySourceConversations(entity) {
+function canonicalEntitySourceConversations(entity) {
   const items = Array.isArray(entity?.source_conversations) ? entity.source_conversations : []
   return items
     .map((item) => {
@@ -4118,7 +2979,25 @@ function coordinationEntitySourceConversations(entity) {
     .filter((item) => item.conversation_id > 0)
 }
 
-function coordinationEntityStatusLabel(status) {
+function canonicalEntitySourceConversationBadges(entity) {
+  const sourceConversations = canonicalEntitySourceConversations(entity)
+  const bestConversationId = canonicalEntityDetailConversationId(entity)
+  const fromSourceConversations = sourceConversations.map((item) => ({
+    id: item.conversation_id,
+    label: item.title || formatGraphConversationLabel(item.conversation_id),
+    isBest: item.is_best || item.conversation_id === bestConversationId,
+  }))
+
+  if (fromSourceConversations.length) return fromSourceConversations
+
+  return normalizeGraphConversationIds(entity?.source_conversation_ids).map((conversationId) => ({
+    id: conversationId,
+    label: formatGraphConversationLabel(conversationId),
+    isBest: conversationId === bestConversationId,
+  }))
+}
+
+function canonicalEntityStatusLabel(status) {
   switch (String(status || '').trim()) {
     case 'canonical':
       return '案卷实体'
@@ -4129,7 +3008,7 @@ function coordinationEntityStatusLabel(status) {
     case 'pending_naming':
       return '待命名主体'
     case 'isolated_anchor':
-      return '未连接主体锚点'
+      return '单会话主体'
     case 'generic_label':
       return '泛化称呼'
     case 'unconfirmed_label':
@@ -4139,33 +3018,33 @@ function coordinationEntityStatusLabel(status) {
   }
 }
 
-function coordinationEntityRawNodeIds(entity) {
+function canonicalEntityRawNodeIds(entity) {
   return Array.isArray(entity?.raw_node_ids)
     ? entity.raw_node_ids.map((item) => String(item || '').trim()).filter(Boolean)
     : []
 }
 
-function coordinationEntityDetailConversationId(entity) {
+function canonicalEntityDetailConversationId(entity) {
   const bestConversationId = Number(entity?.best_conversation_id || 0)
   if (bestConversationId > 0) return bestConversationId
   return normalizeGraphConversationIds(entity?.source_conversation_ids)[0] || 0
 }
 
-function coordinationEntityDetailConversationLabel(entity) {
-  const conversationId = coordinationEntityDetailConversationId(entity)
+function canonicalEntityDetailConversationLabel(entity) {
+  const conversationId = canonicalEntityDetailConversationId(entity)
   return conversationId > 0 ? formatGraphConversationLabel(conversationId) : '暂无可跳转会话'
 }
 
-function coordinationEntityIdentityReason(entity) {
+function canonicalEntityIdentityReason(entity) {
   const task = selectedDossierCanonicalIdentityTaskLookup.value[String(entity?.id || '').trim()]
   return String(task?.reason || '').trim()
 }
 
-function coordinationEntityHasDetailConversation(entity) {
-  return coordinationEntityDetailConversationId(entity) > 0
+function canonicalEntityHasDetailConversation(entity) {
+  return canonicalEntityDetailConversationId(entity) > 0
 }
 
-function coordinationTaskEntitySummary(entity) {
+function canonicalTaskEntitySummary(entity) {
   if (!entity || typeof entity !== 'object') return '未标注'
   const label = String(entity.label || entity.canonical_label || '').trim() || '未命名实体'
   const role = String(entity.role || '').trim()
@@ -4181,7 +3060,7 @@ function coordinationTaskEntitySummary(entity) {
   return suffix.length ? `${label}（${suffix.join('，')}）` : label
 }
 
-function coordinationTaskPairTitle(task) {
+function canonicalTaskPairTitle(task) {
   const sourceLabel =
     String(task?.source_entity?.label || task?.source_entity?.canonical_label || '').trim() ||
     '来源实体'
@@ -4202,8 +3081,8 @@ function selfAnchorIdentityTaskPrompt(task) {
   return `${rawLabel} 是否也是 ${targetLabel}？`
 }
 
-async function handleOpenCoordinationEntityConversation(entity) {
-  const conversationId = coordinationEntityDetailConversationId(entity)
+async function handleOpenCanonicalEntityConversation(entity) {
+  const conversationId = canonicalEntityDetailConversationId(entity)
   if (conversationId <= 0) {
     ElMessage.info('暂无可跳转会话')
     return
@@ -4211,7 +3090,7 @@ async function handleOpenCoordinationEntityConversation(entity) {
   await switchConversation(conversationId)
 }
 
-async function handleOpenCoordinationGraphNodeConversation(node) {
+async function handleOpenCanonicalGraphNodeConversation(node) {
   const conversationId = Number(node?.actionConversationId || 0)
   if (conversationId <= 0) {
     ElMessage.info('暂无可跳转会话')
@@ -4220,31 +3099,30 @@ async function handleOpenCoordinationGraphNodeConversation(node) {
   await switchConversation(conversationId)
 }
 
-function handleOpenCoordinationIdentity() {
-  if (!selectedDossierPendingParticipantCount.value) {
-    ElMessage.info('请到主体关系确认模块刷新后处理')
-    return
-  }
-  openParticipantCandidateDialog()
-}
-
-async function handleOpenCoordinationNaming() {
-  await nextTick()
-  if (
-    dossierCanonicalNamingRef.value &&
-    typeof dossierCanonicalNamingRef.value.scrollIntoView === 'function'
-  ) {
-    dossierCanonicalNamingRef.value.scrollIntoView({
-      behavior: 'smooth',
-      block: 'start',
-    })
-    return
-  }
-  if (dossierIntelligenceState.error) {
-    ElMessage.info('待命名任务暂不可用，请稍后刷新')
-    return
-  }
-  ElMessage.info('请在下方命名确认区处理')
+const canonicalDrawerHelpers = {
+  canonicalEntityConversationCount,
+  canonicalEntityDetailConversationLabel,
+  canonicalEntityHasDetailConversation,
+  canonicalEntitySourceLabelText,
+  canonicalEntitySourceConversationBadges,
+  canonicalEntityIdentityReason,
+  canonicalTaskPairTitle,
+  canonicalTaskEntitySummary,
+  canonicalTaskConfidenceLabel: canonicalCrossConversationTaskConfidenceLabel,
+  canonicalTaskScoreText: canonicalCrossConversationTaskScoreText,
+  canonicalTaskIsSubmitting: isCanonicalCrossConversationTaskSubmitting,
+  formatGraphConversationLabel,
+  formatGraphConversationListLabel,
+  selfAnchorIdentityTaskPrompt,
+  selfIdentityTaskState,
+  selfIdentityTaskIsDifferentMode,
+  selfIdentityTaskError,
+  selfIdentityTaskIsSubmitting,
+  selfIdentityTaskIsSubmittingAction,
+  dossierIntelligenceTaskKey,
+  isPartyNamingSubmitting,
+  canSubmitPartyNaming,
+  formatDossierIntelligenceEvidenceList,
 }
 
 function graphNodeRawNodeIds(node) {
@@ -4270,7 +3148,7 @@ function isConversationGraphNode(node) {
   return nodeId.startsWith('conversation:') || nodeType === 'conversation'
 }
 
-function coordinationSupplementCategory(node) {
+function canonicalSupplementCategory(node) {
   const nodeType = String(node?.entity_type || node?.type || node?.graph_node_type || '').trim().toLowerCase()
   switch (nodeType) {
     case 'event':
@@ -4291,24 +3169,24 @@ function coordinationSupplementCategory(node) {
   }
 }
 
-function coordinationSupplementStatusLabel(node) {
-  const { label } = coordinationSupplementCategory(node)
+function canonicalSupplementStatusLabel(node) {
+  const { label } = canonicalSupplementCategory(node)
   return `关联${label}`
 }
 
-function buildCoordinationEntityGraphNode(entity) {
+function buildCanonicalEntityGraphNode(entity) {
   const sourceConversationIds = normalizeGraphConversationIds(entity?.source_conversation_ids)
-  const sourceLabels = coordinationEntitySourceLabels(entity)
-  const sourceConversations = coordinationEntitySourceConversations(entity)
-  const rawNodeIds = coordinationEntityRawNodeIds(entity)
+  const sourceLabels = canonicalEntitySourceLabels(entity)
+  const sourceConversations = canonicalEntitySourceConversations(entity)
+  const rawNodeIds = canonicalEntityRawNodeIds(entity)
   const participantId = Number(entity?.participant_id || 0)
-  const detailConversationId = coordinationEntityDetailConversationId(entity)
+  const detailConversationId = canonicalEntityDetailConversationId(entity)
   const status = String(entity?.status || '').trim()
   const aliases = Array.isArray(entity?.aliases)
     ? entity.aliases.map((item) => String(item || '').trim()).filter(Boolean)
     : sourceLabels.filter((item) => item !== String(entity?.label || '').trim())
   const reason =
-    coordinationEntityIdentityReason(entity) ||
+    canonicalEntityIdentityReason(entity) ||
     String(entity?.best_conversation_reason || '').trim() ||
     (status === 'isolated_anchor' ? '该会话暂未与其他会话形成确认连接' : '')
 
@@ -4316,7 +3194,7 @@ function buildCoordinationEntityGraphNode(entity) {
     id: String(entity?.id || '').trim(),
     label: String(entity?.label || '').trim() || sourceLabels[0] || '未命名主体',
     category: status || 'other',
-    categoryLabel: coordinationEntityStatusLabel(status),
+    categoryLabel: canonicalEntityStatusLabel(status),
     labels: sourceLabels,
     sourceConversations,
     properties: {
@@ -4326,7 +3204,7 @@ function buildCoordinationEntityGraphNode(entity) {
     },
     detailRows: [
       { key: '类型', value: formatGraphNodeType(entity?.entity_type) },
-      { key: '状态', value: coordinationEntityStatusLabel(status) },
+      { key: '状态', value: canonicalEntityStatusLabel(status) },
       {
         key: '来源会话',
         value: sourceConversationIds.length
@@ -4350,13 +3228,13 @@ function buildCoordinationEntityGraphNode(entity) {
   }
 }
 
-function buildCoordinationSupplementGraphNode(node) {
+function buildCanonicalSupplementGraphNode(node) {
   const sourceConversationIds = graphNodeConversationIds(node)
   const rawLabels = graphNodeRawLabels(node)
   const rawNodeIds = graphNodeRawNodeIds(node)
   const participantId = Number(node?.participant_id || node?.properties?.participant_id || 0)
   const detailConversationId = sourceConversationIds[0] || 0
-  const category = coordinationSupplementCategory(node)
+  const category = canonicalSupplementCategory(node)
 
   return {
     id: `display:${String(node?.id || '').trim()}`,
@@ -4367,7 +3245,7 @@ function buildCoordinationSupplementGraphNode(node) {
     properties: node?.properties && typeof node.properties === 'object' ? node.properties : {},
     detailRows: [
       { key: '类型', value: formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type) },
-      { key: '状态', value: coordinationSupplementStatusLabel(node) },
+      { key: '状态', value: canonicalSupplementStatusLabel(node) },
       {
         key: '来源会话',
         value: sourceConversationIds.length
@@ -4387,7 +3265,7 @@ function buildCoordinationSupplementGraphNode(node) {
   }
 }
 
-function matchCoordinationEntityIdForDisplayNode(node, participantLookup, rawNodeLookup) {
+function matchCanonicalEntityIdForDisplayNode(node, participantLookup, rawNodeLookup) {
   if (!node || typeof node !== 'object' || isConversationGraphNode(node)) return ''
   const participantId = Number(node?.participant_id || node?.properties?.participant_id || 0)
   if (participantId > 0 && participantLookup.has(participantId)) {
@@ -4401,13 +3279,13 @@ function matchCoordinationEntityIdForDisplayNode(node, participantLookup, rawNod
   return ''
 }
 
-function buildCoordinationGraphLegendItems(nodes) {
+function buildCanonicalGraphLegendItems(nodes) {
   const baseItems = [
     { category: 'canonical', label: '案卷实体', color: '#2563eb' },
     { category: 'confirmed', label: '已连接主体', color: '#2563eb' },
     { category: 'pending_identity', label: '待确认主体', color: '#f59e0b' },
     { category: 'pending_naming', label: '待命名主体', color: '#7c3aed' },
-    { category: 'isolated_anchor', label: '未连接主体锚点', color: '#64748b' },
+    { category: 'isolated_anchor', label: '单会话主体', color: '#64748b' },
     { category: 'generic_label', label: '泛化称呼', color: '#94a3b8' },
     { category: 'unconfirmed_label', label: '未确认称呼', color: '#94a3b8' },
     { category: 'other', label: '其他节点', color: '#475569' },
@@ -4418,14 +3296,14 @@ function buildCoordinationGraphLegendItems(nodes) {
   return baseItems.filter((item) => usedCategories.has(item.category))
 }
 
-function normalizeCoordinationEdgeEvidence(edge) {
+function normalizeCanonicalEdgeEvidence(edge) {
   return Array.isArray(edge?.evidence)
     ? edge.evidence.filter((item) => item && typeof item === 'object')
     : []
 }
 
-function buildCoordinationRelationGraphEdge(edge) {
-  const evidence = normalizeCoordinationEdgeEvidence(edge)
+function buildCanonicalRelationGraphEdge(edge) {
+  const evidence = normalizeCanonicalEdgeEvidence(edge)
   const edgeConversationIds = [
     ...normalizeGraphConversationIds(edge?.source_conversation_ids),
     ...evidence.flatMap((item) => normalizeGraphConversationIds(item?.conversation_id)),
@@ -4450,7 +3328,7 @@ function buildCoordinationRelationGraphEdge(edge) {
   }
 }
 
-function appendCoordinationRelationDetails(graphNodes, graphEdges) {
+function appendCanonicalRelationDetails(graphNodes, graphEdges) {
   const incidentEdgeLookup = new Map()
   for (const node of graphNodes) {
     incidentEdgeLookup.set(node.id, [])
@@ -4478,7 +3356,7 @@ function appendCoordinationRelationDetails(graphNodes, graphEdges) {
       if (label && !relationLabels.includes(label)) {
         relationLabels.push(label)
       }
-      for (const evidence of normalizeCoordinationEdgeEvidence(edge)) {
+      for (const evidence of normalizeCanonicalEdgeEvidence(edge)) {
         const summary = String(
           evidence?.summary || evidence?.reason || evidence?.message_text || evidence?.raw_edge_id || ''
         ).trim()
@@ -4519,24 +3397,24 @@ function appendCoordinationRelationDetails(graphNodes, graphEdges) {
   }
 }
 
-function buildDossierCoordinationGraphPreview(payload = {}) {
+function buildDossierCanonicalGraphPreview(payload = {}) {
   const entities = Array.isArray(payload.entities) ? payload.entities : []
-  const coordinationEdges = Array.isArray(payload.edges) ? payload.edges : []
+  const canonicalEdges = Array.isArray(payload.edges) ? payload.edges : []
   const graphNodes = []
   const graphEdges = []
   const nodeLookup = new Map()
 
   for (const entity of entities) {
-    const graphNode = buildCoordinationEntityGraphNode(entity)
+    const graphNode = buildCanonicalEntityGraphNode(entity)
     if (!graphNode.id) continue
     graphNodes.push(graphNode)
     nodeLookup.set(graphNode.id, graphNode)
   }
 
   const edgeKeys = new Set()
-  for (const edge of coordinationEdges) {
+  for (const edge of canonicalEdges) {
     if (graphEdges.length >= DOSSIER_COORDINATION_GRAPH_EDGE_LIMIT) break
-    const graphEdge = buildCoordinationRelationGraphEdge(edge)
+    const graphEdge = buildCanonicalRelationGraphEdge(edge)
     if (
       !graphEdge.source ||
       !graphEdge.target ||
@@ -4552,21 +3430,21 @@ function buildDossierCoordinationGraphPreview(payload = {}) {
     graphEdges.push(graphEdge)
   }
 
-  appendCoordinationRelationDetails(graphNodes, graphEdges)
+  appendCanonicalRelationDetails(graphNodes, graphEdges)
 
   return {
-    metaLabel: '案卷实体连接图谱',
+    metaLabel: '案卷规范实体图',
     query:
       '这里只展示案卷中的责任主体和关键主体关系，例如个人、公司、单位、机构及其代表关系。劳动合同、社保、金额、通知等事实信息会作为详情证据展示，不作为主节点。',
     nodes: graphNodes,
     edges: graphEdges,
     loading: Boolean(payload.loading),
     error: String(payload.error || '').trim(),
-    loadingText: '正在加载案卷实体连接图谱...',
+    loadingText: '正在加载案卷规范实体图...',
     emptyText:
-      '暂无案卷实体连接图谱。绑定并生成多个会话图谱后，将在这里展示可连接主体。',
-    ariaLabel: '案卷实体连接图谱',
-    legendItems: buildCoordinationGraphLegendItems(graphNodes),
+      '暂无案卷规范实体图。绑定并生成多个会话图谱后，将在这里展示可连接主体。',
+    ariaLabel: '案卷规范实体图',
+    legendItems: buildCanonicalGraphLegendItems(graphNodes),
   }
 }
 
@@ -4644,38 +3522,12 @@ async function handleAttachDossier(dossier) {
     await refreshDossiers({ silent: true, preferredDossierId: dossier.id })
     await loadSelectedDossierDetail(dossier.id, { silent: true })
     ElMessage.success('当前会话已绑定到案卷')
-    await maybePromptParticipantResolutionAfterAttachment(dossier)
   } catch (error) {
     console.error('Failed to attach conversation to dossier:', error)
     ElMessage.error('绑定案卷失败')
   } finally {
     dossierBindingId.value = null
   }
-}
-
-async function maybePromptParticipantResolutionAfterAttachment(dossier) {
-  const pendingCount = selectedDossierPendingParticipantCount.value
-  if (!pendingCount) return
-
-  dossierParticipantCandidateDialogVisible.value = true
-
-  const firstCandidate = selectedDossierParticipantCandidates.value[0]
-  const rawLabels = firstCandidate?.raw_labels?.join(' / ') || firstCandidate?.suggested_label || '新主体'
-  const existingLabel = String(
-    firstCandidate?.recommended_participant_label || firstCandidate?.existing_participant_label || ''
-  ).trim()
-  const tip =
-    pendingCount === 1
-      ? isCrossConversationCandidate(firstCandidate)
-        ? existingLabel
-          ? `新绑定会话中的实体可能与案卷内已确认主体「${existingLabel}」是同一主体。请确认是否合并。`
-          : '新绑定会话中出现一条跨会话主体线索。请确认两个会话中的实体是否为同一主体。'
-        : existingLabel
-          ? `新会话中出现“${rawLabels}”，可能与案卷中的“${existingLabel}”是同一主体。请确认是否合并。`
-          : `新会话中出现“${rawLabels}”这个新称呼。请确认它是否属于已有主体，或新建为独立主体。`
-      : `新绑定会话中出现 ${pendingCount} 条待确认主体线索。请优先确认跨会话中的同一主体关系。`
-
-  ElMessage.warning(tip)
 }
 
 async function handleSelectDossier(dossier) {
@@ -4705,9 +3557,6 @@ async function handleArchiveDossier(dossier) {
 
   try {
     await archiveDossier(dossier.id)
-    if (selectedDossierId.value === dossier.id) {
-      dossierParticipantCandidateDialogVisible.value = false
-    }
     await refreshDossiers({ silent: true })
     if (dossierStatusFilter.value === 'active' && selectedDossierId.value === dossier.id) {
       selectedDossierId.value = filteredDossiers.value[0]?.id || null
@@ -4716,7 +3565,6 @@ async function handleArchiveDossier(dossier) {
       await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
     } else {
       applySelectedDossierDetail(null)
-      resetDossierGraphState()
     }
     ElMessage.success('案卷已归档')
   } catch (error) {
@@ -4750,18 +3598,15 @@ async function handleHardDeleteDossier(dossier) {
 
   try {
     const { data } = await hardDeleteDossier(dossier.id)
-    dossierParticipantCandidateDialogVisible.value = false
     await refreshConversationList(currentConversationId.value)
     await refreshDossiers({ silent: true })
     if (deletingSelectedDossier) {
       selectedDossierId.value = null
       applySelectedDossierDetail(null)
-      resetDossierGraphState()
     } else if (selectedDossierId.value) {
       await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
     } else {
       applySelectedDossierDetail(null)
-      resetDossierGraphState()
     }
     const detachedCount = Number(data?.detached_conversations || 0)
     ElMessage.success(
@@ -4806,343 +3651,6 @@ async function handleUpdateDossierDetail() {
   } finally {
     dossierDetailSaving.value = false
   }
-}
-
-async function handleUpdateDossierParticipants() {
-  if (!selectedDossierId.value) return
-
-  const primaryLabel = String(dossierParticipantForm.primary_label || '').trim()
-  const primaryRole = String(dossierParticipantForm.primary_role || '').trim()
-  const opposingLabel = String(dossierParticipantForm.opposing_label || '').trim()
-  const opposingRole = String(dossierParticipantForm.opposing_role || '').trim()
-
-  if (!primaryLabel || !primaryRole || !opposingLabel || !opposingRole) {
-    ElMessage.warning('请先补全当事人称呼和角色')
-    return
-  }
-
-  dossierParticipantsSaving.value = true
-  try {
-    const { data } = await updateDossierParticipants(selectedDossierId.value, {
-      participant_aliases: buildParticipantAliasesPayload(dossierParticipantForm),
-    })
-
-    if (data?.dossier) {
-      upsertDossierLocal(data.dossier)
-    }
-
-    await refreshDossiers({ silent: true, preferredDossierId: selectedDossierId.value })
-    await loadSelectedDossierDetail(selectedDossierId.value, { silent: true })
-    ElMessage.success('当事人称呼已更新')
-  } catch (error) {
-    console.error('Failed to update dossier participants:', error)
-    ElMessage.error('保存当事人称呼失败')
-  } finally {
-    dossierParticipantsSaving.value = false
-  }
-}
-
-async function refreshSelectedDossierParticipantViews(options = {}) {
-  if (!selectedDossierId.value) return
-  await refreshDossiers({ silent: true, preferredDossierId: selectedDossierId.value })
-  await loadSelectedDossierDetail(selectedDossierId.value, {
-    silent: true,
-    loadParticipants: false,
-    loadGraph: false,
-    loadCoordinationGraph: false,
-    loadIntelligence: false,
-  })
-  await loadSelectedDossierParticipants(selectedDossierId.value, { silent: true })
-  await loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true })
-  await loadSelectedDossierGraph(selectedDossierId.value, { silent: true })
-  await loadSelectedDossierCanonicalGraph(selectedDossierId.value, { silent: true })
-  await loadSelectedDossierIntelligence(selectedDossierId.value)
-  if (!selectedDossierParticipantCandidates.value.length) {
-    dossierParticipantCandidateDialogVisible.value = false
-  }
-  if (!options.silent) {
-    ElMessage.success('主体确认已更新')
-  }
-}
-
-async function handleRefreshParticipantTasks() {
-  if (!selectedDossierId.value) return
-  clearDismissedParticipantCandidates()
-  await Promise.allSettled([
-    loadSelectedDossierParticipants(selectedDossierId.value, { silent: true }),
-    loadSelectedDossierParticipantCandidates(selectedDossierId.value, { silent: true }),
-    loadSelectedDossierCanonicalGraph(selectedDossierId.value, { silent: true }),
-    loadSelectedDossierIntelligence(selectedDossierId.value),
-  ])
-  ElMessage.success('主体线索已刷新')
-}
-
-function handleOpenParticipantDebugPanel() {
-  openParticipantAdvancedPanel('participants')
-}
-
-async function handleResolveSpecificCandidateToExisting(candidate) {
-  const key = candidateKey(candidate)
-  const participantId = key ? Number(dossierParticipantCandidateSelections[key] || 0) : 0
-  if (participantId <= 0) {
-    ElMessage.warning('请先选择要映射的已有主体')
-    return
-  }
-  await handleResolveParticipantCandidate(candidate, { participantId })
-}
-
-async function handleResolveCrossConversationCandidate(candidate) {
-  const participantId = crossCandidateExistingParticipantId(candidate)
-  if (participantId > 0) {
-    await handleResolveParticipantCandidate(candidate, { participantId })
-    return
-  }
-  if (canCreateParticipantFromCandidate(candidate)) {
-    await handleResolveParticipantCandidate(candidate)
-    return
-  }
-  ElMessage.warning(candidateActionBlockedReason(candidate) || '当前线索还不能直接确认，请查看原因说明')
-}
-
-async function handleResolveParticipantCandidateCreate(candidate) {
-  const label = String(dossierParticipantCandidateCreateDraft.label || '').trim()
-  if (!label) {
-    ElMessage.warning('请先填写独立主体称呼')
-    return
-  }
-  await handleResolveParticipantCandidate(candidate, {
-    participant: {
-      label,
-      role: String(dossierParticipantCandidateCreateDraft.role || '').trim() || null,
-      party_side: dossierParticipantCandidateCreateDraft.party_side || 'unknown',
-      entity_type: dossierParticipantCandidateCreateDraft.entity_type || 'unknown',
-      description: String(dossierParticipantCandidateCreateDraft.description || '').trim() || null,
-    },
-  })
-}
-
-async function handleResolveGenericCandidateToSelf(candidate) {
-  const selfParticipant = selectedDossierSelfAnchorParticipants.value[0] || null
-  if (!selfParticipant?.id) {
-    openParticipantAdvancedPanel('create')
-    ElMessage.warning('当前还没有“我”这个已确认主体，请先在高级详情中创建“我”')
-    return
-  }
-  await handleResolveParticipantCandidate(candidate, { participantId: selfParticipant.id })
-}
-
-async function handleResolveGenericCandidateToOpponent(candidate) {
-  const opponentParticipants = selectedDossierOpponentParticipants.value
-  if (!opponentParticipants.length) {
-    openParticipantAdvancedPanel('create')
-    ElMessage.warning('当前还没有可映射的对方主体，请先在高级详情中创建')
-    return
-  }
-
-  const key = candidateKey(candidate)
-  const selectedParticipantId = key ? Number(dossierParticipantCandidateSelections[key] || 0) : 0
-  if (selectedParticipantId > 0) {
-    await handleResolveParticipantCandidate(candidate, { participantId: selectedParticipantId })
-    return
-  }
-
-  if (opponentParticipants.length === 1) {
-    const opponent = opponentParticipants[0]
-    try {
-      await ElMessageBox.confirm(
-        `将「${candidateRawLabel(candidate)}」映射到对方主体「${participantDisplayLabel(opponent)}」？`,
-        '确认指向对方',
-        {
-          confirmButtonText: '确认',
-          cancelButtonText: '取消',
-          type: 'warning',
-        }
-      )
-    } catch (error) {
-      if (error === 'cancel' || error === 'close') return
-      throw error
-    }
-    await handleResolveParticipantCandidate(candidate, { participantId: opponent.id })
-    return
-  }
-
-  ElMessage.info('当前有多个对方主体，请先在卡片中选择一个再点击“指对方”')
-}
-
-function handleMarkNonEntityCandidate(candidate) {
-  handleIgnoreParticipantCandidate(candidate, {
-    message: `已将「${candidateRawLabel(candidate)}」暂记为非具体主体，本轮不做绑定`,
-  })
-}
-
-async function handleRejectCrossConversationCandidate(candidate) {
-  if (!selectedDossierId.value) return
-
-  const sourceNode = candidate?.source_node
-  const targetNode = candidate?.target_node
-  if (!sourceNode?.graph_node_id || !targetNode?.graph_node_id) {
-    ElMessage.error('拒绝失败，请稍后再试')
-    return
-  }
-
-  dossierParticipantActionLoading.value = true
-  try {
-    await decideDossierCrossConversationResolution(selectedDossierId.value, {
-      subject: 'cross_conversation_identity',
-      decision: 'not_same',
-      source_node: {
-        conversation_id: Number(sourceNode.conversation_id || 0),
-        graph_node_id: String(sourceNode.graph_node_id || '').trim(),
-        raw_label: String(sourceNode.raw_label || '').trim(),
-        graph_node_label: String(sourceNode.graph_node_label || '').trim() || null,
-        graph_node_type: String(sourceNode.graph_node_type || '').trim() || null,
-      },
-      target_node: {
-        conversation_id: Number(targetNode.conversation_id || 0),
-        graph_node_id: String(targetNode.graph_node_id || '').trim(),
-        raw_label: String(targetNode.raw_label || '').trim(),
-        graph_node_label: String(targetNode.graph_node_label || '').trim() || null,
-        graph_node_type: String(targetNode.graph_node_type || '').trim() || null,
-      },
-      candidate_key: candidateKey(candidate),
-      task_key: candidate?.task_key || candidateKey(candidate),
-      reason: 'user_marked_not_same',
-    })
-    handleIgnoreParticipantCandidate(candidate, {
-      message: `已将「${formatGraphNodeLabel(candidate?.source_node)} / ${formatGraphNodeLabel(candidate?.target_node)}」标记为不是同一个主体`,
-    })
-  } catch (error) {
-    console.error('Failed to reject cross-conversation participant candidate:', error)
-    ElMessage.error('拒绝失败，请稍后再试')
-  } finally {
-    dossierParticipantActionLoading.value = false
-  }
-}
-
-function handleUseMatchCandidate(candidate, participantId) {
-  const key = candidateKey(candidate)
-  if (!key) return
-  dossierParticipantCandidateSelections[key] = Number(participantId || 0) || null
-}
-
-async function handleCreateResolvedParticipant() {
-  if (!selectedDossierId.value) return
-
-  const label = String(dossierParticipantCreateForm.label || '').trim()
-  if (!label) {
-    ElMessage.warning('请先填写主体称呼')
-    return
-  }
-
-  dossierParticipantActionLoading.value = true
-  try {
-    await createDossierParticipant(selectedDossierId.value, {
-      label,
-      role: String(dossierParticipantCreateForm.role || '').trim() || null,
-      party_side: dossierParticipantCreateForm.party_side || 'unknown',
-      entity_type: dossierParticipantCreateForm.entity_type || 'unknown',
-      description: String(dossierParticipantCreateForm.description || '').trim() || null,
-    })
-    resetDossierParticipantCreateForm()
-    await refreshSelectedDossierParticipantViews({ silent: true })
-    ElMessage.success('已新增案卷主体')
-  } catch (error) {
-    console.error('Failed to create dossier participant:', error)
-    const detail = error?.response?.data?.detail
-    ElMessage.error(typeof detail === 'string' && detail ? detail : '新增主体失败')
-  } finally {
-    dossierParticipantActionLoading.value = false
-  }
-}
-
-async function handleUpdateResolvedParticipant(participant) {
-  if (!selectedDossierId.value || !participant?.id) return
-
-  dossierParticipantActionLoading.value = true
-  try {
-    await updateDossierParticipant(selectedDossierId.value, participant.id, {
-      label: String(participant.label || '').trim(),
-      role: String(participant.role || '').trim() || null,
-      party_side: participant.party_side || 'unknown',
-      entity_type: participant.entity_type || 'unknown',
-      description: String(participant.description || '').trim() || null,
-    })
-    await refreshSelectedDossierParticipantViews({ silent: true })
-    ElMessage.success('主体信息已更新')
-  } catch (error) {
-    console.error('Failed to update dossier participant:', error)
-    const detail = error?.response?.data?.detail
-    ElMessage.error(typeof detail === 'string' && detail ? detail : '更新主体失败')
-  } finally {
-    dossierParticipantActionLoading.value = false
-  }
-}
-
-async function handleResolveParticipantCandidate(candidate, options = {}) {
-  const key = candidateKey(candidate)
-  if (!selectedDossierId.value || !key) return
-
-  const participantId = options.participantId || dossierParticipantCandidateSelections[key]
-  const mentions = candidateResolutionMentions(candidate)
-  if (!mentions.length) {
-    ElMessage.warning('当前主体线索没有可确认的图谱节点')
-    return
-  }
-
-  const payload = {
-    mentions: mentions.map((mention) => buildMentionFromResolutionNode(mention)),
-  }
-
-  const createParticipant = options.participant || null
-  if (participantId) {
-    payload.participant_id = participantId
-  } else {
-    if (createParticipant) {
-      payload.participant = createParticipant
-    } else {
-    payload.participant = {
-      label: candidate.suggested_label || candidate.raw_labels?.[0] || '未命名主体',
-      role: candidate.suggested_role || null,
-      party_side: candidate.party_side || 'unknown',
-      entity_type: candidate.entity_type || 'unknown',
-      description: null,
-    }
-    }
-  }
-
-  dossierParticipantActionLoading.value = true
-  try {
-    await resolveDossierParticipants(selectedDossierId.value, payload)
-    delete dossierParticipantCandidateDismissed[key]
-    resetParticipantCandidateCreateDraft()
-    await refreshSelectedDossierParticipantViews({ silent: true })
-    ElMessage.success(
-      participantId
-        ? (isCrossConversationCandidate(candidate) ? '跨会话主体已完成确认' : '称呼已映射到已有主体')
-        : (isCrossConversationCandidate(candidate) ? '已为跨会话实体新建独立主体' : '称呼已新建为独立主体并完成确认')
-    )
-  } catch (error) {
-    console.error('Failed to resolve dossier participant candidate:', error)
-    const detail = error?.response?.data?.detail
-    ElMessage.error(typeof detail === 'string' && detail ? detail : '确认主体失败')
-  } finally {
-    dossierParticipantActionLoading.value = false
-  }
-}
-
-function handleIgnoreParticipantCandidate(candidate, options = {}) {
-  const key = candidateKey(candidate)
-  if (!key) return
-  dossierParticipantCandidateDismissed[key] = true
-  if (dossierParticipantCandidateCreateKey.value === key) {
-    resetParticipantCandidateCreateDraft()
-  }
-  nextTick(() => {
-    if (!selectedDossierParticipantCandidates.value.length) {
-      dossierParticipantCandidateDialogVisible.value = false
-    }
-  })
-  ElMessage.info(options.message || '已暂不处理该主体线索，刷新后可重新查看')
 }
 
 async function handleGenerateDossierSummary() {
@@ -5414,7 +3922,7 @@ async function removeConversation(conversationId) {
 async function fetchConversationGraph(conversationId, query = '', options = {}) {
   if (!conversationId) {
     resetGraph()
-    return
+    return false
   }
 
   const requestId = ++latestGraphRequestId.value
@@ -5431,19 +3939,150 @@ async function fetchConversationGraph(conversationId, query = '', options = {}) 
 
   try {
     const { data } = await getConversationGraph(conversationId)
-    if (requestId !== latestGraphRequestId.value) return
+    if (requestId !== latestGraphRequestId.value) return false
     currentGraph.query = data.query || query || currentGraph.query
     currentGraph.nodes = data.nodes || []
     currentGraph.edges = data.edges || []
     currentGraph.tokens = data.tokens || []
     currentGraph.generatedAt = data.generated_at || ''
+    return true
   } catch (error) {
-    if (requestId !== latestGraphRequestId.value) return
+    if (requestId !== latestGraphRequestId.value) return false
     currentGraph.error = error?.response?.data?.detail || '图谱加载失败。'
+    return false
   } finally {
     if (requestId === latestGraphRequestId.value && !options.silent) {
       currentGraph.loading = false
     }
+  }
+}
+
+function graphClarificationKey(message) {
+  const pending = message?.pendingClarification
+  if (!pending || typeof pending !== 'object') return ''
+  const messageId = message?.id || message?.key || ''
+  const mention = String(pending.target_mention || '').trim()
+  const originalText = String(pending.pending_graph_update_input_text || '').trim()
+  return `${messageId}:${mention}:${originalText}`
+}
+
+function normalizeGraphClarificationText(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ')
+}
+
+function messageNumericId(message) {
+  const value = Number(message?.id)
+  return Number.isFinite(value) ? value : 0
+}
+
+function maxPersistedMessageId() {
+  return messages.value.reduce((maxId, message) => {
+    const messageId = messageNumericId(message)
+    return messageId > maxId ? messageId : maxId
+  }, 0)
+}
+
+function responsePlansGraphUpdate(data = {}) {
+  const plan = data?.execution_plan && typeof data.execution_plan === 'object'
+    ? data.execution_plan
+    : null
+  if (plan?.graph_update_allowed === true) return true
+  const steps = Array.isArray(plan?.steps) ? plan.steps : []
+  return steps.some((step) => String(step?.name || '').trim() === 'graph_update')
+}
+
+function responseGraphUpdateInputText(data = {}, fallbackText = '') {
+  const resolvedInputs = data?.execution_plan?.resolved_inputs
+  const graphInput = resolvedInputs && typeof resolvedInputs === 'object'
+    ? resolvedInputs.graph_update_input_text
+    : ''
+  return normalizeGraphClarificationText(graphInput || fallbackText)
+}
+
+function findLatestGraphClarificationMessage(options = {}) {
+  const afterMessageId = Number(options.afterMessageId || 0)
+  const expectedInputText = normalizeGraphClarificationText(options.expectedInputText)
+  for (let index = messages.value.length - 1; index >= 0; index -= 1) {
+    const message = messages.value[index]
+    if (afterMessageId > 0 && messageNumericId(message) <= afterMessageId) continue
+    if (message.role !== 'assistant') continue
+    const pendingClarification = message.pendingClarification
+    if (expectedInputText) {
+      const pendingInputText = normalizeGraphClarificationText(
+        pendingClarification?.pending_graph_update_input_text
+      )
+      if (pendingInputText !== expectedInputText) continue
+    }
+    const key = graphClarificationKey(message)
+    if (key && !handledGraphClarificationKeys.value.has(key)) {
+      return { message, key }
+    }
+  }
+  return null
+}
+
+async function refreshMessagesForGraphClarification(conversationId, options = {}) {
+  if (!conversationId) return null
+  try {
+    const { data } = await getConversationMessages(conversationId)
+    const backendMessages = Array.isArray(data?.messages) ? data.messages : []
+    messages.value = backendMessages.map((message, index) => buildMessageViewModel(message, index))
+    syncCurrentAnalysisFromMessages()
+    scrollBottom()
+    return findLatestGraphClarificationMessage(options)
+  } catch (error) {
+    console.error('Failed to refresh messages for graph clarification:', error)
+    return null
+  }
+}
+
+async function promptGraphClarificationIfNeeded(conversationId, options = {}) {
+  if (!conversationId || graphClarificationPromptOpen.value) return false
+  const pending = findLatestGraphClarificationMessage(options)
+    || (await refreshMessagesForGraphClarification(conversationId, options))
+  if (!pending) return false
+
+  const { message, key } = pending
+  const clarification = message.pendingClarification || {}
+  const question =
+    String(message.clarificationQuestions?.[0] || clarification.previous_question || '').trim()
+    || '图谱落位时发现仍有泛称主体，请确认它具体指哪个责任主体。'
+
+  handledGraphClarificationKeys.value.add(key)
+  graphClarificationPromptOpen.value = true
+  try {
+    const result = await ElMessageBox.prompt(question, '确认图谱主体', {
+      confirmButtonText: '确认并写入',
+      cancelButtonText: '稍后处理',
+      inputPlaceholder: '例如：张三、李四、蓝海科技',
+      inputValidator: (value) => {
+        const normalized = String(value || '').trim()
+        if (!normalized) return '请输入明确主体名称'
+        if (normalized.length > 40) return '主体名称过长，请直接输入名称'
+        return true
+      },
+      distinguishCancelAndClose: true,
+    })
+    const value = String(result?.value || '').trim()
+    if (!value) return false
+    stopGraphRefreshPolling({
+      status: 'warning',
+      summary: '图谱落位需要主体确认，已提交确认并重新触发写入',
+      refreshDossierAfterGraph: false,
+    })
+    await sendImpl(value, {
+      conversationId,
+      modeConsentEnabled: false,
+      restoreDraftOnErrorText: value,
+    })
+    return true
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      console.error('Graph clarification prompt failed:', error)
+    }
+    return false
+  } finally {
+    graphClarificationPromptOpen.value = false
   }
 }
 
@@ -5463,18 +4102,34 @@ async function ensureConversationTitle(userText) {
   }
 }
 
-function startGraphRefreshPolling(conversationId, previousNodeCount, query = '') {
+function startGraphRefreshPolling(conversationId, previousSignature = '', query = '', options = {}) {
   stopGraphRefreshPolling()
   if (!conversationId) return
-  setGraphSyncState('running', '已触发图谱同步检查，等待后端任务完成')
+  const initialSignature = previousSignature || graphSnapshotSignature()
+  const clarificationOptions = {
+    afterMessageId: Number(options.afterMessageId || 0),
+    expectedInputText: normalizeGraphClarificationText(options.expectedInputText || query),
+  }
+  setGraphSyncState('running', '图谱更新任务已提交，正在等待后台写入完成')
 
   graphRefreshTimer.value = setInterval(async () => {
+    if (graphRefreshInFlight.value) return
+    graphRefreshInFlight.value = true
     try {
-      await fetchConversationGraph(conversationId, query, { preserveData: true, silent: true })
-      if ((currentGraph.nodes?.length || 0) !== previousNodeCount) {
+      const handledClarification = await promptGraphClarificationIfNeeded(
+        conversationId,
+        clarificationOptions
+      )
+      if (handledClarification) {
+        return
+      }
+
+      const applied = await fetchConversationGraph(conversationId, query, { preserveData: true, silent: true })
+      const nextSignature = graphSnapshotSignature()
+      if (applied && nextSignature !== initialSignature) {
         stopGraphRefreshPolling({
           status: 'success',
-          summary: '图谱同步已完成，本轮节点变更已刷新到侧栏',
+          summary: '图谱同步已完成，本轮图谱变更已刷新到侧栏',
         })
       }
     } catch (error) {
@@ -5483,15 +4138,17 @@ function startGraphRefreshPolling(conversationId, previousNodeCount, query = '')
         status: 'warning',
         summary: '图谱同步检查失败，请稍后手动刷新图谱',
       })
+    } finally {
+      graphRefreshInFlight.value = false
     }
-  }, 3000)
+  }, 5000)
 
   graphRefreshStopTimer.value = setTimeout(() => {
     stopGraphRefreshPolling({
       status: 'warning',
-      summary: '暂未观察到新的图谱变更，可能仍在后台处理或本轮无结构化更新',
+      summary: '图谱后台任务耗时较长，仍可能继续写入；请稍后切换会话或刷新侧栏查看',
     })
-  }, 15000)
+  }, 90000)
 }
 
 function updatePendingMessage(tempId, patch = {}) {
@@ -5502,39 +4159,6 @@ function updatePendingMessage(tempId, patch = {}) {
 
 function removeMessageById(messageId) {
   messages.value = messages.value.filter((item) => item.id !== messageId)
-}
-
-async function createCaseForResend() {
-  const { data } = await createConversation({})
-  const conversation = data.conversation
-  upsertConversationLocal(conversation)
-  await switchConversation(conversation.id)
-  ElMessage.success('已为新法律问题建立独立卷宗。')
-  return conversation
-}
-
-async function resolveCaseBoundarySuggestion(message) {
-  try {
-    await ElMessageBox.confirm(
-      message || '发现您似乎开启了一个新的法律问题，是否新建独立卷宗？',
-      '检测到新案件',
-      {
-        confirmButtonText: '是，新建卷宗',
-        cancelButtonText: '否，继续在当前补充',
-        distinguishCancelAndClose: true,
-        type: 'warning',
-      }
-    )
-    return 'new_case'
-  } catch (error) {
-    if (error === 'cancel') {
-      return 'stay_current'
-    }
-    if (error === 'close') {
-      return 'cancelled'
-    }
-    throw error
-  }
 }
 
 function conversationModeLabel(mode) {
@@ -5664,15 +4288,6 @@ function dossierIntelligenceTraceStepStatusLabel(status) {
   }
 }
 
-function formatParticipantAliasSummary(alias) {
-  const label = String(alias?.label || '').trim()
-  const role = String(alias?.role || '').trim()
-  if (label && role) return `${label} / ${role}`
-  if (label) return label
-  if (role) return role
-  return '未设置'
-}
-
 function formatGraphConversationLabel(conversationId) {
   if (conversationId === null || conversationId === undefined || conversationId === '') {
     return '会话未标注'
@@ -5708,111 +4323,6 @@ function formatGraphPropertiesTitle(properties) {
     .slice(0, 6)
     .map(([key, value]) => `${key}: ${String(value)}`)
     .join('\n')
-}
-
-function participantDisplayLabel(participant) {
-  if (!participant || typeof participant !== 'object') return '未命名主体'
-  const label = String(participant.label || '').trim()
-  if (label) return label
-  const participantId = Number(participant.id || 0)
-  return participantId > 0 ? `主体 #${participantId}` : '未命名主体'
-}
-
-function matchCandidateDisplayLabel(match) {
-  if (!match || typeof match !== 'object') return '未命名主体'
-  const displayLabel = String(match.display_label || match.participant_label || '').trim()
-  if (displayLabel) return displayLabel
-  const participantId = Number(match.participant_id || 0)
-  return participantId > 0 ? `主体 #${participantId}` : '未命名主体'
-}
-
-function candidateKey(candidate) {
-  if (!candidate || typeof candidate !== 'object') return ''
-  return String(candidate.task_key || candidate.candidate_key || candidate.raw_label || '').trim()
-}
-
-function candidateTaskType(candidate) {
-  return String(candidate?.task_type || 'raw_label_resolution').trim() || 'raw_label_resolution'
-}
-
-function isCrossConversationCandidate(candidate) {
-  return ['identity', 'cross_conversation_entity_resolution'].includes(candidateTaskType(candidate))
-}
-
-function sortParticipantCandidates(candidates) {
-  return [...candidates].sort((left, right) => {
-    const leftTaskType = candidateTaskType(left)
-    const rightTaskType = candidateTaskType(right)
-    if (leftTaskType !== rightTaskType) {
-      return isCrossConversationCandidate(left) ? -1 : 1
-    }
-
-    const leftLabelKind = candidateLabelKind(left)
-    const rightLabelKind = candidateLabelKind(right)
-    if (leftLabelKind !== rightLabelKind) {
-      const priority = { specific: 0, mixed: 1, generic: 2 }
-      return (priority[leftLabelKind] ?? 9) - (priority[rightLabelKind] ?? 9)
-    }
-
-    return candidateRawLabel(left).localeCompare(candidateRawLabel(right), 'zh-CN')
-  })
-}
-
-function candidateRawLabel(candidate) {
-  if (!candidate || typeof candidate !== 'object') return '未命名称呼'
-  const rawLabel = String(candidate.raw_label || '').trim()
-  if (rawLabel) return rawLabel
-  const rawLabels = Array.isArray(candidate.raw_labels)
-    ? candidate.raw_labels.map((item) => String(item || '').trim()).filter(Boolean)
-    : []
-  if (rawLabels.length) return rawLabels.join(' / ')
-  return String(candidate.suggested_label || '').trim() || '未命名称呼'
-}
-
-function candidateLabelKind(candidate) {
-  const labelKind = String(candidate?.label_kind || '').trim().toLowerCase()
-  if (labelKind === 'generic') return 'generic'
-  if (labelKind === 'mixed') return 'mixed'
-  return 'specific'
-}
-
-function candidateLabelKindLabel(candidate) {
-  switch (candidateLabelKind(candidate)) {
-    case 'generic':
-      return '泛称'
-    case 'mixed':
-      return '跨类线索'
-    default:
-      return '具体称呼'
-  }
-}
-
-function candidateLabelKindTagType(candidate) {
-  switch (candidateLabelKind(candidate)) {
-    case 'generic':
-      return 'warning'
-    case 'mixed':
-      return 'success'
-    default:
-      return 'primary'
-  }
-}
-
-function confidenceLabel(confidence) {
-  switch (String(confidence || '').trim().toLowerCase()) {
-    case 'high':
-      return '高'
-    case 'medium':
-      return '中'
-    case 'low':
-      return '低'
-    default:
-      return ''
-  }
-}
-
-function candidateConfidenceLabel(candidate) {
-  return confidenceLabel(candidate?.confidence)
 }
 
 function formatGraphNodeType(nodeType) {
@@ -5892,197 +4402,6 @@ function graphNodeRawLabels(node) {
     .filter(Boolean)
 
   return labels.filter((label, index) => labels.indexOf(label) === index)
-}
-
-function graphNodeRawLabelsSummary(node) {
-  const primaryLabel = graphNodePrimaryLabel(node)
-  const rawLabels = graphNodeRawLabels(node)
-  const extraLabels = rawLabels.filter((label) => label !== primaryLabel)
-  if (extraLabels.length) return extraLabels.join(' / ')
-  return rawLabels.length > 1 ? rawLabels.join(' / ') : ''
-}
-
-function formatGraphPreviewNodeKind(node) {
-  const kind = String(node?.kind || '').trim().toLowerCase()
-  if (kind === 'participant') return '已确认主体'
-  if (kind === 'raw_entity') {
-    const entityType = formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type)
-    return node?.pending_confirmation ? `待确认主体 · ${entityType}` : `原始主体 · ${entityType}`
-  }
-  if (kind === 'raw_event') return '事件节点'
-  if (kind === 'raw_other') {
-    return `其他节点 · ${formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type)}`
-  }
-  return formatGraphNodeType(node?.entity_type || node?.type || node?.graph_node_type)
-}
-
-function formatGraphNodeLabel(node) {
-  if (!node || typeof node !== 'object') return '未标注节点'
-  const graphNodeLabel = String(node.graph_node_label || '').trim()
-  if (graphNodeLabel) return graphNodeLabel
-  const rawLabel = String(node.raw_label || '').trim()
-  if (rawLabel) return rawLabel
-  const graphNodeId = String(node.graph_node_id || '').trim()
-  if (graphNodeId) return `节点 ${graphNodeId}`
-  return '未标注节点'
-}
-
-function candidateCardTitle(candidate) {
-  if (isCrossConversationCandidate(candidate)) {
-    return '确认跨会话主体'
-  }
-  return candidateRawLabel(candidate)
-}
-
-function candidateCardSubtitle(candidate) {
-  if (isCrossConversationCandidate(candidate)) {
-    return '这两个会话中的主体是同一个吗？'
-  }
-  return candidateMentionsConversationLabel(candidate)
-}
-
-function candidateRecommendedParticipantLabel(candidate) {
-  if (!candidate || typeof candidate !== 'object') return ''
-  const recommendedLabel = String(candidate.recommended_participant_label || '').trim()
-  if (recommendedLabel) return recommendedLabel
-  const matchCandidate = candidateMatchCandidates(candidate)[0] || null
-  return matchCandidate ? matchCandidateDisplayLabel(matchCandidate) : ''
-}
-
-function crossCandidateExistingParticipantId(candidate) {
-  if (!isCrossConversationCandidate(candidate)) return 0
-  const key = candidateKey(candidate)
-  const selectedParticipantId = key ? Number(dossierParticipantCandidateSelections[key] || 0) : 0
-  if (selectedParticipantId > 0) return selectedParticipantId
-  return Number(candidate?.recommended_participant_id || candidate?.existing_participant_id || 0) || 0
-}
-
-function buildMentionFromResolutionNode(node) {
-  return {
-    conversation_id: node?.conversation_id,
-    raw_label: String(node?.raw_label || node?.graph_node_label || '').trim(),
-    source: node?.graph_node_id ? 'graph_node' : String(node?.source || 'graph'),
-    confidence: typeof node?.confidence === 'number' ? node.confidence : null,
-    graph_node_id: String(node?.graph_node_id || '').trim() || null,
-    graph_node_label: String(node?.graph_node_label || '').trim() || null,
-    graph_node_type: String(node?.graph_node_type || '').trim() || null,
-  }
-}
-
-function candidateResolutionMentions(candidate) {
-  if (isCrossConversationCandidate(candidate)) {
-    return [candidate?.source_node, candidate?.target_node].filter(
-      (item) => item && typeof item === 'object'
-    )
-  }
-  return Array.isArray(candidate?.mentions)
-    ? candidate.mentions.filter((item) => item && typeof item === 'object')
-    : []
-}
-
-function canCreateParticipantFromCandidate(candidate) {
-  if (isCrossConversationCandidate(candidate)) {
-    return Boolean(candidate?.can_create_new)
-  }
-  return Boolean(candidate?.can_create_new)
-}
-
-function candidateActionBlockedReason(candidate) {
-  if (!isCrossConversationCandidate(candidate)) return ''
-  const mentions = candidateResolutionMentions(candidate)
-  if (mentions.length < 2) return '缺少图谱节点来源'
-  if (candidateLabelKind(candidate) === 'generic') {
-    return '该称呼过于泛化，需要先选择已有主体'
-  }
-  if (crossCandidateExistingParticipantId(candidate) > 0 || canCreateParticipantFromCandidate(candidate)) {
-    return ''
-  }
-  if (!candidate?.can_link_existing && !candidate?.can_create_new) {
-    return '该节点不是可确认主体'
-  }
-  return '该线索暂时不能确认，请先选择已有主体或等待更多跨会话证据'
-}
-
-function candidateIntroText(candidate) {
-  if (isCrossConversationCandidate(candidate)) {
-    const sourceLabel = formatGraphNodeLabel(candidate?.source_node)
-    const targetLabel = formatGraphNodeLabel(candidate?.target_node)
-    return `会话中的「${sourceLabel}」与「${targetLabel}」可能指向同一个主体，请确认是否需要合并。`
-  }
-  const rawLabel = candidateRawLabel(candidate)
-  if (candidateLabelKind(candidate) === 'generic') {
-    return `新会话中出现「${rawLabel}」。这是泛称，系统不能直接确定它指谁。`
-  }
-  return `新会话中出现「${rawLabel}」。它可能是已有主体的另一个称呼，也可能是新的独立主体。`
-}
-
-function candidateMentionsConversationLabel(candidate) {
-  const mentions = Array.isArray(candidate?.mentions) ? candidate.mentions : []
-  const conversationIds = [...new Set(
-    mentions
-      .map((mention) => Number(mention?.conversation_id || 0))
-      .filter((conversationId) => conversationId > 0)
-  )]
-  if (!conversationIds.length) return '未标注会话'
-  return conversationIds.map((conversationId) => `会话 #${conversationId}`).join(' / ')
-}
-
-function candidateMatchCandidates(candidate) {
-  return Array.isArray(candidate?.match_candidates)
-    ? candidate.match_candidates.filter((item) => item && typeof item === 'object')
-    : []
-}
-
-function candidateLinkOptions(candidate) {
-  const labelKind = candidateLabelKind(candidate)
-  if (labelKind === 'generic') {
-    return selectedDossierOpponentParticipants.value
-  }
-  return selectedDossierResolvedParticipants.value
-}
-
-function resetParticipantCandidateCreateDraft() {
-  dossierParticipantCandidateCreateKey.value = ''
-  dossierParticipantCandidateCreateDraft.label = ''
-  dossierParticipantCandidateCreateDraft.role = ''
-  dossierParticipantCandidateCreateDraft.party_side = 'unknown'
-  dossierParticipantCandidateCreateDraft.entity_type = 'unknown'
-  dossierParticipantCandidateCreateDraft.description = ''
-}
-
-function openParticipantAdvancedPanel(sectionName = '') {
-  dossierAdvancedSections.value = ['advanced']
-  if (sectionName) {
-    ensureDossierParticipantSection(sectionName)
-  }
-}
-
-function clearDismissedParticipantCandidates() {
-  Object.keys(dossierParticipantCandidateDismissed).forEach((key) => {
-    delete dossierParticipantCandidateDismissed[key]
-  })
-}
-
-function startParticipantCandidateCreate(candidate) {
-  const key = candidateKey(candidate)
-  if (!key) return
-  if (dossierParticipantCandidateCreateKey.value === key) {
-    resetParticipantCandidateCreateDraft()
-    return
-  }
-
-  dossierParticipantCandidateCreateKey.value = key
-  dossierParticipantCandidateCreateDraft.label = String(
-    candidate?.suggested_label || candidateRawLabel(candidate)
-  ).trim()
-  dossierParticipantCandidateCreateDraft.role = String(candidate?.suggested_role || '').trim()
-  dossierParticipantCandidateCreateDraft.party_side = String(candidate?.party_side || 'unknown').trim() || 'unknown'
-  dossierParticipantCandidateCreateDraft.entity_type = String(candidate?.entity_type || 'unknown').trim() || 'unknown'
-  dossierParticipantCandidateCreateDraft.description = ''
-}
-
-function isParticipantCandidateCreateOpen(candidate) {
-  return dossierParticipantCandidateCreateKey.value === candidateKey(candidate)
 }
 
 function buildParticipantAliasesPayload(form) {
@@ -6224,7 +4543,7 @@ async function sendImpl(textOverride = null, options = {}) {
     typeof options.restoreDraftOnErrorText === 'string' ? options.restoreDraftOnErrorText : null
   const tempKey = `temp-user-${Date.now()}`
   const nowIso = new Date().toISOString()
-  const previousNodeCount = currentGraph.nodes?.length || 0
+  const previousGraphSignature = graphSnapshotSignature()
 
   messages.value.push({
     id: tempKey,
@@ -6258,48 +4577,6 @@ async function sendImpl(textOverride = null, options = {}) {
       modeConsentEnabled,
     })
     const initData = initRes?.data || {}
-
-    if (initData.action === 'suggest_new_case') {
-      removeMessageById(tempKey)
-      const nextAction = await resolveCaseBoundarySuggestion(initData.message)
-      sending.value = false
-      currentGraph.loading = false
-      resetAnalysis()
-
-      if (nextAction === 'new_case') {
-        try {
-          const newConversation = await createCaseForResend()
-          if (!newConversation?.id) {
-            restoreDraftInput(draftText, '新案情确认失败，输入内容已恢复', 'error')
-            return
-          }
-
-          await sendImpl(text, {
-            conversationId: newConversation.id,
-            forceCurrentCase: false,
-            modeConsentEnabled: false,
-            restoreDraftOnErrorText: draftText,
-          })
-        } catch (error) {
-          console.error('Failed to continue suggest_new_case flow:', error)
-          restoreDraftInput(draftText, '新案情确认失败，输入内容已恢复', 'error')
-        }
-        return
-      }
-
-      if (nextAction === 'cancelled') {
-        restoreDraftInput(draftText, '已取消，输入内容已恢复')
-        return
-      }
-
-      await sendImpl(text, {
-        conversationId: baseConversationId,
-        forceCurrentCase: true,
-        modeConsentEnabled: false,
-        restoreDraftOnErrorText: draftText,
-      })
-      return
-    }
 
     if (initData.action === 'mode_consent') {
       removeMessageById(tempKey)
@@ -6361,6 +4638,7 @@ async function sendImpl(textOverride = null, options = {}) {
     }
 
     const data = initData.task_id ? (await initRes).data : initData
+    const beforeResponseMessageId = maxPersistedMessageId()
     updatePendingMessage(tempKey, { pending: false })
     currentAnalysis.requestState = 'error'
     currentAnalysis.requestError = ''
@@ -6388,11 +4666,22 @@ async function sendImpl(textOverride = null, options = {}) {
     })
 
     applyCurrentAnalysisResponse(data)
-    setGraphSyncState('running', '主请求已完成，正在检查图谱更新任务')
+    const shouldWatchGraphUpdate = responsePlansGraphUpdate(data)
+    setGraphSyncState(
+      shouldWatchGraphUpdate ? 'running' : 'idle',
+      shouldWatchGraphUpdate ? '主请求已完成，正在检查图谱更新任务' : ''
+    )
     void ensureConversationTitle(text)
     await refreshConversationList(baseConversationId)
     await fetchConversationGraph(baseConversationId, text)
-    startGraphRefreshPolling(baseConversationId, previousNodeCount, text)
+    if (shouldWatchGraphUpdate) {
+      startGraphRefreshPolling(baseConversationId, previousGraphSignature, text, {
+        afterMessageId: beforeResponseMessageId,
+        expectedInputText: responseGraphUpdateInputText(data, text),
+      })
+    } else {
+      stopGraphRefreshPolling({ refreshDossierAfterGraph: false })
+    }
   } catch (error) {
     console.error('Failed to send message:', error)
     if (restoreDraftOnErrorText) {
@@ -7176,146 +5465,6 @@ body,
   background: #f8fafc;
 }
 
-.dossier-coordination-section {
-  padding: 12px;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #f8fbff, #f3f7ff);
-}
-
-.dossier-coordination-body {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.dossier-coordination-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.dossier-coordination-hint {
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px dashed #bfdbfe;
-  color: #475569;
-  font-size: 12px;
-  line-height: 1.7;
-}
-
-.dossier-coordination-graph-shell {
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid #dbeafe;
-}
-
-.dossier-coordination-collapse {
-  border: none;
-  background: transparent;
-}
-
-.dossier-coordination-list-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.dossier-coordination-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding: 0 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.9);
-  border: 1px solid #bfdbfe;
-  color: #1d4ed8;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.dossier-coordination-group {
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid #dbeafe;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-coordination-entity-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-coordination-entity-card {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px;
-  border-radius: 12px;
-  background: #f8fbff;
-  border: 1px solid #dbeafe;
-}
-
-.dossier-coordination-entity-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dossier-coordination-entity-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.dossier-coordination-entity-title strong {
-  font-size: 13px;
-  color: #111827;
-}
-
-.dossier-coordination-entity-title span,
-.dossier-coordination-entity-meta {
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.dossier-coordination-entity-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  line-height: 1.6;
-}
-
-.dossier-coordination-entity-actions {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
-}
-
-.dossier-coordination-task-section {
-  scroll-margin-top: 12px;
-}
-
-.dossier-coordination-empty {
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px dashed #bfdbfe;
-  color: #6b7280;
-  font-size: 12px;
-  line-height: 1.7;
-}
-
 .dossier-intelligence-card {
   padding: 12px;
   border-radius: 12px;
@@ -7407,76 +5556,6 @@ body,
   white-space: nowrap;
 }
 
-.dossier-intelligence-task-list {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-intelligence-task-card {
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px solid #bfdbfe;
-  background: #f8fbff;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-intelligence-task-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.dossier-intelligence-task-header strong {
-  font-size: 13px;
-  color: #111827;
-}
-
-.dossier-intelligence-task-type {
-  font-size: 11px;
-  color: #1d4ed8;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 999px;
-  padding: 4px 8px;
-}
-
-.dossier-intelligence-task-meta,
-.dossier-intelligence-task-evidence {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: #4b5563;
-  line-height: 1.6;
-}
-
-.dossier-intelligence-task-reason {
-  font-size: 12px;
-  color: #1f2937;
-  line-height: 1.7;
-}
-
-.dossier-intelligence-task-input {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dossier-intelligence-task-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #6b7280;
-}
-
 .dossier-intelligence-task-json {
   margin: 0;
   padding: 10px 12px;
@@ -7490,27 +5569,6 @@ body,
   word-break: break-word;
 }
 
-.dossier-participants-section {
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 12px;
-  background: #f8fafc;
-}
-
-.dossier-resolved-participants-section {
-  padding: 12px;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  background: #f8fbff;
-}
-
-.dossier-graph-section {
-  padding: 12px;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  background: linear-gradient(180deg, #f8fbff, #eef6ff);
-}
-
 .dossier-auto-summary-header {
   display: flex;
   align-items: center;
@@ -7520,133 +5578,6 @@ body,
 
 .dossier-inline-actions-spread {
   justify-content: space-between;
-}
-
-.dossier-participants-hint {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #6b7280;
-}
-
-.dossier-participant-summary-grid {
-  margin-top: 12px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.dossier-participant-summary-card {
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid #dbeafe;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.dossier-participant-summary-card span {
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.dossier-participant-summary-card strong {
-  font-size: 20px;
-  color: #1d4ed8;
-}
-
-.dossier-participant-task-entry {
-  margin-top: 12px;
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px solid #bfdbfe;
-  background: rgba(255, 255, 255, 0.94);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.dossier-participant-task-entry.is-empty {
-  border-style: dashed;
-}
-
-.dossier-participant-task-entry-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.dossier-participant-task-entry-copy strong {
-  font-size: 14px;
-  color: #111827;
-}
-
-.dossier-participant-task-entry-copy span {
-  font-size: 12px;
-  line-height: 1.6;
-  color: #6b7280;
-}
-
-.dossier-participant-smart-tip {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  color: #1d4ed8;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.dossier-participant-pill-list {
-  margin-top: 12px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.dossier-participant-pill {
-  min-width: 0;
-  max-width: 100%;
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid #dbeafe;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.dossier-participant-pill strong {
-  font-size: 13px;
-  color: #111827;
-}
-
-.dossier-participant-pill span {
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.dossier-resolved-participants-body {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.dossier-debug-collapse {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-participant-collapse {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 
 .dossier-collapse-title {
@@ -7666,230 +5597,6 @@ body,
   color: #6b7280;
 }
 
-.dossier-resolved-participant-list,
-.dossier-participant-candidate-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-resolved-participant-card,
-.dossier-participant-create-card,
-.dossier-participant-candidate-card {
-  padding: 12px;
-  border: 1px solid #dbeafe;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.92);
-}
-
-.dossier-resolved-participant-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.dossier-resolved-participant-actions,
-.dossier-participant-candidate-actions {
-  margin-top: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.dossier-participant-candidate-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: #111827;
-}
-
-.dossier-participant-candidate-meta {
-  margin-top: 6px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #6b7280;
-}
-
-.dossier-participant-task-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.dossier-participant-task-card {
-  padding: 14px;
-  border-radius: 14px;
-  border: 1px solid #dbeafe;
-  background: rgba(255, 255, 255, 0.96);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-participant-task-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.dossier-participant-task-copy {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.dossier-participant-task-copy strong {
-  font-size: 15px;
-  color: #111827;
-  word-break: break-word;
-}
-
-.dossier-participant-task-copy span {
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.dossier-participant-task-tags {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.dossier-participant-task-description {
-  font-size: 13px;
-  line-height: 1.7;
-  color: #1f2937;
-}
-
-.dossier-participant-task-meta {
-  font-size: 12px;
-  line-height: 1.6;
-  color: #6b7280;
-}
-
-.dossier-participant-resolution-pair {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  gap: 10px;
-  align-items: stretch;
-}
-
-.dossier-participant-resolution-node {
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid #dbeafe;
-  background: #f8fbff;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.dossier-participant-resolution-node-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: #1d4ed8;
-}
-
-.dossier-participant-resolution-node strong {
-  font-size: 13px;
-  color: #111827;
-  word-break: break-word;
-}
-
-.dossier-participant-resolution-node span {
-  font-size: 11px;
-  line-height: 1.5;
-  color: #6b7280;
-  word-break: break-word;
-}
-
-.dossier-participant-resolution-arrow {
-  align-self: center;
-  font-size: 18px;
-  color: #2563eb;
-}
-
-.dossier-participant-task-match-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dossier-participant-task-match-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: #374151;
-}
-
-.dossier-participant-task-match-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.dossier-participant-match-chip {
-  min-width: 0;
-  padding: 8px 10px;
-  border-radius: 12px;
-  border: 1px solid #dbeafe;
-  background: #f8fafc;
-  color: #374151;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.dossier-participant-match-chip.selected {
-  border-color: #2563eb;
-  background: #eff6ff;
-}
-
-.dossier-participant-match-chip strong {
-  font-size: 12px;
-  color: #111827;
-}
-
-.dossier-participant-match-chip span {
-  font-size: 11px;
-  color: #6b7280;
-  line-height: 1.5;
-}
-
-.dossier-participant-inline-create-card {
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px solid #dbeafe;
-  background: #f8fbff;
-}
-
-.dossier-participant-task-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.dossier-graph-hint {
-  margin-top: 8px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: #6b7280;
-}
-
-.dossier-participants-grid,
 .tracked-onboarding-grid {
   margin-top: 10px;
   display: grid;
@@ -7912,48 +5619,6 @@ body,
   line-height: 1.7;
   font-size: 13px;
   color: #111827;
-}
-
-.dossier-graph-body {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-graph-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.dossier-graph-stat {
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid #dbeafe;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.dossier-graph-stat-label {
-  font-size: 12px;
-  color: #6b7280;
-}
-
-.dossier-graph-stat-value {
-  font-size: 20px;
-  font-weight: 700;
-  color: #1e3a8a;
-}
-
-.dossier-graph-meta {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  font-size: 12px;
-  color: #4b5563;
 }
 
 .dossier-graph-warning,
@@ -7990,156 +5655,61 @@ body,
   border: 1px dashed #bfdbfe;
 }
 
-.dossier-graph-aliases {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.dossier-graph-alias-item {
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid #dbeafe;
+.canonical-merge-dialog {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 14px;
 }
 
-.dossier-graph-alias-item span {
+.canonical-merge-source,
+.canonical-merge-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+}
+
+.canonical-merge-source span,
+.canonical-merge-preview span {
   font-size: 12px;
   color: #6b7280;
 }
 
-.dossier-graph-alias-item strong {
+.canonical-merge-source strong,
+.canonical-merge-preview strong {
+  font-size: 14px;
+  color: #111827;
+}
+
+.canonical-merge-source small,
+.canonical-merge-preview small {
+  font-size: 12px;
+  color: #6b7280;
+  line-height: 1.5;
+}
+
+.canonical-merge-target-select {
+  width: 100%;
+}
+
+.canonical-merge-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.3;
+}
+
+.canonical-merge-option strong {
   font-size: 13px;
   color: #111827;
 }
 
-.dossier-graph-preview {
-  padding: 12px;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.82);
-  border: 1px solid #dbeafe;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.dossier-graph-preview-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.dossier-graph-preview-note {
+.canonical-merge-option span {
   font-size: 12px;
-  color: #92400e;
-  background: #fef3c7;
-  border: 1px solid #fcd34d;
-  border-radius: 999px;
-  padding: 4px 8px;
-}
-
-.dossier-graph-preview-hint {
-  font-size: 12px;
-  line-height: 1.6;
   color: #6b7280;
-}
-
-.dossier-graph-preview-body {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.dossier-graph-preview-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dossier-graph-preview-subtitle {
-  font-size: 12px;
-  font-weight: 700;
-  color: #1f2937;
-}
-
-.dossier-graph-node-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.dossier-graph-node-chip {
-  min-width: 0;
-  max-width: 100%;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.dossier-graph-node-chip strong,
-.dossier-graph-edge-source,
-.dossier-graph-edge-target {
-  font-size: 13px;
-  color: #111827;
-  word-break: break-word;
-}
-
-.dossier-graph-node-chip span,
-.dossier-graph-edge-meta {
-  font-size: 11px;
-  color: #6b7280;
-}
-
-.dossier-graph-edge-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dossier-graph-edge-item {
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: #f8fafc;
-  border: 1px solid #dbeafe;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-}
-
-.dossier-graph-edge-relation {
-  font-size: 12px;
-  font-weight: 700;
-  color: #1d4ed8;
-  white-space: nowrap;
-}
-
-.dossier-graph-preview-empty,
-.dossier-graph-preview-truncation {
-  padding: 10px 12px;
-  border-radius: 10px;
-  font-size: 12px;
-  line-height: 1.6;
-}
-
-.dossier-graph-preview-empty {
-  color: #6b7280;
-  background: #f8fafc;
-  border: 1px dashed #bfdbfe;
-}
-
-.dossier-graph-preview-truncation {
-  color: #92400e;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
 }
 
 .party-naming-modal {
@@ -8366,23 +5936,9 @@ body,
 }
 
 @media (max-width: 768px) {
-  .dossier-graph-stats,
   .dossier-intelligence-grid,
-  .dossier-graph-aliases,
-  .dossier-participant-summary-grid,
-  .dossier-participants-grid,
-  .dossier-resolved-participant-grid,
   .tracked-onboarding-grid {
     grid-template-columns: 1fr;
-  }
-
-  .dossier-participant-resolution-pair {
-    grid-template-columns: 1fr;
-  }
-
-  .dossier-participant-resolution-arrow {
-    justify-self: center;
-    transform: rotate(90deg);
   }
 
   .dossier-item-main,
@@ -8392,17 +5948,13 @@ body,
     align-items: stretch;
   }
 
-  .dossier-coordination-entity-card {
+  .dossier-canonical-entity-row {
     flex-direction: column;
   }
 
-  .dossier-coordination-entity-actions {
+  .dossier-canonical-entity-actions {
     width: 100%;
     justify-content: flex-start;
-  }
-
-  .dossier-graph-edge-item {
-    grid-template-columns: 1fr;
   }
 }
 

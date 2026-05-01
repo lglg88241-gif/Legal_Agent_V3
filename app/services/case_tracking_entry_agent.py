@@ -337,7 +337,8 @@ async def decide_case_tracking_entry(
     if not clean_message:
         return _no_prompt(decision, reason="empty_input")
 
-    if normalized_mode == "TRACKED_CASE" or normalized_consent == "tracked":
+    has_bound_dossier = isinstance(dossier_id, int) and dossier_id > 0
+    if (normalized_mode == "TRACKED_CASE" or normalized_consent == "tracked") and has_bound_dossier:
         return _no_prompt(
             decision,
             reason="tracked_conversation_already_selected",

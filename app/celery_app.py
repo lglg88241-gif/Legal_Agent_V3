@@ -242,6 +242,28 @@ def _build_message_understanding_active_action(
     }
 
 
+def _resolve_final_route_intent(
+    *,
+    answer_route_intent: str | None,
+    subject_reference_short_circuit: bool,
+    case_update_plan_active: bool,
+    legal_answer_plan_active: bool,
+    agentic_route: str | None,
+) -> str:
+    route_intent = str(answer_route_intent or "GENERAL_CONSULT").strip().upper() or "GENERAL_CONSULT"
+    normalized_agentic_route = str(agentic_route or "").strip().upper()
+
+    if subject_reference_short_circuit:
+        return "DOSSIER_MEMORY"
+    if case_update_plan_active:
+        return "CASE_UPDATE"
+    if legal_answer_plan_active:
+        if route_intent == "OUT_OF_SCOPE":
+            return "OUT_OF_SCOPE"
+        return normalized_agentic_route or route_intent
+    return route_intent
+
+
 def _derive_case_update_snapshot(
     *,
     case_summary: str,
@@ -1243,13 +1265,27 @@ async def _run_task_async(
             )
 
         graph_memory = await format_graph_memory(conversation_id=conversation_id)
+        current_conversation_graph = None
+        try:
+            from app.services import graph_extractor as _graph_extractor
+
+            get_case_graph = getattr(_graph_extractor, "get_case_graph", None)
+            if callable(get_case_graph):
+                current_conversation_graph = await get_case_graph(conversation_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to load current conversation graph for request context | conversation_id=%s user_id=%s error=%s",
+                conversation_id,
+                user_id,
+                exc,
+            )
         return {
             "chat_history": chat_history,
             "latest_user_input": latest_user_input,
             "recent_messages": recent_messages,
             "case_summary": case_summary,
             "graph_memory": graph_memory,
-            "current_conversation_graph": None,
+            "current_conversation_graph": current_conversation_graph,
             "saved_case_state": saved_case_state,
             "persistence_consent": persistence_consent,
             "conversation_mode": conversation_mode,
@@ -1344,6 +1380,74 @@ async def _merge_message_metadata_async(
         await celery_engine.dispose()
 
 
+async def _attach_graph_clarification_to_latest_assistant_async(
+    *,
+    conversation_id: int,
+    user_message_id: int | None,
+    pending_clarification: dict[str, Any] | None,
+    reference_guard: dict[str, Any] | None,
+    clarification_questions: list[Any] | None,
+) -> None:
+    if not user_message_id or not isinstance(pending_clarification, dict):
+        return
+
+    celery_engine, session_factory = _create_celery_session_factory()
+    try:
+        await ensure_storage_schema(bind_engine=celery_engine)
+        async with session_factory() as db:
+            recent_messages = await list_recent_conversation_messages(
+                db,
+                conversation_id=conversation_id,
+                limit=8,
+            )
+            assistant_message_id: int | None = None
+            for message in recent_messages:
+                try:
+                    message_id = int(getattr(message, "id", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if message_id <= int(user_message_id):
+                    continue
+                role = getattr(message, "role", "")
+                if role == "user":
+                    break
+                if role == "assistant":
+                    assistant_message_id = message_id
+                    break
+
+            if assistant_message_id is None:
+                return
+
+            metadata_patch: dict[str, Any] = {
+                "pending_clarification": pending_clarification,
+                "graph_update_needs_clarification": True,
+                "clarification_questions": list(clarification_questions or []),
+            }
+            if isinstance(reference_guard, dict):
+                metadata_patch["reference_guard"] = reference_guard
+
+            message = await get_message_for_conversation(
+                db,
+                conversation_id=conversation_id,
+                message_id=assistant_message_id,
+            )
+            if message is None:
+                return
+            existing_metadata = (
+                message.message_metadata
+                if isinstance(getattr(message, "message_metadata", None), dict)
+                else {}
+            )
+            message.message_metadata = {
+                **existing_metadata,
+                **metadata_patch,
+            }
+            db.add(message)
+            await db.commit()
+    finally:
+        await celery_engine.dispose()
+
+
 @celery_app.task(name="update_graph_task")
 def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | None = None):
     try:
@@ -1385,6 +1489,11 @@ def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | 
                     graph_update_input_text = " ".join(
                         str(metadata.get("graph_update_input_text") or "").strip().split()
                     )
+                    prior_reference_guard = (
+                        metadata.get("reference_guard")
+                        if isinstance(metadata.get("reference_guard"), dict)
+                        else None
+                    )
                     user_input = graph_update_input_text or " ".join((user_message.content or "").strip().split())
                     if not user_input:
                         raise ValueError("message content is empty")
@@ -1410,21 +1519,37 @@ def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | 
                 user_input=user_input,
                 case_summary=case_summary,
                 user_id=user_id,
+                prior_reference_guard=prior_reference_guard,
             )
 
         update_result = asyncio.run(_run())
         logger.info(
-            "Graph update task completed | conversation_id=%s actions_applied=%s deleted_count=%s",
+            "Graph update task completed | conversation_id=%s actions_applied=%s deleted_count=%s needs_clarification=%s",
             conversation_id,
             update_result.get("actions_applied", 0),
             update_result.get("deleted_count", 0),
+            update_result.get("needs_clarification", False),
         )
+        if update_result.get("needs_clarification"):
+            asyncio.run(
+                _attach_graph_clarification_to_latest_assistant_async(
+                    conversation_id=conversation_id,
+                    user_message_id=message_id,
+                    pending_clarification=update_result.get("pending_clarification"),
+                    reference_guard=update_result.get("reference_guard"),
+                    clarification_questions=update_result.get("clarification_questions", []),
+                )
+            )
         return {
             "status": "success",
             "conversation_id": conversation_id,
             "message_id": message_id,
             "actions_applied": update_result.get("actions_applied", 0),
             "actions": update_result.get("actions", []),
+            "needs_clarification": update_result.get("needs_clarification", False),
+            "clarification_questions": update_result.get("clarification_questions", []),
+            "pending_clarification": update_result.get("pending_clarification"),
+            "reference_guard": update_result.get("reference_guard"),
         }
     except Exception as exc:
         logger.exception(
@@ -2213,12 +2338,13 @@ def ask_agent_task(
         response_sources = answer.get("sources", []) if isinstance(answer, dict) else []
         route_intent = answer.get("route_intent", "GENERAL_CONSULT") if isinstance(answer, dict) else "GENERAL_CONSULT"
         original_route_intent = route_intent
-        if subject_reference_short_circuit:
-            route_intent = "DOSSIER_MEMORY"
-        elif case_update_plan_active:
-            route_intent = "CASE_UPDATE"
-        elif legal_answer_plan_active:
-            route_intent = agentic_route or route_intent
+        route_intent = _resolve_final_route_intent(
+            answer_route_intent=route_intent,
+            subject_reference_short_circuit=subject_reference_short_circuit,
+            case_update_plan_active=case_update_plan_active,
+            legal_answer_plan_active=legal_answer_plan_active,
+            agentic_route=agentic_route,
+        )
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
         case_state_dict = answer.get("case_state_snapshot") if isinstance(answer, dict) else None
         case_type = answer.get("case_type") if isinstance(answer, dict) else None
@@ -2398,6 +2524,16 @@ def ask_agent_task(
             pending_clarification = answer.get("pending_clarification")
             if isinstance(pending_clarification, dict):
                 assistant_metadata["pending_clarification"] = pending_clarification
+        if case_update_plan_active:
+            reference_guard = (
+                execution_plan.get("reference_guard")
+                if isinstance(execution_plan.get("reference_guard"), dict)
+                else {}
+            )
+            pending_clarification = reference_guard.get("pending_clarification")
+            if isinstance(pending_clarification, dict):
+                assistant_metadata["pending_clarification"] = pending_clarification
+                assistant_metadata["reference_guard"] = reference_guard
         persist_result = {"user_message_id": None, "assistant_message_id": None}
         user_message_metadata: dict[str, Any] = {}
         if confirm_previous_fact_active and should_persist_structured_case:
@@ -2413,6 +2549,30 @@ def ask_agent_task(
                 "confirmed_fact_text": confirm_previous_fact_text,
                 "graph_update_input_text": graph_update_input_text or confirm_previous_fact_text,
                 "graph_update_source": "confirmed_previous_fact",
+            }
+        elif (
+            case_update_plan_active
+            and graph_update_input_text
+            and not (
+                isinstance(execution_plan.get("reference_guard"), dict)
+                and execution_plan.get("reference_guard", {}).get("needs_clarification")
+            )
+        ):
+            user_message_metadata = {
+                "message_understanding": {
+                    "intent": message_understanding.get("intent"),
+                    "route_hint": message_understanding.get("route_hint"),
+                },
+                "execution_plan": {
+                    "primary_route": execution_plan.get("primary_route"),
+                    "steps": sorted(execution_plan_step_names),
+                },
+                "graph_update_input_text": graph_update_input_text,
+                "graph_update_source": (
+                    "reference_clarification"
+                    if agentic_intent == "clarification_response"
+                    else "current_message"
+                ),
             }
 
         if route_intent != "GREETING":

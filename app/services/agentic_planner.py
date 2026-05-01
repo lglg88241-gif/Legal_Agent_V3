@@ -142,18 +142,93 @@ def build_agentic_plan(
         needs_structured_persistence=needs_structured_persistence,
     )
 
+    if intent == "clarification_response" and route == "CASE_UPDATE":
+        resolved_inputs = (
+            legacy_plan.get("resolved_inputs")
+            if isinstance(legacy_plan.get("resolved_inputs"), dict)
+            else {}
+        )
+        graph_update_input_text = _normalize_text(
+            resolved_inputs.get("graph_update_input_text")
+            or resolved_inputs.get("effective_persistence_text")
+        )
+        tool_sequence = [
+            _tool_call(
+                "case_summary_update",
+                arguments={"conversation_id": conversation_id, "case_summary": graph_update_input_text},
+                reason="Persist the original fact together with the user's reference clarification.",
+                dispatch_mode="planned_contract",
+            ),
+            _tool_call(
+                "schedule_graph_update",
+                arguments={"conversation_id": conversation_id, "user_id": 0},
+                reason="Schedule graph update from the original fact plus the resolved reference.",
+                dispatch_mode="planned_contract",
+            ),
+            _tool_call(
+                "acknowledgement_compose",
+                arguments={"intent": "clarification_response"},
+                reason="Acknowledge that the reference clarification was applied to the pending fact update.",
+                dispatch_mode="specialist_owned",
+            ),
+        ]
+        writes_requested = [
+            _write_request(
+                "structured_case_persistence",
+                tool_name="case_summary_update",
+                requested=bool(graph_update_input_text),
+                input_text=graph_update_input_text,
+                reason="Persist the pending fact after reference clarification.",
+            ),
+            _write_request(
+                "graph_update_schedule",
+                tool_name="schedule_graph_update",
+                requested=bool(graph_update_input_text),
+                input_text=graph_update_input_text,
+                reason="Schedule graph update after reference clarification.",
+            ),
+        ]
+        plan.update(
+            response_mode="tracked_case_refresh",
+            response_style="tracked_case_refresh",
+            specialist="case_update_agent",
+            plan_summary="Apply the user's clarification to the pending fact update, then persist and update the graph.",
+            context_requirements=["pending_clarification", "message_text"],
+            tool_sequence=tool_sequence,
+            tool_calls=tool_sequence,
+            writes_requested=writes_requested,
+            needs_legal_rag=False,
+            needs_graph_context=False,
+            needs_structured_persistence=True,
+            final_response_strategy="acknowledgement",
+            missing_requirements=[] if graph_update_input_text else ["pending_graph_update_input_text"],
+            fallback_allowed=False,
+        )
+        return plan
+
     if intent in {"subject_reference", "clarification_response"} and route == "DOSSIER_MEMORY":
         tool_sequence = [
             _tool_call(
                 "current_conversation_graph_query",
                 arguments={"conversation_id": conversation_id},
-                reason="Load current conversation graph before resolving the subject reference.",
+                reason="Load current conversation graph before answering the dossier memory question.",
             ),
             _tool_call(
                 "current_conversation_messages_query",
                 arguments={"conversation_id": conversation_id, "limit": 12},
-                reason="Use recent conversation messages as secondary evidence for subject reference resolution.",
+                reason="Use recent conversation messages as secondary evidence for dossier memory resolution.",
                 dispatch_mode="planned_contract",
+            ),
+            _tool_call(
+                "dossier_graph_context_query",
+                arguments={
+                    "conversation_id": conversation_id,
+                    "dossier_id": dossier_id or 0,
+                    "query": normalized_question,
+                    "limit": 20,
+                },
+                reason="If current conversation evidence is incomplete, use dossier-scoped graph evidence.",
+                dispatch_mode="planner_direct",
             ),
             _tool_call(
                 "subject_reference_resolve",
@@ -167,7 +242,7 @@ def build_agentic_plan(
                     ),
                     "current_conversation_id": conversation_id,
                 },
-                reason="Resolve the referenced subject from current-conversation and dossier memory scopes.",
+                reason="Answer the fact memory question from current-conversation and dossier memory scopes.",
             ),
             _tool_call(
                 "memory_answer_compose",
@@ -181,7 +256,7 @@ def build_agentic_plan(
                     ),
                     "current_conversation_id": conversation_id,
                 },
-                reason="Compose the user-facing subject reference answer from resolver output.",
+                reason="Compose the user-facing dossier memory answer from resolver output.",
                 dispatch_mode="specialist_owned",
             ),
         ]
@@ -189,8 +264,8 @@ def build_agentic_plan(
             response_mode="dossier_memory_answer",
             response_style="dossier_memory_answer",
             specialist="dossier_memory_agent",
-            plan_summary="Resolve subject reference from current conversation context before escalating to dossier memory.",
-            context_requirements=["current_conversation_graph", "pending_clarification"],
+            plan_summary="Answer dossier memory questions from current conversation graph/messages before escalating to dossier graph.",
+            context_requirements=["current_conversation_graph", "recent_messages", "dossier_graph_context"],
             tool_sequence=tool_sequence,
             tool_calls=tool_sequence,
             writes_requested=[],
@@ -204,6 +279,72 @@ def build_agentic_plan(
         return plan
 
     if intent == "fact_update" and route == "CASE_UPDATE":
+        has_bound_dossier = isinstance(dossier_id, int) and dossier_id > 0
+        is_temporary = isinstance(request_context, AgenticRequestContext) and request_context.temporary
+        reference_guard = (
+            legacy_plan.get("reference_guard")
+            if isinstance(legacy_plan.get("reference_guard"), dict)
+            else {}
+        )
+
+        if is_temporary or not has_bound_dossier:
+            tool_sequence = [
+                _tool_call(
+                    "legal_answer_compose",
+                    arguments={"question": normalized_question},
+                    reason="Compose temporary case analysis without persistence.",
+                    dispatch_mode="specialist_owned",
+                ),
+            ]
+            plan.update(
+                response_mode="temporary_case_analysis",
+                response_style="temporary_case_analysis",
+                specialist="legal_agent",
+                plan_summary=(
+                    "Treat the message as a temporary case analysis request without persistence writes."
+                    if is_temporary
+                    else "Conversation is not bound to a dossier, so treat as temporary analysis without persistence writes."
+                ),
+                context_requirements=["message_text"],
+                tool_sequence=tool_sequence,
+                tool_calls=tool_sequence,
+                writes_requested=[],
+                needs_legal_rag=False,
+                needs_graph_context=False,
+                needs_structured_persistence=False,
+                final_response_strategy="temporary_case_analysis",
+                missing_requirements=[],
+                fallback_allowed=False,
+            )
+            return plan
+
+        if reference_guard.get("needs_clarification"):
+            tool_sequence = [
+                _tool_call(
+                    "acknowledgement_compose",
+                    arguments={"intent": "fact_update"},
+                    reason="Ask the user to confirm ambiguous graph references before any case writes.",
+                    dispatch_mode="specialist_owned",
+                ),
+            ]
+            plan.update(
+                response_mode="clarification",
+                response_style="clarification",
+                specialist="case_update_agent",
+                plan_summary="Fact update contains unresolved oral references, so ask clarification before persistence or graph writes.",
+                context_requirements=["current_conversation_graph", "pending_clarification"],
+                tool_sequence=tool_sequence,
+                tool_calls=tool_sequence,
+                writes_requested=[],
+                needs_legal_rag=False,
+                needs_graph_context=True,
+                needs_structured_persistence=False,
+                final_response_strategy="ask_clarification",
+                missing_requirements=["graph_reference_resolution"],
+                fallback_allowed=False,
+            )
+            return plan
+
         tool_sequence = [
             _tool_call(
                 "case_fact_extract",
@@ -246,24 +387,11 @@ def build_agentic_plan(
                 reason="Schedule graph extraction/update from the new factual message.",
             ),
         ]
-        response_mode = "temporary_case_analysis" if (
-            isinstance(request_context, AgenticRequestContext) and request_context.temporary
-        ) else "tracked_case_refresh"
-        plan_summary = (
-            "Treat the message as a temporary case analysis request without persistence writes."
-            if response_mode == "temporary_case_analysis"
-            else "Treat the message as a tracked case refresh and plan state/graph updates around the factual message."
-        )
-        final_response_strategy = (
-            "temporary_case_analysis"
-            if response_mode == "temporary_case_analysis"
-            else "acknowledgement"
-        )
         plan.update(
-            response_mode=response_mode,
-            response_style=response_mode,
+            response_mode="tracked_case_refresh",
+            response_style="tracked_case_refresh",
             specialist="case_update_agent",
-            plan_summary=plan_summary,
+            plan_summary="Treat the message as a tracked case refresh and plan state/graph updates around the factual message.",
             context_requirements=["message_text", "persistence_consent"],
             tool_sequence=tool_sequence,
             tool_calls=tool_sequence,
@@ -271,7 +399,7 @@ def build_agentic_plan(
             needs_legal_rag=False,
             needs_graph_context=False,
             needs_structured_persistence=True,
-            final_response_strategy=final_response_strategy,
+            final_response_strategy="acknowledgement",
             missing_requirements=[],
             fallback_allowed=False,
         )
@@ -290,8 +418,9 @@ def build_agentic_plan(
                 dispatch_mode="specialist_owned",
             ),
         ]
+        has_bound_dossier = isinstance(dossier_id, int) and dossier_id > 0
         is_temporary = isinstance(request_context, AgenticRequestContext) and request_context.temporary
-        response_mode = "temporary_case_analysis" if is_temporary else "tracked_case_refresh"
+        response_mode = "temporary_case_analysis" if (is_temporary or not has_bound_dossier) else "tracked_case_refresh"
         plan.update(
             response_mode=response_mode,
             response_style=response_mode,
@@ -305,6 +434,22 @@ def build_agentic_plan(
             fallback_allowed=False,
         )
         if previous_fact_text:
+            if is_temporary or not has_bound_dossier:
+                plan.update(
+                    plan_summary=(
+                        "Use the resolved previous factual user message only for temporary analysis without persistence."
+                        if is_temporary
+                        else "Conversation is not bound to a dossier, so use resolved previous fact only for temporary analysis."
+                    ),
+                    tool_sequence=base_tool_sequence,
+                    tool_calls=base_tool_sequence,
+                    writes_requested=[],
+                    needs_structured_persistence=False,
+                    final_response_strategy="temporary_case_analysis",
+                    missing_requirements=[],
+                )
+                return plan
+
             full_tool_sequence = [
                 _tool_call(
                     "case_summary_update",
@@ -321,11 +466,7 @@ def build_agentic_plan(
                 *base_tool_sequence,
             ]
             plan.update(
-                plan_summary=(
-                    "Use the resolved previous factual user message only for temporary analysis without persistence."
-                    if is_temporary
-                    else "Bind confirmation to the resolved previous factual user message before planning tracked refresh writes."
-                ),
+                plan_summary="Bind confirmation to the resolved previous factual user message before planning tracked refresh writes.",
                 tool_sequence=full_tool_sequence,
                 tool_calls=full_tool_sequence,
                 writes_requested=[
@@ -344,9 +485,7 @@ def build_agentic_plan(
                         reason="Schedule graph update from the resolved previous factual user message.",
                     ),
                 ],
-                final_response_strategy=(
-                    "temporary_case_analysis" if is_temporary else "acknowledgement"
-                ),
+                final_response_strategy="acknowledgement",
                 missing_requirements=[],
             )
             return plan

@@ -143,3 +143,5 @@ def test_build_advisor_system_prompt_stays_unchanged_without_dossier_context() -
 
     assert "<dossier_context>" not in prompt
     assert "[\u6848\u5377\u4e0a\u4e0b\u6587]" not in prompt
+    assert "<dossier_graph_context_guard>" not in prompt
+    assert "\u5f53\u524d\u6848\u5377" not in prompt

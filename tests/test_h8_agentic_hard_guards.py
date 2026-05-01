@@ -132,6 +132,7 @@ def test_tracked_fact_update_allows_case_summary_and_graph_update() -> None:
         request_id="req-tracked",
         user_id=1,
         conversation_id=9,
+        dossier_id=21,
         message_text=FACT_MESSAGE,
         recent_messages=[],
         persistence_consent="tracked",
@@ -175,6 +176,7 @@ def test_confirm_previous_fact_uses_previous_fact_text_and_allows_writes() -> No
         request_id="req-confirm",
         user_id=1,
         conversation_id=9,
+        dossier_id=21,
         message_text="我确认这个事实",
         recent_messages=[
             {"message_id": 71, "role": "user", "content": FACT_MESSAGE, "metadata": {"message_understanding": {"intent": "fact_update"}}},
@@ -224,6 +226,7 @@ def test_confirm_previous_fact_missing_previous_fact_blocks_synthetic_writes() -
         request_id="req-confirm-missing",
         user_id=1,
         conversation_id=9,
+        dossier_id=21,
         message_text="我确认这个事实",
         recent_messages=[],
         persistence_consent="tracked",
@@ -251,3 +254,101 @@ def test_confirm_previous_fact_missing_previous_fact_blocks_synthetic_writes() -
         for item in result["writes_blocked"]
     )
     assert all(item["input_text"] == "" for item in result["writes_blocked"])
+
+
+def test_tracked_fact_update_without_dossier_blocks_writes() -> None:
+    context = build_agentic_request_context(
+        request_id="req-unbound",
+        user_id=1,
+        conversation_id=9,
+        dossier_id=None,
+        message_text=FACT_MESSAGE,
+        recent_messages=[],
+        persistence_consent="tracked",
+        conversation_mode="TRACKED_CASE",
+        message_understanding={"intent": "fact_update"},
+    )
+    result = evaluate_agentic_hard_guards(
+        agentic_plan={
+            "intent": "fact_update",
+            "route": "CASE_UPDATE",
+            "writes_requested": [
+                {
+                    "name": "structured_case_persistence",
+                    "tool_name": "case_summary_update",
+                    "requested": True,
+                    "input_text": FACT_MESSAGE,
+                    "reason": "persist fact",
+                },
+                {
+                    "name": "graph_update_schedule",
+                    "tool_name": "schedule_graph_update",
+                    "requested": True,
+                    "input_text": FACT_MESSAGE,
+                    "reason": "schedule graph",
+                },
+            ],
+        },
+        request_context=context,
+        message_understanding={"intent": "fact_update"},
+    )
+
+    assert result["writes_allowed"] == []
+    assert len(result["writes_blocked"]) == 2
+    assert all(
+        "tracked_writes_require_bound_dossier" in item["blocked_by"]
+        for item in result["writes_blocked"]
+    )
+
+def test_confirm_previous_fact_without_dossier_blocks_writes() -> None:
+    context = build_agentic_request_context(
+        request_id="req-confirm-unbound",
+        user_id=1,
+        conversation_id=9,
+        dossier_id=None,
+        message_text="我确认这个事实",
+        recent_messages=[
+            {"message_id": 71, "role": "user", "content": FACT_MESSAGE, "metadata": {"message_understanding": {"intent": "fact_update"}}},
+            {"message_id": 72, "role": "assistant", "content": "继续补充。", "metadata": {}},
+        ],
+        persistence_consent="tracked",
+        conversation_mode="TRACKED_CASE",
+        message_understanding={
+            "intent": "confirm_previous_fact",
+            "previous_fact_confirmation": {"target_message_id": 71},
+        },
+    )
+    result = evaluate_agentic_hard_guards(
+        agentic_plan={
+            "intent": "confirm_previous_fact",
+            "route": "CASE_UPDATE",
+            "writes_requested": [
+                {
+                    "name": "structured_case_persistence",
+                    "tool_name": "case_summary_update",
+                    "requested": True,
+                    "input_text": FACT_MESSAGE,
+                    "reason": "persist previous fact",
+                },
+                {
+                    "name": "graph_update_schedule",
+                    "tool_name": "schedule_graph_update",
+                    "requested": True,
+                    "input_text": FACT_MESSAGE,
+                    "reason": "schedule previous fact graph update",
+                },
+            ],
+        },
+        request_context=context,
+        message_understanding={
+            "intent": "confirm_previous_fact",
+            "previous_fact_confirmation": {"target_message_id": 71},
+        },
+    )
+
+    assert result["writes_allowed"] == []
+    assert len(result["writes_blocked"]) == 2
+    assert all(
+        "tracked_writes_require_bound_dossier" in item["blocked_by"]
+        for item in result["writes_blocked"]
+    )

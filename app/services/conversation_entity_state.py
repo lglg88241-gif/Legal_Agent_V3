@@ -29,9 +29,19 @@ CURRENT_PARTY_DEFAULT_ALIASES = ("我", "本人", "当事人", "劳动者", "申
 LEGAL_INTENTS = {"legal_question", "advice_question", "document_request"}
 SUPPRESSED_INTENTS = {"subject_reference", "clarification_response"}
 ORG_SUFFIXES = (
+    "有限责任公司",
+    "股份有限公司",
+    "集团有限公司",
+    "集团公司",
+    "有限公司",
     "公司",
     "单位",
     "集团",
+    "企业",
+    "科技",
+    "中心",
+    "工厂",
+    "厂",
     "学校",
     "医院",
     "银行",
@@ -43,15 +53,17 @@ ORG_SUFFIXES = (
     "人社局",
 )
 AUTHORITY_HINTS = {"社保局", "劳动仲裁委", "仲裁委", "法院", "人社局", "劳动监察"}
-ROLE_LABELS = {"HR", "hr", "人事", "主管", "经理", "法务", "老板", "负责人"}
-ROLE_SUFFIXES = ("经理", "主管", "主任", "负责人", "法务")
+ROLE_LABELS = {"HR", "hr", "人事", "主管", "经理", "法务", "老板", "负责人", "法人", "法定代表人", "代表", "代理人"}
+ROLE_SUFFIXES = ("经理", "主管", "主任", "负责人", "法务", "法人", "法定代表人", "代表", "代理人")
 FACT_TYPES = {
     "event",
     "fact",
     "evidence",
     "document",
+    "contract",
     "amount",
     "money",
+    "salary",
     "time",
     "date",
     "law",
@@ -62,19 +74,69 @@ FACT_TYPES = {
     "action",
     "benefit",
     "notice",
+    "result",
+    "consequence",
+    "social_insurance",
 }
 FACT_LABEL_HINTS = {
+    "欠薪",
     "合同",
     "劳动合同",
     "社保",
+    "社会保险",
     "工资",
     "月薪",
+    "薪资",
+    "薪酬",
     "通知",
     "确认书",
     "证据",
+    "证明",
     "时间",
     "日期",
     "赔偿",
+    "赔偿金",
+    "补偿",
+    "后果",
+    "结果",
+    "请求",
+    "仲裁申请",
+    "申请书",
+    "仲裁申请书",
+    "工资流水",
+    "银行流水",
+    "微信聊天",
+    "微信聊天记录",
+    "聊天记录",
+    "聊天截图",
+    "打卡记录",
+    "考勤记录",
+    "转账记录",
+    "录音",
+    "截图",
+    "凭证",
+    "证人证言",
+}
+RESPONSIBLE_ENTITY_TYPES = {
+    "person",
+    "natural_person",
+    "person_or_role",
+    "person_role",
+    "human",
+    "organization",
+    "company",
+    "employer",
+    "unit",
+    "department",
+    "authority",
+    "agency",
+    "institution",
+    "arbitration_body",
+    "court",
+    "role",
+    "representative",
+    "hr",
+    "manager",
 }
 
 SELF_NAME_PATTERNS = (
@@ -158,16 +220,29 @@ def _node_label(node: dict[str, Any]) -> str:
 
 
 def _node_type(node: dict[str, Any]) -> str:
+    types = _node_type_values(node)
+    return types[0] if types else "unknown"
+
+
+def _node_type_values(node: dict[str, Any]) -> list[str]:
     properties = node.get("properties") if isinstance(node.get("properties"), dict) else {}
+    values: list[str] = []
     for key in ("type", "entity_type", "graph_node_type", "node_type", "category"):
         normalized = _normalize_text(node.get(key))
         if normalized:
-            return normalized
+            values.append(normalized)
     for key in ("node_type", "entity_type", "category"):
         normalized = _normalize_text(properties.get(key))
         if normalized:
-            return normalized
-    return "unknown"
+            values.append(normalized)
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = _normalize_key(value)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(value)
+    return result
 
 
 def _node_conversation_id(node: dict[str, Any]) -> int:
@@ -244,9 +319,19 @@ def _is_self_anchor(label: str) -> bool:
     return _normalize_text(label) in SELF_ANCHOR_LABELS
 
 
-def _looks_like_fact(label: str, node_type: str) -> bool:
-    normalized_type = _normalize_key(node_type)
-    if normalized_type in FACT_TYPES:
+def _is_case_graph_subject_category(value: str) -> bool:
+    return _normalize_text(value) == "主体"
+
+
+def _is_case_graph_non_subject_category(value: str) -> bool:
+    return _normalize_text(value) in {"客体", "事件", "后果"}
+
+
+def _looks_like_fact(label: str, node_type: str, node_types: list[str] | None = None) -> bool:
+    normalized_types = {_normalize_key(value) for value in (node_types or [node_type]) if _normalize_key(value)}
+    if normalized_types & FACT_TYPES:
+        return True
+    if any(_is_case_graph_non_subject_category(value) for value in (node_types or [node_type])):
         return True
     return any(hint in label for hint in FACT_LABEL_HINTS)
 
@@ -292,8 +377,15 @@ def _is_specific_person_label(label: str) -> bool:
     return _looks_like_person_name(normalized) and normalized not in SELF_ANCHOR_LABELS
 
 
-def _entity_type_for_label(label: str, node_type: str = "") -> str:
+def _entity_type_for_label(label: str, node_type: str = "", node_types: list[str] | None = None) -> str:
+    type_values = node_types or ([node_type] if node_type else [])
+    if any(_is_case_graph_non_subject_category(value) for value in type_values):
+        return "fact"
     normalized_type = _normalize_key(node_type)
+    if normalized_type == "dynamiccaseentity":
+        subject_type = next((value for value in type_values if _is_case_graph_subject_category(value)), "")
+        if subject_type:
+            normalized_type = ""
     if any(hint in label for hint in AUTHORITY_HINTS):
         return "authority"
     if normalized_type in {"organization", "company", "employer", "unit"} or _looks_like_org(label):
@@ -329,7 +421,7 @@ def _graph_node_role(label: str, entity_type: str, node: dict[str, Any]) -> str:
     )
     if party_side in {"claimant", "primary", "current_party"} and entity_type == "person":
         return "current_party"
-    if entity_type == "organization" and ("公司" in label or "单位" in label):
+    if entity_type == "organization" and _looks_like_org(label):
         return "employer"
     if entity_type in {"person", "role"} and _looks_like_role_or_manager(label):
         return "manager_or_hr"
@@ -425,10 +517,13 @@ def _graph_entity_mentions(
             elif not node_id or conversation_id not in incident_conversation_ids.get(node_id, set()):
                 continue
         label = _node_label(node)
-        node_type = _node_type(node)
-        if not label or _looks_like_fact(label, node_type):
+        node_types = _node_type_values(node)
+        node_type = node_types[0] if node_types else "unknown"
+        if not label:
             continue
-        entity_type = _entity_type_for_label(label, node_type)
+        if _looks_like_fact(label, node_type, node_types):
+            continue
+        entity_type = _entity_type_for_label(label, node_type, node_types)
         if _is_self_anchor(label):
             entity_type = "person"
         if entity_type not in {"person", "organization", "role", "authority"}:

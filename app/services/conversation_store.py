@@ -1365,6 +1365,10 @@ async def _sync_aliases_to_confirmed_participants(
             if len(same_side_matches) == 1:
                 target = same_side_matches[0]
 
+        if target is not None and is_self_anchor_participant_label(getattr(target, "label", None)):
+            if is_self_anchor_participant_label(label):
+                continue
+
         if target is None:
             target = await create_dossier_participant_record(
                 db,

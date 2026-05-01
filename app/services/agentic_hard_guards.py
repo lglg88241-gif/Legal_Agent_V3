@@ -99,6 +99,8 @@ def evaluate_agentic_hard_guards(
         if conversation_mode is not None
         else context.get("conversation_mode")
     )
+    dossier_id = context.get("dossier_id")
+    has_bound_dossier = isinstance(dossier_id, int) and dossier_id > 0
     resolved_previous_fact = (
         previous_factual_user_message
         if isinstance(previous_factual_user_message, dict)
@@ -109,6 +111,15 @@ def evaluate_agentic_hard_guards(
         )
     )
     current_message_text = _normalize_text(context.get("message_text"))
+    clarification_response = (
+        mu.get("clarification_response")
+        if isinstance(mu.get("clarification_response"), dict)
+        else {}
+    )
+    clarification_applies_pending_graph_fact = bool(
+        intent == "clarification_response"
+        and _normalize_text(clarification_response.get("pending_graph_update_input_text"))
+    )
 
     temporary_blocks_structured_persistence = normalized_persistence in {
         "temporary",
@@ -116,6 +127,10 @@ def evaluate_agentic_hard_guards(
         "disabled",
     }
     temporary_blocks_graph_update = temporary_blocks_structured_persistence
+    tracked_writes_require_bound_dossier = (
+        route == "CASE_UPDATE"
+        and not has_bound_dossier
+    )
     legal_qa_blocks_case_graph_pollution = (
         normalized_mode == "LEGAL_QA"
         or intent in {"legal_question", "advice_question", "document_request"}
@@ -124,7 +139,7 @@ def evaluate_agentic_hard_guards(
     subject_reference_blocks_writes = intent in {
         "subject_reference",
         "clarification_response",
-    }
+    } and not clarification_applies_pending_graph_fact
     missing_previous_fact_blocks_confirm_writes = bool(
         intent == "confirm_previous_fact"
         and (
@@ -159,6 +174,8 @@ def evaluate_agentic_hard_guards(
         if write_name == "structured_case_persistence":
             if temporary_blocks_structured_persistence:
                 blocked_by.append("temporary_blocks_structured_persistence")
+            if tracked_writes_require_bound_dossier:
+                blocked_by.append("tracked_writes_require_bound_dossier")
             if legal_qa_blocks_case_graph_pollution:
                 blocked_by.append("legal_qa_blocks_case_graph_pollution")
             if missing_previous_fact_blocks_confirm_writes:
@@ -167,6 +184,8 @@ def evaluate_agentic_hard_guards(
         if write_name == "graph_update_schedule":
             if temporary_blocks_graph_update:
                 blocked_by.append("temporary_blocks_graph_update")
+            if tracked_writes_require_bound_dossier:
+                blocked_by.append("tracked_writes_require_bound_dossier")
             if legal_qa_blocks_case_graph_pollution:
                 blocked_by.append("legal_qa_blocks_case_graph_pollution")
             if missing_previous_fact_blocks_confirm_writes:
@@ -199,12 +218,20 @@ def evaluate_agentic_hard_guards(
             "triggered": temporary_blocks_graph_update,
         },
         {
+            "name": "tracked_writes_require_bound_dossier",
+            "triggered": tracked_writes_require_bound_dossier,
+        },
+        {
             "name": "legal_qa_blocks_case_graph_pollution",
             "triggered": legal_qa_blocks_case_graph_pollution,
         },
         {
             "name": "subject_reference_blocks_writes",
             "triggered": subject_reference_blocks_writes,
+        },
+        {
+            "name": "clarification_response_resumes_pending_graph_update",
+            "triggered": clarification_applies_pending_graph_fact,
         },
         {
             "name": "missing_previous_fact_blocks_confirm_writes",

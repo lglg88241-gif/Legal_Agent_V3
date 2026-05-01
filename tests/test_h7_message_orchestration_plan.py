@@ -107,6 +107,37 @@ def _fact_update_result() -> dict[str, object]:
     }
 
 
+def _graph_with_nodes(nodes: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "query": "current conversation graph",
+        "nodes": nodes,
+        "edges": [],
+    }
+
+
+def _request_context_with_graph(
+    *,
+    message: str,
+    graph: dict[str, object],
+    recent_messages: list[dict[str, object]] | None = None,
+    message_understanding: dict[str, object] | None = None,
+):
+    from app.services.agentic_request_context import build_agentic_request_context
+
+    return build_agentic_request_context(
+        request_id="req-graph-reference",
+        user_id=1,
+        conversation_id=9,
+        dossier_id=12,
+        message_text=message,
+        recent_messages=recent_messages or [],
+        persistence_consent="tracked",
+        conversation_mode="TRACKED_CASE",
+        current_conversation_graph=graph,
+        message_understanding=message_understanding or {"intent": "fact_update"},
+    )
+
+
 def _confirm_previous_fact_result(
     *,
     target_text: str | None = None,
@@ -214,6 +245,121 @@ def test_build_execution_plan_fact_update_paraphrases_use_current_message(messag
     assert plan["resolved_inputs"]["graph_update_input_text"] == message
 
 
+def test_build_execution_plan_does_not_preblock_fact_update_with_named_entities() -> None:
+    message = "我想咨询一个劳动纠纷。我叫张三，在上海一家叫蓝海科技的公司做后端开发。公司从2023年5月开始拖欠我工资，到现在大概欠了我6万元。"
+    plan = build_execution_plan_from_message_understanding(
+        _fact_update_result(),
+        original_message=message,
+        recent_messages=[],
+        dossier_id=12,
+        persistence_consent="tracked",
+        request_context=_request_context_with_graph(
+            message=message,
+            graph=_graph_with_nodes([]),
+        ),
+    )
+
+    assert plan["response_mode"] == "tracked_case_refresh"
+    assert plan["persistence_allowed"] is True
+    assert plan["graph_update_allowed"] is True
+    assert [step["name"] for step in plan["steps"]] == [
+        "fact_persistence",
+        "graph_update",
+        "assistant_acknowledgement",
+    ]
+    assert "reference_guard" not in plan
+
+
+def test_build_execution_plan_fact_update_defers_pronoun_safety_to_graph_write() -> None:
+    message = "我没有签正式劳动合同，但是每天都去公司打卡，也有工资流水和微信聊天记录。"
+    plan = build_execution_plan_from_message_understanding(
+        _fact_update_result(),
+        original_message=message,
+        recent_messages=[],
+        dossier_id=12,
+        persistence_consent="tracked",
+        request_context=_request_context_with_graph(
+            message=message,
+            graph=_graph_with_nodes(
+                [
+                    {"id": "person-zhang", "label": "张三", "type": "主体"},
+                    {"id": "person-li", "label": "李四", "type": "主体"},
+                    {"id": "company-lanhai", "label": "蓝海科技", "type": "主体"},
+                ]
+            ),
+        ),
+    )
+
+    assert plan["response_mode"] == "tracked_case_refresh"
+    assert plan["persistence_allowed"] is True
+    assert plan["graph_update_allowed"] is True
+    assert [step["name"] for step in plan["steps"]] == [
+        "fact_persistence",
+        "graph_update",
+        "assistant_acknowledgement",
+    ]
+    assert plan["resolved_inputs"]["graph_update_input_text"] == message
+
+
+def test_build_execution_plan_fact_update_does_not_preblock_generic_company_word() -> None:
+    message = "公司没有给我签劳动合同。"
+    plan = build_execution_plan_from_message_understanding(
+        _fact_update_result(),
+        original_message=message,
+        recent_messages=[],
+        dossier_id=12,
+        persistence_consent="tracked",
+        request_context=_request_context_with_graph(
+            message=message,
+            graph=_graph_with_nodes(
+                [
+                    {"id": "person-zhang", "label": "张三", "type": "主体", "properties": {"role": "current_party"}},
+                    {"id": "company-lanhai", "label": "蓝海科技", "type": "主体"},
+                    {"id": "company-outsourcing", "label": "外包公司", "type": "主体"},
+                ]
+            ),
+        ),
+    )
+
+    assert plan["response_mode"] == "tracked_case_refresh"
+    assert plan["graph_update_allowed"] is True
+    assert [step["name"] for step in plan["steps"]] == [
+        "fact_persistence",
+        "graph_update",
+        "assistant_acknowledgement",
+    ]
+
+
+def test_build_execution_plan_clarification_response_resumes_pending_graph_fact() -> None:
+    original_fact = "我没有签正式劳动合同，但是每天都去公司打卡。"
+    result = _clarification_response_result()
+    result["clarification_response"]["pending_graph_update_input_text"] = original_fact
+    plan = build_execution_plan_from_message_understanding(
+        result,
+        original_message="指的是张三",
+        recent_messages=[],
+        dossier_id=12,
+        persistence_consent="tracked",
+        request_context=_request_context_with_graph(
+            message="指的是张三",
+            graph=_graph_with_nodes([]),
+            message_understanding=result,
+        ),
+    )
+
+    assert plan["primary_route"] == "CASE_UPDATE"
+    assert plan["response_mode"] == "tracked_case_refresh"
+    assert plan["persistence_allowed"] is True
+    assert plan["graph_update_allowed"] is True
+    assert [step["name"] for step in plan["steps"]] == [
+        "fact_persistence",
+        "graph_update",
+        "assistant_acknowledgement",
+    ]
+    assert original_fact in plan["resolved_inputs"]["graph_update_input_text"]
+    assert "指代确认：指的是张三" in plan["resolved_inputs"]["graph_update_input_text"]
+
+
 def test_build_execution_plan_temporary_fact_update_uses_transient_case_analysis() -> None:
     plan = build_execution_plan_from_message_understanding(
         _fact_update_result(),
@@ -312,6 +458,11 @@ def _install_celery_import_stubs() -> None:
     fake_graph_extractor.refresh_case_graph = _refresh_case_graph
     sys.modules["app.services.graph_extractor"] = fake_graph_extractor
 
+    sys.modules.pop("langchain_core", None)
+    sys.modules.pop("langchain_core.messages", None)
+    sys.modules.pop("langchain_community", None)
+    sys.modules.pop("langchain_community.chat_models", None)
+
     fake_redis_mgr = ModuleType("app.memory.redis_mgr")
     fake_redis_mgr.get_redis_saver_for_current_loop = lambda: None
     sys.modules["app.memory.redis_mgr"] = fake_redis_mgr
@@ -323,6 +474,20 @@ def _load_celery_module():
     return importlib.import_module("app.celery_app")
 
 
+def test_final_route_intent_preserves_out_of_scope_from_legal_answer_specialist() -> None:
+    celery_module = _load_celery_module()
+
+    route_intent = celery_module._resolve_final_route_intent(
+        answer_route_intent="OUT_OF_SCOPE",
+        subject_reference_short_circuit=False,
+        case_update_plan_active=False,
+        legal_answer_plan_active=True,
+        agentic_route="LEGAL_QA",
+    )
+
+    assert route_intent == "OUT_OF_SCOPE"
+
+
 def _run_ask_agent_task(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -331,6 +496,7 @@ def _run_ask_agent_task(
     message_understanding_result: dict[str, object],
     persistence_consent: str = "tracked",
     conversation_mode: str = "TRACKED_CASE",
+    current_conversation_graph: dict[str, object] | None = None,
 ) -> tuple[object, dict[str, object], list[tuple[int, int, int]]]:
     celery_module = _load_celery_module()
     persisted: dict[str, object] = {}
@@ -350,6 +516,7 @@ def _run_ask_agent_task(
             "dossier_context": {"id": 12, "title": "劳动争议案卷"},
             "dossier_graph_summary": "",
             "dossier_graph_context": None,
+            "current_conversation_graph": current_conversation_graph,
         }
 
     class FakeLegalAgent:
@@ -411,6 +578,79 @@ def test_ask_agent_task_uses_execution_plan_for_fact_update_even_if_legacy_answe
     action_summaries = [str(item.get("result_summary") or "") for item in result["agent_actions"]]
     assert any("Execution plan selected CASE_UPDATE" in summary for summary in action_summaries)
     assert all("General consult route selected" not in summary for summary in action_summaries)
+
+
+def test_ask_agent_task_schedules_graph_update_for_pronoun_fact_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    question = "我没有签正式劳动合同，但是每天都去公司打卡，也有工资流水和微信聊天记录。"
+    result, persisted, graph_calls = _run_ask_agent_task(
+        monkeypatch,
+        question=question,
+        recent_messages=[],
+        message_understanding_result=_fact_update_result(),
+        current_conversation_graph=_graph_with_nodes(
+            [
+                {"id": "person-zhang", "label": "张三", "type": "主体"},
+                {"id": "person-li", "label": "李四", "type": "主体"},
+                {"id": "company-lanhai", "label": "蓝海科技", "type": "主体"},
+            ]
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["route_intent"] == "CASE_UPDATE"
+    assert "已记录这条新的案情事实" in result["response"]
+    assert graph_calls == [(9, 1, 101)]
+    assert persisted["user_metadata"]["graph_update_input_text"] == question
+    assert "pending_clarification" not in persisted["metadata"]
+
+
+def test_ask_agent_task_reference_clarification_resumes_pending_graph_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_fact = "我没有签正式劳动合同，但是每天都去公司打卡。"
+    message_understanding_result = _clarification_response_result()
+    message_understanding_result["clarification_response"]["pending_graph_update_input_text"] = original_fact
+    result, persisted, graph_calls = _run_ask_agent_task(
+        monkeypatch,
+        question="指的是张三",
+        recent_messages=[
+            {"message_id": 11, "role": "user", "content": original_fact, "metadata": {}},
+            {
+                "message_id": 12,
+                "role": "assistant",
+                "content": "为避免把案卷图谱写错，这里的“我”指的是哪位当事人？",
+                "metadata": {
+                    "pending_clarification": {
+                        "type": "subject_reference_resolution",
+                        "source": "graph_reference_guard",
+                        "target_mention": "我",
+                        "reference_type": "self",
+                        "previous_question": "为避免把案卷图谱写错，这里的“我”指的是哪位当事人？",
+                        "scope_attempted": ["current_conversation_graph"],
+                        "expected_response": "entity_name_or_context",
+                        "pending_graph_update_input_text": original_fact,
+                    }
+                },
+            },
+        ],
+        message_understanding_result=message_understanding_result,
+        current_conversation_graph=_graph_with_nodes(
+            [
+                {"id": "person-zhang", "label": "张三", "type": "主体"},
+                {"id": "company-lanhai", "label": "蓝海科技", "type": "主体"},
+            ]
+        ),
+    )
+
+    assert result["status"] == "success"
+    assert result["route_intent"] == "CASE_UPDATE"
+    assert result["execution_plan"]["primary_route"] == "CASE_UPDATE"
+    assert graph_calls == [(9, 1, 101)]
+    assert original_fact in persisted["user_metadata"]["graph_update_input_text"]
+    assert "指代确认：指的是张三" in persisted["user_metadata"]["graph_update_input_text"]
+    assert "pending_clarification" not in persisted["metadata"]
 
 
 def test_ask_agent_task_uses_execution_plan_for_confirm_previous_fact_graph_update(

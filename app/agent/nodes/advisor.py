@@ -115,6 +115,15 @@ def _normalize_dossier_question_mode(value: str | None) -> str:
     return _DOSSIER_QUESTION_DEFAULT
 
 
+def _strip_tagged_block(text: str, tag_name: str) -> str:
+    return re.sub(
+        rf"\n*<{re.escape(tag_name)}>\s*.*?\s*</{re.escape(tag_name)}>\n*",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    )
+
+
 def _classify_dossier_question_mode(
     *,
     question: str,
@@ -1080,6 +1089,9 @@ cases_block 第1条：“某途教育公司诉王某华劳动争议案 — 裁�
 正确输出片段：“参考某途教育公司诉王某华案，法院认为试用期约定超过法定上限的，用人单位需承担相应赔偿责任；这类案例对判断试用期解除是否合法有直接参考价值。”
 </examples>
 """.strip()
+
+    if not (dossier_block or dossier_graph_block or dossier_graph_context_block):
+        prompt = _strip_tagged_block(prompt, "dossier_graph_context_guard")
 
     return prompt
 

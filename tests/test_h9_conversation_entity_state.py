@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services.conversation_entity_state import build_conversation_entity_state
 
 
@@ -121,6 +123,181 @@ def test_manager_company_affiliation_resolved_from_graph_relations() -> None:
         and relation["relation_type"] == "identity"
         for relation in state["relations"]
     )
+
+
+def test_dynamic_case_non_subject_nodes_do_not_become_responsible_entities() -> None:
+    state = build_conversation_entity_state(
+        message_text="我叫张三，在蓝海科技做后端开发，公司拖欠我工资约6万元，后来违法辞退我，我准备申请仲裁。",
+        raw_graph_payload=_graph(
+            [
+                {
+                    "id": "person-901",
+                    "label": "张三",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 901,
+                    "properties": {"category": "主体", "role": "current_party"},
+                },
+                {
+                    "id": "company-901",
+                    "label": "蓝海科技",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 901,
+                    "properties": {"category": "主体"},
+                },
+                {
+                    "id": "arrears-901",
+                    "label": "欠薪",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 901,
+                    "properties": {"category": "后果"},
+                },
+                {
+                    "id": "dismissal-901",
+                    "label": "违法辞退",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 901,
+                    "properties": {"category": "事件"},
+                },
+                {
+                    "id": "arbitration-901",
+                    "label": "仲裁申请",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 901,
+                    "properties": {"category": "客体"},
+                },
+            ]
+        ),
+        conversation_id=901,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    assert {"张三", "蓝海科技"} == _labels(state)
+    assert "欠薪" not in _labels(state)
+    assert "违法辞退" not in _labels(state)
+    assert "仲裁申请" not in _labels(state)
+
+
+def test_dynamic_case_object_company_is_not_rescued_by_conversation_entity_state() -> None:
+    state = build_conversation_entity_state(
+        message_text="我叫张三，在上海一家叫蓝海科技的公司做后端开发。公司从2023年5月开始拖欠我工资，到现在大概欠了我6万元。",
+        raw_graph_payload=_graph(
+            [
+                {
+                    "id": "person-930",
+                    "label": "张三",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 930,
+                    "properties": {"category": "主体", "role": "current_party"},
+                },
+                {
+                    "id": "company-930",
+                    "label": "蓝海科技",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 930,
+                    "properties": {"category": "客体"},
+                },
+                {
+                    "id": "event-930",
+                    "label": "拖欠工资",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 930,
+                    "properties": {"category": "事件"},
+                },
+                {
+                    "id": "amount-930",
+                    "label": "6万元",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 930,
+                    "properties": {"category": "客体"},
+                },
+            ],
+            [
+                {
+                    "id": "edge-employ-930",
+                    "source": "person-930",
+                    "target": "company-930",
+                    "label": "任职于",
+                    "conversation_id": 930,
+                },
+                {
+                    "id": "edge-wage-930",
+                    "source": "company-930",
+                    "target": "event-930",
+                    "label": "实施",
+                    "conversation_id": 930,
+                },
+                {
+                    "id": "edge-amount-930",
+                    "source": "event-930",
+                    "target": "amount-930",
+                    "label": "金额",
+                    "conversation_id": 930,
+                },
+            ],
+        ),
+        conversation_id=930,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    assert {"张三"} == _labels(state)
+    assert "蓝海科技" not in _labels(state)
+    assert "拖欠工资" not in _labels(state)
+    assert "6万元" not in _labels(state)
+    assert state["relations"] == []
+
+
+@pytest.mark.parametrize(
+    ("label", "category"),
+    [
+        ("欠薪", "后果"),
+        ("经济损失", "后果"),
+        ("双倍工资赔偿", "后果"),
+        ("违法辞退", "事件"),
+        ("仲裁申请", "客体"),
+        ("工资流水", "客体"),
+        ("微信聊天记录", "客体"),
+    ],
+)
+def test_dynamic_case_fact_like_categories_never_become_conversation_responsible_entities(
+    label: str,
+    category: str,
+) -> None:
+    state = build_conversation_entity_state(
+        message_text="我叫张三，在蓝海科技做后端开发，补充一些劳动纠纷事实和证据。",
+        raw_graph_payload=_graph(
+            [
+                {
+                    "id": "person-920",
+                    "label": "张三",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 920,
+                    "properties": {"category": "主体", "role": "current_party"},
+                },
+                {
+                    "id": "company-920",
+                    "label": "蓝海科技",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 920,
+                    "properties": {"category": "主体"},
+                },
+                {
+                    "id": f"fact-920-{label}",
+                    "label": label,
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 920,
+                    "properties": {"category": category},
+                },
+            ]
+        ),
+        conversation_id=920,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    assert {"张三", "蓝海科技"} == _labels(state)
+    assert label not in _labels(state)
 
 
 def test_third_party_retelling_uses_graph_state_not_message_self_anchor() -> None:

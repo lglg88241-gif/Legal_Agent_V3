@@ -11,7 +11,6 @@ from app.celery_app import ask_agent_task
 from app.core.llm_provider import get_llm_router
 from app.core.security import AuthenticatedUser, get_current_user
 from app.database.mysql_db import get_db
-from app.services.case_boundary import detect_case_boundary
 from app.services.case_tracking_entry_agent import decide_case_tracking_entry
 from app.services.conversation_mode import (
     normalize_conversation_mode,
@@ -72,25 +71,6 @@ async def process_dialog(
         )
         current_graph_summary = (conversation.case_summary or "").strip() or await format_graph_memory(conversation.id)
         boundary = "SAME_CASE"
-
-        if not request.force_current_case:
-            boundary = await detect_case_boundary(
-                current_graph_summary=current_graph_summary,
-                recent_history=recent_history,
-                user_input=clean_input,
-            )
-            if boundary == "NEW_CASE":
-                return {
-                    "status": "needs_confirmation",
-                    "action": "suggest_new_case",
-                    "user_id": current_user.user_id,
-                    "conversation_id": conversation.id,
-                    "session_id": conversation.session_id,
-                    "message": (
-                        "发现您似乎在咨询一个全新的法律问题。"
-                        "为了保证案情分析与图谱记忆的准确性，是否为您建立一份新的独立卷宗？"
-                    ),
-                }
 
         current_mode = normalize_conversation_mode(getattr(conversation, "conversation_mode", None))
         conversation_dossier_id = getattr(conversation, "dossier_id", None)

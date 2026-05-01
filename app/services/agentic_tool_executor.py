@@ -9,7 +9,7 @@ from typing import Any
 from app.services.case_update_acknowledgement import build_case_update_acknowledgement
 from app.services.memory_resolver import (
     answer_subject_reference_message_async,
-    build_subject_reference_response_text,
+    build_subject_reference_response_text_async,
 )
 from app.services.tool_registry import ToolContract, get_tool_contract
 
@@ -291,7 +291,7 @@ async def _execute_dossier_graph_context_query(
 
 
 async def _execute_subject_reference_resolve(runtime: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
-    response_text, confidence_score, resolution_trace = build_subject_reference_response_text(
+    response_text, confidence_score, resolution_trace = await build_subject_reference_response_text_async(
         question=runtime.get("question") or "",
         message_understanding=runtime.get("message_understanding") or {},
         dossier_context=runtime.get("dossier_context"),
@@ -425,7 +425,7 @@ async def _execute_legal_answer_compose(runtime: dict[str, Any]) -> tuple[Any, d
             graph_memory="" if case_isolated else runtime.get("graph_memory"),
             is_precise_mode=bool(runtime.get("is_precise_mode")),
             proactive_graph_mode=bool(runtime.get("proactive_graph_mode")),
-            conversation_id=runtime.get("conversation_id"),
+            conversation_id=None if case_isolated else runtime.get("conversation_id"),
             saved_case_state=None if case_isolated else runtime.get("saved_case_state"),
             dossier_context=None if case_isolated else runtime.get("advisor_dossier_context"),
             dossier_graph_summary=None if case_isolated else runtime.get("advisor_dossier_graph_summary"),
@@ -603,6 +603,8 @@ async def execute_agentic_plan_tools(
             result = tool_result.get("result")
             if isinstance(result, dict) and isinstance(result.get("recent_messages"), list):
                 runtime["recent_messages"] = result.get("recent_messages")
+        elif tool_name == "dossier_graph_context_query" and isinstance(tool_result.get("result"), dict):
+            runtime["dossier_graph_context"] = tool_result.get("result")
         elif tool_name == "subject_reference_resolve" and isinstance(tool_result.get("result"), dict):
             runtime["subject_reference_resolve_result"] = tool_result.get("result")
             if isinstance(tool_result["result"].get("memory_resolution"), dict):

@@ -53,6 +53,13 @@ def _build_result(
     }
 
 
+def _reference_guard_from_plan(plan: dict) -> dict[str, Any]:
+    if not isinstance(plan, dict):
+        return {}
+    guard = plan.get("reference_guard")
+    return guard if isinstance(guard, dict) else {}
+
+
 def build_case_update_acknowledgement(
     *,
     plan: dict,
@@ -85,6 +92,25 @@ def build_case_update_acknowledgement(
         if isinstance(step, dict) and _normalize_text(step.get("name"))
     }
     primary_route = _normalize_text(plan.get("primary_route")).upper() if isinstance(plan, dict) else ""
+    reference_guard = _reference_guard_from_plan(plan)
+
+    if reference_guard.get("needs_clarification"):
+        questions = [
+            _normalize_text(item)
+            for item in list(reference_guard.get("clarification_questions") or [])
+            if _normalize_text(item)
+        ]
+        question_text = questions[0] if questions else "这条补充里有一个主体指代还不够明确，请先补充具体主体名称。"
+        return _build_result(
+            text=question_text,
+            intent=normalized_intent or "fact_update",
+            graph_update_scheduled=False,
+            graph_update_actions=graph_update_actions,
+            persistence_consent=persistence_consent,
+            used_persisted_fact_text=used_persisted_fact_text,
+            fallback_used=False,
+            fallback_reason=None,
+        )
 
     if (
         primary_route != "CASE_UPDATE"
@@ -161,7 +187,29 @@ def build_case_update_acknowledgement(
             graph_update_scheduled=graph_update_scheduled,
             graph_update_actions=graph_update_actions,
             persistence_consent=persistence_consent,
-            used_persisted_fact_text=True,
+                used_persisted_fact_text=True,
+        )
+
+    if normalized_intent == "clarification_response":
+        if graph_update_scheduled:
+            return _build_result(
+                text=(
+                    "已确认这处主体指代，并会把它绑定到刚才那条事实补充中。"
+                    "\n系统会据此刷新结构化案情和会话图谱，避免再生成含糊主体节点。"
+                ),
+                intent=normalized_intent,
+                graph_update_scheduled=graph_update_scheduled,
+                graph_update_actions=graph_update_actions,
+                persistence_consent=persistence_consent,
+                used_persisted_fact_text=used_persisted_fact_text,
+            )
+        return _build_result(
+            text="已确认这处主体指代。",
+            intent=normalized_intent,
+            graph_update_scheduled=False,
+            graph_update_actions=graph_update_actions,
+            persistence_consent=persistence_consent,
+            used_persisted_fact_text=used_persisted_fact_text,
         )
 
     return _build_result(

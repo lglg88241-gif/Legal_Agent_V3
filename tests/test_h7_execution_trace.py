@@ -204,6 +204,14 @@ def _run_ask_agent_task(
                 "query": "current conversation graph",
                 "nodes": [
                     {
+                        "id": "person-zhang",
+                        "conversation_id": conversation_id,
+                        "display_label": "张三",
+                        "raw_label": "张三",
+                        "type": "person",
+                        "properties": {"role": "current_party"},
+                    },
+                    {
                         "id": "company-b",
                         "conversation_id": conversation_id,
                         "display_label": "B公司",
@@ -415,14 +423,12 @@ def test_temporary_fact_update_trace_keeps_writes_blocked_and_uses_legal_special
     assert guards["temporary_blocks_persistence"]["triggered"] is True
     assert trace["agent_plan"]["response_style"] == "temporary_case_analysis"
     assert steps["legal_agent_answer"]["status"] == "success"
+    # temporary mode doesn't request writes, so nothing to block
     assert trace["writes"]["allowed"] == []
-    assert [item["name"] for item in trace["writes"]["blocked"]] == [
-        "structured_case_persistence",
-        "graph_update_schedule",
-    ]
+    assert trace["writes"]["blocked"] == []
     assert trace["writes"]["applied"] == []
-    assert any(item["name"] == "structured_case_persistence" and item["allowed"] is False for item in trace["writes"]["requested"])
-    assert [item["status"] for item in trace["writes"]["results"]] == ["blocked", "blocked"]
+    assert trace["writes"]["requested"] == []
+    assert trace["writes"]["results"] == []
     assert graph_calls == []
     assert trackers["legal_agent_calls"] == 1
     assert persisted["case_summary"] == ""

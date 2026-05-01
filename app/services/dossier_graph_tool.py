@@ -68,6 +68,14 @@ _DOSSIER_GRAPH_MEMORY_HINTS = (
     "已确认",
     "关键事实",
     "记录了什么",
+    "叫什么",
+    "是多少",
+    "谁拖欠",
+    "谁实施",
+    "被拖欠",
+    "任职",
+    "工资是多少",
+    "工资金额",
 )
 _DOSSIER_GRAPH_MEMORY_CONTEXT_HINTS = (
     "案卷",
@@ -85,6 +93,17 @@ _DOSSIER_GRAPH_MEMORY_TOPIC_HINTS = (
     "事实",
     "公司",
     "对方",
+    "单位",
+    "当事人",
+    "申请人",
+    "被申请人",
+    "工资",
+    "金额",
+    "拖欠",
+    "任职",
+    "劳动合同",
+    "社保",
+    "打卡",
 )
 _DOSSIER_SUBJECT_REFERENCE_HINTS = (
     "这里的当事人指的是谁",
@@ -242,6 +261,11 @@ def _looks_like_memory_query(text: str) -> bool:
     if _looks_like_subject_reference_query(normalized):
         return True
     if any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_HINTS):
+        return True
+    if (
+        any(mark in normalized for mark in ("？", "?", "多少", "什么", "谁", "哪"))
+        and any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_TOPIC_HINTS)
+    ):
         return True
     return (
         any(hint in normalized for hint in _DOSSIER_GRAPH_MEMORY_CONTEXT_HINTS)
@@ -593,6 +617,7 @@ async def query_dossier_graph_context(
         warnings=warnings,
     )
     response["graph_nodes"] = list(nodes)
+    response["graph_payload"] = payload
 
     if query_type == "summary":
         response["participants"], participants_truncated = _truncate_items(

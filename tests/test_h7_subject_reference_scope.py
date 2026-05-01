@@ -55,6 +55,18 @@ def test_subject_reference_prefers_current_conversation_graph_scope() -> None:
             "participants": [],
             "matched_nodes": [],
         },
+        current_conversation_graph={
+            "nodes": [
+                {
+                    "id": "company-b",
+                    "conversation_id": 9,
+                    "display_label": "B公司",
+                    "raw_label": "B公司",
+                    "type": "organization",
+                }
+            ],
+            "edges": [],
+        },
         recent_messages=[{"role": "user", "content": "我和B公司签了劳动合同。"}],
         current_conversation_id=9,
     )

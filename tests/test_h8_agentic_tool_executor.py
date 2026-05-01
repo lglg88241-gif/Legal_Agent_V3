@@ -34,7 +34,7 @@ def _assert_native_tool_result_shape(tool_result: dict[str, Any]) -> None:
 def test_execute_subject_reference_plan_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.services.agentic_tool_executor as tool_executor_module
 
-    def fake_build_subject_reference_response_text(**kwargs):
+    async def fake_build_subject_reference_response_text(**kwargs):
         assert kwargs["question"] == "这里的公司指的是哪家公司？"
         assert kwargs["current_conversation_id"] == 9
         return (
@@ -48,7 +48,7 @@ def test_execute_subject_reference_plan_tools(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(
         tool_executor_module,
-        "build_subject_reference_response_text",
+        "build_subject_reference_response_text_async",
         fake_build_subject_reference_response_text,
     )
 
@@ -63,6 +63,11 @@ def test_execute_subject_reference_plan_tools(monkeypatch: pytest.MonkeyPatch) -
                 "tool_name": "current_conversation_messages_query",
                 "arguments": {"conversation_id": 9, "limit": 12},
                 "dispatch_mode": "planned_contract",
+            },
+            {
+                "tool_name": "dossier_graph_context_query",
+                "arguments": {"conversation_id": 9, "dossier_id": 12, "query": "这里的公司指的是哪家公司？"},
+                "dispatch_mode": "planner_owned",
             },
             {
                 "tool_name": "subject_reference_resolve",
@@ -92,6 +97,7 @@ def test_execute_subject_reference_plan_tools(monkeypatch: pytest.MonkeyPatch) -
             "nodes": [{"id": "org-b", "label": "B公司"}],
             "edges": [],
         },
+        "dossier_graph_context": {"graph_nodes": [], "matched_edges": []},
         "recent_messages": [
             {"message_id": 71, "role": "user", "content": "我在 B公司 上班。"},
         ],
@@ -103,6 +109,7 @@ def test_execute_subject_reference_plan_tools(monkeypatch: pytest.MonkeyPatch) -
     assert _tool_names(result) == [
         "current_conversation_graph_query",
         "current_conversation_messages_query",
+        "dossier_graph_context_query",
         "subject_reference_resolve",
         "memory_answer_compose",
     ]

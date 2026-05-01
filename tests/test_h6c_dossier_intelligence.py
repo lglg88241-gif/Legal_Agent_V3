@@ -123,6 +123,14 @@ def _self_identity_tasks(result: dict) -> list[dict]:
     ]
 
 
+def _canonical_same_entity_tasks(result: dict) -> list[dict]:
+    return [
+        task
+        for task in result["confirmation_tasks"]
+        if task.get("task_type") == "cross_conversation_same_entity"
+    ]
+
+
 def test_build_dossier_intelligence_prefers_auto_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -774,17 +782,137 @@ def test_build_dossier_intelligence_skips_self_identity_task_after_not_same_deci
     assert _self_identity_tasks(result) == []
 
 
-def test_build_dossier_intelligence_rejects_non_owner_access(
+def test_build_dossier_intelligence_surfaces_medium_confidence_canonical_same_entity_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_dossier_owner(monkeypatch, dossier=None)
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="系统自动摘要"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "company-805",
+                "label": "B公司",
+                "type": "organization",
+                "conversation_id": 805,
+            },
+            {
+                "id": "company-806",
+                "label": "B有限公司",
+                "type": "organization",
+                "conversation_id": 806,
+            },
+        ],
+        raw_stats={"conversation_count": 2, "node_count": 2, "edge_count": 0},
+    )
 
-    with pytest.raises(ValueError, match="Dossier not found"):
-        asyncio.run(
-            dossier_intelligence.build_dossier_intelligence(
-                DummyDB(),
-                current_user=_make_user(user_id=9),
-                dossier_id=51,
-                include_display_graph=False,
-            )
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+            conversation_id=None,
+            use_llm=False,
         )
+    )
+
+    tasks = _canonical_same_entity_tasks(result)
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["source"] == "dossier_intelligence_canonical"
+    assert task["origin"] == "dossier_entity_state"
+    assert task["confidence"] == "medium"
+    assert task["requires_user_confirmation"] is True
+    assert task["should_show_to_user"] is True
+    assert task["auto_merge_recommended"] is False
+    assert set(task["source_conversation_ids"]) == {805, 806}
+    assert task["score"] >= 0.55
+    assert task["score"] < 0.92
+    assert task["scoring_reasons"]
+    assert "build_canonical_confirmation_tasks" in _step_names(result)
+
+
+
+def test_build_dossier_intelligence_auto_merged_high_confidence_pair_does_not_surface_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="系统自动摘要"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "person-805",
+                "label": "张三",
+                "type": "person",
+                "conversation_id": 805,
+                "properties": {"role": "current_party"},
+            },
+            {
+                "id": "person-806",
+                "label": "张三",
+                "type": "person",
+                "conversation_id": 806,
+                "properties": {"role": "current_party"},
+            },
+        ],
+        raw_stats={"conversation_count": 2, "node_count": 2, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+            conversation_id=None,
+            use_llm=False,
+        )
+    )
+
+    assert _canonical_same_entity_tasks(result) == []
+    assert "build_canonical_confirmation_tasks" in _step_names(result)
+
+
+def test_build_dossier_intelligence_surfaces_high_priority_non_auto_canonical_same_entity_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_dossier_owner(monkeypatch, dossier=_make_dossier(auto_summary="系统自动摘要"))
+    _patch_display_graph_context(
+        monkeypatch,
+        raw_nodes=[
+            {
+                "id": "manager-805",
+                "label": "张三",
+                "type": "person",
+                "conversation_id": 805,
+                "properties": {"role": "manager_or_hr"},
+            },
+            {
+                "id": "manager-806",
+                "label": "张三",
+                "type": "person",
+                "conversation_id": 806,
+                "properties": {"role": "representative"},
+            },
+        ],
+        raw_stats={"conversation_count": 2, "node_count": 2, "edge_count": 0},
+    )
+
+    result = asyncio.run(
+        dossier_intelligence.build_dossier_intelligence(
+            DummyDB(),
+            current_user=_make_user(),
+            dossier_id=51,
+            conversation_id=None,
+            use_llm=False,
+        )
+    )
+
+    tasks = _canonical_same_entity_tasks(result)
+    assert len(tasks) == 1
+    task = tasks[0]
+    assert task["confidence"] == "high"
+    assert task["high_priority"] is True
+    assert task["priority"] == "high"
+    assert task["auto_merge_recommended"] is False
+    assert task["requires_user_confirmation"] is True
+    assert task["should_show_to_user"] is True
+    assert task["score"] >= 0.92

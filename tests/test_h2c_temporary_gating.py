@@ -57,6 +57,7 @@ def _run_ask_agent_task(
     *,
     persistence_consent: str,
     route_intent: str,
+    dossier_id: int | None = None,
 ) -> tuple[dict[str, object], dict[str, object], list[tuple[int, int, int]]]:
     celery_module = _load_celery_module()
     persisted: dict[str, object] = {}
@@ -69,6 +70,7 @@ def _run_ask_agent_task(
             "graph_memory": "",
             "saved_case_state": {"monthly_salary": 12000},
             "persistence_consent": persistence_consent,
+            "dossier_id": dossier_id,
         }
 
     class FakeLegalAgent:
@@ -133,6 +135,7 @@ def test_tracked_consent_keeps_existing_case_update_persistence(
         monkeypatch,
         persistence_consent="tracked",
         route_intent="CASE_UPDATE",
+        dossier_id=21,
     )
 
     assert result["status"] == "success"
@@ -150,6 +153,7 @@ def test_unknown_consent_preserves_legacy_case_update_behavior(
         monkeypatch,
         persistence_consent="unknown",
         route_intent="CASE_UPDATE",
+        dossier_id=21,
     )
 
     assert result["status"] == "success"

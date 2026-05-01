@@ -327,3 +327,304 @@ def test_cross_conversation_decide_api_updates_existing_pair_instead_of_creating
 
     assert existing_decision.decision_type == "not_same"
     assert result["decision"]["pair_key"] == pair_key
+
+
+def test_manual_merge_api_persists_same_decisions_for_all_cross_conversation_source_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=20,
+        user_id=3,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    db = DummyDB()
+    created_decisions: list[DossierEntityResolutionDecision] = []
+    create_kwargs_list: list[dict[str, object]] = []
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_list_dossier_entity_resolution_decisions(db, user_id: int, dossier_id: int):
+        return created_decisions
+
+    async def fake_create_dossier_entity_resolution_decision(db, **kwargs):
+        create_kwargs_list.append(dict(kwargs))
+        decision = DossierEntityResolutionDecision(
+            id=100 + len(create_kwargs_list),
+            dossier_id=dossier.id,
+            user_id=3,
+            decision_type=kwargs["decision_type"],
+            subject=kwargs["subject"],
+            source_conversation_id=kwargs["source_conversation_id"],
+            source_graph_node_id=kwargs["source_graph_node_id"],
+            source_raw_label=kwargs["source_raw_label"],
+            target_participant_id=kwargs["target_participant_id"],
+            target_display_label=kwargs.get("target_display_label"),
+        )
+        created_decisions.append(decision)
+        return decision
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+    monkeypatch.setattr(
+        dossiers_api,
+        "list_dossier_entity_resolution_decisions",
+        fake_list_dossier_entity_resolution_decisions,
+    )
+    monkeypatch.setattr(
+        dossiers_api,
+        "create_dossier_entity_resolution_decision",
+        fake_create_dossier_entity_resolution_decision,
+    )
+
+    result = asyncio.run(
+        dossiers_api.manual_merge_dossier_canonical_entities(
+            dossier_id=20,
+            payload=dossiers_api.CanonicalEntityManualMergeRequest(
+                source_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                    id="canonical-a",
+                    label="张三",
+                    entity_type="person",
+                    role="current_party",
+                    source_entity_ids=["conversation:805:entity:person-805"],
+                    source_conversation_ids=[805],
+                ),
+                target_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                    id="canonical-b",
+                    label="劳动者张三",
+                    entity_type="person",
+                    role="applicant",
+                    source_entity_ids=[
+                        "conversation:806:entity:person-806",
+                        "conversation:807:entity:person-807",
+                    ],
+                    source_conversation_ids=[806, 807],
+                ),
+                reason="user_manual_same_entity_merge",
+            ),
+            current_user=AuthenticatedUser(user_id=3, username="owner"),
+            db=db,
+        )
+    )
+
+    assert len(create_kwargs_list) == 2
+    expected_pair_keys = {
+        build_cross_conversation_resolution_pair_key(
+            "conversation:805:entity:person-805",
+            "conversation:806:entity:person-806",
+        ),
+        build_cross_conversation_resolution_pair_key(
+            "conversation:805:entity:person-805",
+            "conversation:807:entity:person-807",
+        ),
+    }
+    assert {item["source_graph_node_id"] for item in create_kwargs_list} == expected_pair_keys
+    assert {item["decision_type"] for item in create_kwargs_list} == {"same"}
+    assert {item["subject"] for item in create_kwargs_list} == {"cross_conversation_identity"}
+    assert result["status"] == "success"
+    assert result["action"] == "manual_merge"
+    assert result["persisted_pair_count"] == 2
+    assert len(result["decisions"]) == 2
+    assert {item["pair_key"] for item in result["decisions"]} == expected_pair_keys
+
+
+def test_manual_merge_api_blocks_person_to_company_merge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=21,
+        user_id=3,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    db = DummyDB()
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+
+    with pytest.raises(dossiers_api.HTTPException) as exc_info:
+        asyncio.run(
+            dossiers_api.manual_merge_dossier_canonical_entities(
+                dossier_id=21,
+                payload=dossiers_api.CanonicalEntityManualMergeRequest(
+                    source_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                        id="canonical-person",
+                        label="王经理",
+                        entity_type="person",
+                        role="manager_or_hr",
+                        source_entity_ids=["conversation:805:entity:manager-805"],
+                        source_conversation_ids=[805],
+                    ),
+                    target_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                        id="canonical-company",
+                        label="B公司",
+                        entity_type="organization",
+                        role="employer",
+                        source_entity_ids=["conversation:806:entity:company-806"],
+                        source_conversation_ids=[806],
+                    ),
+                ),
+                current_user=AuthenticatedUser(user_id=3, username="owner"),
+                db=db,
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert "person_to_company_never_identity_merge" in exc_info.value.detail["blocked_by"]
+
+
+def test_manual_merge_api_rejects_same_conversation_canonical_entities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=22,
+        user_id=3,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    db = DummyDB()
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+
+    with pytest.raises(dossiers_api.HTTPException) as exc_info:
+        asyncio.run(
+            dossiers_api.manual_merge_dossier_canonical_entities(
+                dossier_id=22,
+                payload=dossiers_api.CanonicalEntityManualMergeRequest(
+                    source_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                        id="canonical-a",
+                        label="张三",
+                        entity_type="person",
+                        role="current_party",
+                        source_entity_ids=["conversation:805:entity:person-805"],
+                        source_conversation_ids=[805],
+                    ),
+                    target_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                        id="canonical-b",
+                        label="劳动者",
+                        entity_type="person",
+                        role="applicant",
+                        source_entity_ids=["conversation:805:entity:worker-805"],
+                        source_conversation_ids=[805],
+                    ),
+                ),
+                current_user=AuthenticatedUser(user_id=3, username="owner"),
+                db=db,
+            )
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "manual merge only supports cross-conversation canonical entities"
+
+
+def test_manual_merge_api_updates_existing_pairs_instead_of_creating_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dossiers_api = _load_dossiers_api_module()
+    dossier = Dossier(
+        id=23,
+        user_id=3,
+        title="劳动争议案卷",
+        case_type="劳动争议",
+        summary="summary",
+        status="active",
+    )
+    db = DummyDB()
+    pair_key = build_cross_conversation_resolution_pair_key(
+        "conversation:805:entity:person-805",
+        "conversation:806:entity:person-806",
+    )
+    pair_hash = build_cross_conversation_resolution_pair_hash(pair_key)
+    existing_decision = DossierEntityResolutionDecision(
+        id=201,
+        dossier_id=dossier.id,
+        user_id=3,
+        decision_type="not_same",
+        subject="cross_conversation_identity",
+        source_conversation_id=805,
+        source_graph_node_id=pair_key,
+        source_raw_label="张三",
+        target_participant_id=pair_hash,
+        target_display_label="劳动者张三",
+    )
+
+    async def fake_ensure_storage_schema() -> None:
+        return None
+
+    async def fake_get_dossier_for_user(db, user_id: int, dossier_id: int):
+        return dossier
+
+    async def fake_list_dossier_entity_resolution_decisions(db, user_id: int, dossier_id: int):
+        return [existing_decision]
+
+    async def fake_create_dossier_entity_resolution_decision(db, **kwargs):
+        raise AssertionError("manual merge should update existing pair instead of creating duplicate decision")
+
+    monkeypatch.setattr(dossiers_api, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(dossiers_api, "get_dossier_for_user", fake_get_dossier_for_user)
+    monkeypatch.setattr(
+        dossiers_api,
+        "list_dossier_entity_resolution_decisions",
+        fake_list_dossier_entity_resolution_decisions,
+    )
+    monkeypatch.setattr(
+        dossiers_api,
+        "create_dossier_entity_resolution_decision",
+        fake_create_dossier_entity_resolution_decision,
+    )
+
+    result = asyncio.run(
+        dossiers_api.manual_merge_dossier_canonical_entities(
+            dossier_id=23,
+            payload=dossiers_api.CanonicalEntityManualMergeRequest(
+                source_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                    id="canonical-a",
+                    label="张三",
+                    entity_type="person",
+                    role="current_party",
+                    source_entity_ids=["conversation:805:entity:person-805"],
+                    source_conversation_ids=[805],
+                ),
+                target_entity=dossiers_api.CanonicalEntityManualMergeEntityRequest(
+                    id="canonical-b",
+                    label="劳动者张三",
+                    entity_type="person",
+                    role="applicant",
+                    source_entity_ids=["conversation:806:entity:person-806"],
+                    source_conversation_ids=[806],
+                ),
+            ),
+            current_user=AuthenticatedUser(user_id=3, username="owner"),
+            db=db,
+        )
+    )
+
+    assert existing_decision.decision_type == "same"
+    assert result["persisted_pair_count"] == 1
+    assert result["decisions"][0]["pair_key"] == pair_key

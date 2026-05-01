@@ -56,7 +56,7 @@ def _resolve_previous_fact_text(
     return _normalize_text(previous_message.get("content"))
 
 
-def build_execution_plan_from_message_understanding(
+async def build_execution_plan_from_message_understanding_async(
     message_understanding: dict[str, Any] | None,
     *,
     original_message: str,
@@ -122,6 +122,54 @@ def build_execution_plan_from_message_understanding(
         and primary_route == "DOSSIER_MEMORY"
         and bool(mu_result.get("needs_legal_rag")) is False
     ):
+        clarification_response = (
+            mu_result.get("clarification_response")
+            if isinstance(mu_result.get("clarification_response"), dict)
+            else {}
+        )
+        pending_graph_update_input_text = _normalize_text(
+            clarification_response.get("pending_graph_update_input_text")
+        )
+        if intent == "clarification_response" and pending_graph_update_input_text and isinstance(request_context, AgenticRequestContext):
+            graph_update_input_text = f"{pending_graph_update_input_text}\n指代确认：{normalized_message}"
+            plan["steps"] = [
+                _build_step(
+                    name="fact_persistence",
+                    agent="fact_persistence",
+                    action="update_case_summary",
+                    input_source="resolved_reference_fact",
+                ),
+                _build_step(
+                    name="graph_update",
+                    agent="graph_extractor",
+                    action="update_graph",
+                    input_source="resolved_reference_fact",
+                ),
+                _build_step(
+                    name="assistant_acknowledgement",
+                    agent="assistant_response",
+                    action="acknowledge_reference_clarification_and_case_update",
+                    input_source="resolved_reference_fact",
+                    required=False,
+                ),
+            ]
+            plan["response_mode"] = "tracked_case_refresh"
+            plan["primary_route"] = "CASE_UPDATE"
+            plan["persistence_allowed"] = True
+            plan["graph_update_allowed"] = True
+            plan["resolved_inputs"]["effective_persistence_text"] = graph_update_input_text
+            plan["resolved_inputs"]["graph_update_input_text"] = graph_update_input_text
+            plan["resolved_inputs"]["subject_reference_scope_order"] = list(
+                clarification_response.get("scope_attempted")
+                if isinstance(clarification_response.get("scope_attempted"), list)
+                else []
+            )
+            plan["is_actionable"] = True
+            plan["trace"]["reason"] = (
+                "用户正在回答上一轮图谱写入前的主体指代确认，应将确认结果绑定到原始事实后再写入。"
+            )
+            return plan
+
         subject_reference = {}
         if intent == "subject_reference":
             subject_reference = (
@@ -130,11 +178,6 @@ def build_execution_plan_from_message_understanding(
                 else {}
             )
         else:
-            clarification_response = (
-                mu_result.get("clarification_response")
-                if isinstance(mu_result.get("clarification_response"), dict)
-                else {}
-            )
             subject_reference = {
                 "scope_order": clarification_response.get("scope_attempted", []),
             }
@@ -158,7 +201,10 @@ def build_execution_plan_from_message_understanding(
     if intent == "fact_update" and primary_route == "CASE_UPDATE":
         plan["resolved_inputs"]["graph_update_input_text"] = normalized_message
         plan["is_actionable"] = True
-        if str(persistence_consent or "").strip().lower() == "temporary":
+        has_bound_dossier = isinstance(dossier_id, int) and dossier_id > 0
+        is_temporary = str(persistence_consent or "").strip().lower() == "temporary"
+
+        if is_temporary or not has_bound_dossier:
             plan["response_mode"] = "temporary_case_analysis"
             plan["steps"] = [
                 _build_step(
@@ -168,9 +214,15 @@ def build_execution_plan_from_message_understanding(
                     input_source="current_message",
                 )
             ]
-            plan["trace"]["reason"] = (
-                plan["trace"]["reason"]
-                or "用户选择仅本轮分析，应基于事实给出法律分析，但不得持久化或更新图谱。"
+            if is_temporary:
+                plan["trace"]["reason"] = (
+                    plan["trace"]["reason"]
+                    or "用户选择仅本轮分析，应基于事实给出法律分析，但不得持久化或更新图谱。"
+                )
+            else:
+                plan["trace"]["reason"] = (
+                    plan["trace"]["reason"]
+                    or "会话未绑定案卷，应基于事实给出法律分析，但不得持久化或更新图谱。"
             )
             return plan
 
@@ -239,44 +291,68 @@ def build_execution_plan_from_message_understanding(
                 plan["resolved_inputs"]["previous_fact_message_id"] = _coerce_int(
                     previous_fact_message.get("message_id")
                 )
-            plan["steps"].extend(
-                [
+
+            has_bound_dossier = isinstance(dossier_id, int) and dossier_id > 0
+            is_temporary = str(persistence_consent or "").strip().lower() == "temporary"
+
+            if is_temporary or not has_bound_dossier:
+                plan["steps"].append(
                     _build_step(
-                        name="fact_persistence",
-                        agent="fact_persistence",
-                        action="update_case_summary",
+                        name="legal_agent_answer",
+                        agent="legal_agent",
+                        action="answer_case_analysis_without_persistence",
                         input_source="resolved_previous_fact",
-                    ),
-                    _build_step(
-                        name="graph_update",
-                        agent="graph_extractor",
-                        action="update_graph",
-                        input_source="resolved_previous_fact",
-                    ),
-                    _build_step(
-                        name="assistant_acknowledgement",
-                        agent="assistant_response",
-                        action="acknowledge_confirmed_fact",
-                        input_source="resolved_previous_fact",
-                        required=False,
-                    ),
-                ]
-            )
+                    )
+                )
+                plan["response_mode"] = "temporary_case_analysis"
+                plan["persistence_allowed"] = False
+                plan["graph_update_allowed"] = False
+                plan["is_actionable"] = True
+                if is_temporary:
+                    plan["trace"]["reason"] = (
+                        plan["trace"]["reason"]
+                        or "用户确认上一条事实，但当前仅允许本轮分析，因此只将确认后的事实用于当前分析。"
+                    )
+                else:
+                    plan["trace"]["reason"] = (
+                        plan["trace"]["reason"]
+                        or "用户确认上一条事实，但会话未绑定案卷，因此只将确认后的事实用于当前分析。"
+                    )
+            else:
+                plan["steps"].extend(
+                    [
+                        _build_step(
+                            name="fact_persistence",
+                            agent="fact_persistence",
+                            action="update_case_summary",
+                            input_source="resolved_previous_fact",
+                        ),
+                        _build_step(
+                            name="graph_update",
+                            agent="graph_extractor",
+                            action="update_graph",
+                            input_source="resolved_previous_fact",
+                        ),
+                        _build_step(
+                            name="assistant_acknowledgement",
+                            agent="assistant_response",
+                            action="acknowledge_confirmed_fact",
+                            input_source="resolved_previous_fact",
+                            required=False,
+                        ),
+                    ]
+                )
+                plan["response_mode"] = "tracked_case_refresh"
+                plan["persistence_allowed"] = True
+                plan["graph_update_allowed"] = True
+                plan["is_actionable"] = True
+                plan["trace"]["reason"] = (
+                    plan["trace"]["reason"]
+                    or "用户确认上一条事实，应以已解析的真实事实刷新结构化案情与会话图谱状态。"
+                )
+
             plan["resolved_inputs"]["effective_persistence_text"] = previous_fact_text
             plan["resolved_inputs"]["graph_update_input_text"] = previous_fact_text
-            is_temporary = str(persistence_consent or "").strip().lower() == "temporary"
-            plan["response_mode"] = "temporary_case_analysis" if is_temporary else "tracked_case_refresh"
-            plan["persistence_allowed"] = not is_temporary
-            plan["graph_update_allowed"] = not is_temporary
-            plan["is_actionable"] = True
-            plan["trace"]["reason"] = (
-                plan["trace"]["reason"]
-                or (
-                    "用户确认上一条事实，但当前仅允许本轮分析，因此只将确认后的事实用于当前分析。"
-                    if is_temporary
-                    else "用户确认上一条事实，应以已解析的真实事实刷新结构化案情与会话图谱状态。"
-                )
-            )
         else:
             plan["trace"]["warnings"].append("confirmed_previous_fact_text_unavailable")
             plan["trace"]["reason"] = (
@@ -286,3 +362,59 @@ def build_execution_plan_from_message_understanding(
         return plan
 
     return plan
+
+
+def build_execution_plan_from_message_understanding(
+    message_understanding: dict[str, Any] | None,
+    *,
+    original_message: str,
+    recent_messages: list[dict[str, Any]] | None,
+    dossier_id: int | None,
+    persistence_consent: str | None,
+    request_context: AgenticRequestContext | None = None,
+) -> dict[str, Any]:
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            build_execution_plan_from_message_understanding_async(
+                message_understanding,
+                original_message=original_message,
+                recent_messages=recent_messages,
+                dossier_id=dossier_id,
+                persistence_consent=persistence_consent,
+                request_context=request_context,
+            )
+        )
+
+    mu_result = message_understanding if isinstance(message_understanding, dict) else {}
+    fallback_plan = {
+        "source": "message_understanding",
+        "intent": str(mu_result.get("intent") or "unknown").strip().lower() or "unknown",
+        "primary_route": str(mu_result.get("route_hint") or "UNKNOWN").strip().upper() or "UNKNOWN",
+        "response_mode": "legal_answer",
+        "persistence_allowed": False,
+        "graph_update_allowed": False,
+        "steps": [],
+        "guards": {},
+        "trace": {
+            "reason": "sync_execution_plan_called_inside_running_loop",
+            "provider": str(mu_result.get("provider") or "").strip() or "fallback",
+            "model": str(mu_result.get("model") or "").strip(),
+            "fallback_reason": "async_reference_guard_unavailable_in_sync_context",
+            "warnings": ["async_reference_guard_unavailable_in_sync_context"],
+            "use_legacy_fallback": True,
+        },
+        "context": {"dossier_id": dossier_id, "has_dossier": bool(dossier_id)},
+        "resolved_inputs": {
+            "current_message_text": _normalize_text(original_message),
+            "effective_persistence_text": _normalize_text(original_message),
+            "graph_update_input_text": "",
+            "previous_fact_text": "",
+            "subject_reference_scope_order": [],
+        },
+        "is_actionable": False,
+    }
+    return fallback_plan

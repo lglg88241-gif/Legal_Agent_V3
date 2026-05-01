@@ -156,6 +156,15 @@ def _install_celery_import_stubs() -> None:
     fake_graph_extractor.refresh_case_graph = _refresh_case_graph
     sys.modules["app.services.graph_extractor"] = fake_graph_extractor
 
+    fake_legal_agent_module = ModuleType("app.services.legal_agent")
+
+    class FakeImportLegalAgent:
+        async def ask(self, *args, **kwargs):
+            return {"response": "", "sources": [], "route_intent": "GENERAL_CONSULT"}
+
+    fake_legal_agent_module.legal_agent = FakeImportLegalAgent()
+    sys.modules["app.services.legal_agent"] = fake_legal_agent_module
+
     fake_redis_mgr = ModuleType("app.memory.redis_mgr")
     fake_redis_mgr.get_redis_saver_for_current_loop = lambda: None
     sys.modules["app.memory.redis_mgr"] = fake_redis_mgr
@@ -409,6 +418,39 @@ def test_subject_reference_paraphrase_matrix_routes_through_dossier_memory(
         "B公司的人事通知我去签确认书",
         "后来王经理口头通知我不用来了",
         "我补充一下，公司其实有给我交过两个月社保",
+    ],
+)
+def test_fact_update_paraphrase_matrix_schedules_persistence_and_graph_for_references(
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+) -> None:
+    result, persisted, graph_calls, trackers = _run_task_with_message_understanding(
+        monkeypatch,
+        question=question,
+        message_understanding_result=_fact_update_result(question),
+        recent_messages=[],
+        case_summary="",
+        fail_on_legal_agent=True,
+    )
+
+    steps = _step_lookup(result)
+
+    assert result["message_understanding"]["intent"] == "fact_update"
+    assert result["message_understanding"]["route_hint"] == "CASE_UPDATE"
+    assert result["route_intent"] == "CASE_UPDATE"
+    assert trackers["legal_agent_calls"] == 0
+    assert steps["assistant_acknowledgement"]["status"] == "success"
+    assert steps["fact_persistence"]["status"] == "success"
+    assert steps["graph_update"]["status"] == "success"
+    assert "已记录这条新的案情事实" in result["response"]
+    assert graph_calls == [(9, 1, 101)]
+    assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
+    assert persisted["user_metadata"]["graph_update_input_text"] == question
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
         "实际入职时间是2024年3月",
         "工资其实是8500不是8000",
     ],

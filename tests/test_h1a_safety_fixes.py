@@ -342,10 +342,17 @@ def test_update_graph_task_uses_bound_message_id(monkeypatch: pytest.MonkeyPatch
     async def fail_if_latest_message_lookup(*args, **kwargs):
         raise AssertionError("latest message lookup should not be used")
 
-    async def fake_refresh_case_graph(conversation_id: int, user_input: str, case_summary: str, user_id: int):
+    async def fake_refresh_case_graph(
+        conversation_id: int,
+        user_input: str,
+        case_summary: str,
+        user_id: int,
+        prior_reference_guard=None,
+    ):
         captured["user_input"] = user_input
         captured["case_summary"] = case_summary
         captured["user_id"] = user_id
+        captured["prior_reference_guard"] = prior_reference_guard
         return {"actions_applied": 2, "actions": [{"action": "ADD"}], "deleted_count": 0}
 
     monkeypatch.setattr(celery_module, "_create_celery_session_factory", lambda: (DummyEngine(), fake_session_factory))
@@ -369,3 +376,226 @@ def test_update_graph_task_uses_bound_message_id(monkeypatch: pytest.MonkeyPatch
     assert captured["user_input"] == "first message"
     assert captured["case_summary"] == "summary"
     assert captured["user_id"] == 4
+    assert captured["prior_reference_guard"] is None
+
+
+def test_update_graph_task_passes_prior_reference_guard_from_user_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    celery_module = _load_celery_module()
+    captured: dict[str, object] = {}
+    reference_guard = {
+        "source": "graph_reference_guard",
+        "decision": "allow",
+        "confidence": "high",
+        "needs_clarification": False,
+        "reference_resolutions": [
+            {"mention": "我", "resolved_label": "张三", "reference_type": "self", "confidence": "high"},
+            {"mention": "公司", "resolved_label": "蓝海科技", "reference_type": "organization", "confidence": "high"},
+        ],
+    }
+
+    class DummyEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class DummySessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_session_factory():
+        return DummySessionContext()
+
+    async def fake_ensure_storage_schema(bind_engine=None) -> None:
+        return None
+
+    async def fake_get_conversation_for_user(db, user_id: int, conversation_id: int):
+        return type("Conversation", (), {"id": conversation_id, "user_id": user_id})()
+
+    async def fake_load_conversation_case_summary(db, conversation_id: int) -> str:
+        return "summary"
+
+    async def fake_get_message_for_conversation(db, conversation_id: int, message_id: int):
+        return type(
+            "Message",
+            (),
+            {
+                "role": "user",
+                "content": "原始消息",
+                "message_metadata": {
+                    "graph_update_input_text": "我叫张三，在一家叫蓝海科技的公司做后端开发。公司拖欠我工资。",
+                    "reference_guard": reference_guard,
+                },
+            },
+        )()
+
+    async def fake_refresh_case_graph(
+        conversation_id: int,
+        user_input: str,
+        case_summary: str,
+        user_id: int,
+        prior_reference_guard=None,
+    ):
+        captured["user_input"] = user_input
+        captured["prior_reference_guard"] = prior_reference_guard
+        return {"actions_applied": 2, "actions": [{"action": "ADD"}], "deleted_count": 0}
+
+    monkeypatch.setattr(celery_module, "_create_celery_session_factory", lambda: (DummyEngine(), fake_session_factory))
+    monkeypatch.setattr(celery_module, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(celery_module, "get_conversation_for_user", fake_get_conversation_for_user)
+    monkeypatch.setattr(celery_module, "load_conversation_case_summary", fake_load_conversation_case_summary)
+    monkeypatch.setattr(celery_module, "get_message_for_conversation", fake_get_message_for_conversation)
+    monkeypatch.setattr(celery_module, "refresh_case_graph", fake_refresh_case_graph)
+
+    result = celery_module.update_graph_task.run(
+        conversation_id=8,
+        user_id=4,
+        message_id=21,
+    )
+
+    assert result["status"] == "success"
+    assert captured["user_input"] == "我叫张三，在一家叫蓝海科技的公司做后端开发。公司拖欠我工资。"
+    assert captured["prior_reference_guard"] == reference_guard
+
+
+def test_update_graph_task_attaches_graph_clarification_to_matching_assistant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    celery_module = _load_celery_module()
+    pending = {
+        "type": "subject_reference_resolution",
+        "source": "graph_reference_guard",
+        "target_mention": "他",
+        "reference_type": "person",
+        "previous_question": "为避免把案卷图谱写错，这里的“他”具体指谁？请直接回复主体名称。",
+        "scope_attempted": ["current_conversation_graph"],
+        "expected_response": "entity_name_or_context",
+        "pending_graph_update_input_text": "他一直在微信上说等融资到账就发工资。",
+    }
+    reference_guard = {
+        "source": "graph_reference_guard",
+        "decision": "clarify",
+        "needs_clarification": True,
+        "pending_clarification": pending,
+        "clarification_questions": [pending["previous_question"]],
+    }
+
+    class DummyEngine:
+        async def dispose(self) -> None:
+            return None
+
+    class DummySession:
+        def __init__(self):
+            self.added = []
+            self.committed = False
+
+        def add(self, item):
+            self.added.append(item)
+
+        async def commit(self):
+            self.committed = True
+
+    session = DummySession()
+
+    class DummySessionContext:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_session_factory():
+        return DummySessionContext()
+
+    async def fake_ensure_storage_schema(bind_engine=None) -> None:
+        return None
+
+    async def fake_get_conversation_for_user(db, user_id: int, conversation_id: int):
+        return type("Conversation", (), {"id": conversation_id, "user_id": user_id})()
+
+    async def fake_load_conversation_case_summary(db, conversation_id: int) -> str:
+        return "summary"
+
+    user_message = type(
+        "Message",
+        (),
+        {
+            "id": 21,
+            "role": "user",
+            "content": "他一直在微信上说等融资到账就发工资。",
+            "message_metadata": {},
+        },
+    )()
+    assistant_message = type(
+        "Message",
+        (),
+        {
+            "id": 22,
+            "role": "assistant",
+            "content": "已记录这条新的案情事实。",
+            "message_metadata": {"route_intent": "CASE_UPDATE"},
+        },
+    )()
+    later_user_message = type(
+        "Message",
+        (),
+        {
+            "id": 23,
+            "role": "user",
+            "content": "下一条消息",
+            "message_metadata": {},
+        },
+    )()
+
+    async def fake_get_message_for_conversation(db, conversation_id: int, message_id: int):
+        if message_id == 21:
+            return user_message
+        if message_id == 22:
+            return assistant_message
+        return None
+
+    async def fake_list_recent_conversation_messages(db, conversation_id: int, limit: int = 8):
+        return [user_message, assistant_message, later_user_message]
+
+    async def fake_refresh_case_graph(
+        conversation_id: int,
+        user_input: str,
+        case_summary: str,
+        user_id: int,
+        prior_reference_guard=None,
+    ):
+        return {
+            "conversation_id": conversation_id,
+            "actions_applied": 0,
+            "actions": [],
+            "deleted_count": 0,
+            "needs_clarification": True,
+            "clarification_questions": [pending["previous_question"]],
+            "pending_clarification": pending,
+            "reference_guard": reference_guard,
+        }
+
+    monkeypatch.setattr(celery_module, "_create_celery_session_factory", lambda: (DummyEngine(), fake_session_factory))
+    monkeypatch.setattr(celery_module, "ensure_storage_schema", fake_ensure_storage_schema)
+    monkeypatch.setattr(celery_module, "get_conversation_for_user", fake_get_conversation_for_user)
+    monkeypatch.setattr(celery_module, "load_conversation_case_summary", fake_load_conversation_case_summary)
+    monkeypatch.setattr(celery_module, "get_message_for_conversation", fake_get_message_for_conversation)
+    monkeypatch.setattr(celery_module, "list_recent_conversation_messages", fake_list_recent_conversation_messages)
+    monkeypatch.setattr(celery_module, "refresh_case_graph", fake_refresh_case_graph)
+
+    result = celery_module.update_graph_task.run(
+        conversation_id=8,
+        user_id=4,
+        message_id=21,
+    )
+
+    assert result["status"] == "success"
+    assert result["needs_clarification"] is True
+    assert assistant_message.message_metadata["pending_clarification"] == pending
+    assert assistant_message.message_metadata["reference_guard"] == reference_guard
+    assert assistant_message.message_metadata["graph_update_needs_clarification"] is True
+    assert session.added == [assistant_message]
+    assert session.committed is True

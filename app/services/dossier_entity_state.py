@@ -1,19 +1,44 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import defaultdict
+from difflib import SequenceMatcher
 from typing import Any
 
-from app.services.dossier_hard_guards import (
-    can_create_identity_candidate,
-    identity_merge_blockers,
-)
+from app.services.dossier_hard_guards import identity_merge_blockers
 
 
 SCHEMA_VERSION = "h9.dossier_entity_state.v1"
 SOURCE = "dossier_cross_conversation_entity_agent"
 PROVIDER = "rules"
 MODEL = "dossier-entity-state-rules-v1"
+
+_ORGANIZATION_SUFFIXES = (
+    "有限责任公司",
+    "股份有限公司",
+    "集团有限公司",
+    "集团公司",
+    "有限公司",
+    "公司",
+    "集团",
+    "企业",
+)
+
+_ROLE_TOKENS = {
+    "经理",
+    "hr",
+    "人事",
+    "主管",
+    "主任",
+    "代表",
+    "法人",
+    "负责人",
+    "专员",
+    "顾问",
+    "律师",
+    "老师",
+}
 
 
 def _normalize_text(value: Any) -> str:
@@ -53,6 +78,216 @@ def _stable_id(*parts: Any) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _normalized_name_variants(value: Any) -> set[str]:
+    text = _normalize_text(value)
+    if not text:
+        return set()
+    lowered = text.lower()
+    collapsed = re.sub(r"[\s()（）\[\]【】,，.。:：;；\-_/]+", "", lowered)
+    variants = {lowered, collapsed}
+    for suffix in _ORGANIZATION_SUFFIXES:
+        if collapsed.endswith(suffix) and len(collapsed) > len(suffix):
+            variants.add(collapsed[: -len(suffix)])
+    return {variant for variant in variants if variant}
+
+
+def _strict_name_variants(value: Any) -> set[str]:
+    text = _normalize_text(value)
+    if not text:
+        return set()
+    lowered = text.lower()
+    collapsed = re.sub(r"[\s()（）\[\]【】,，.。:：;；\-_/]+", "", lowered)
+    return {variant for variant in {lowered, collapsed} if variant}
+
+
+def _normalized_label_set(entity: dict[str, Any]) -> set[str]:
+    values = [
+        entity.get("canonical_label"),
+        entity.get("label"),
+        *(entity.get("aliases") or []),
+        *(entity.get("source_labels") or []),
+    ]
+    normalized: set[str] = set()
+    for value in values:
+        normalized.update(_normalized_name_variants(value))
+    return normalized
+
+
+def _strict_label_set(entity: dict[str, Any]) -> set[str]:
+    values = [
+        entity.get("canonical_label"),
+        entity.get("label"),
+        *(entity.get("aliases") or []),
+        *(entity.get("source_labels") or []),
+    ]
+    normalized: set[str] = set()
+    for value in values:
+        normalized.update(_strict_name_variants(value))
+    return normalized
+
+
+def _entity_type_family(entity_type: Any) -> str:
+    normalized = _normalize_key(entity_type)
+    if normalized in {"person", "natural_person", "human"}:
+        return "person"
+    if normalized in {"organization", "company", "employer", "unit", "department", "authority", "agency", "institution", "court", "arbitration_body"}:
+        return "organization"
+    if normalized in {"role", "representative", "hr", "manager", "manager_or_hr", "person_role", "person_or_role"}:
+        return "role"
+    return normalized or "unknown"
+
+
+def _entity_role_tokens(entity: dict[str, Any]) -> set[str]:
+    values = [entity.get("role"), *(entity.get("aliases") or []), *(entity.get("source_labels") or [])]
+    tokens: set[str] = set()
+    for value in values:
+        normalized = _normalize_key(value)
+        if not normalized:
+            continue
+        for token in _ROLE_TOKENS:
+            if token in normalized:
+                tokens.add(token)
+    return tokens
+
+
+def _label_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_labels = _normalized_label_set(left)
+    right_labels = _normalized_label_set(right)
+    if not left_labels or not right_labels:
+        return 0.0
+    if left_labels & right_labels:
+        return 1.0
+    best = 0.0
+    for left_value in left_labels:
+        for right_value in right_labels:
+            best = max(best, SequenceMatcher(None, left_value, right_value).ratio())
+    return best
+
+
+def _role_compatibility(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_role = _normalize_key(left.get("role"))
+    right_role = _normalize_key(right.get("role"))
+    if left_role and right_role and left_role == right_role:
+        return 1.0
+    left_tokens = _entity_role_tokens(left)
+    right_tokens = _entity_role_tokens(right)
+    if left_tokens and right_tokens and left_tokens & right_tokens:
+        return 0.8
+    if not left_role or not right_role:
+        return 0.4
+    return 0.0
+
+
+def _has_strict_label_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return bool(_strict_label_set(left) & _strict_label_set(right))
+
+
+def _is_auto_merge_candidate(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    candidate_score: dict[str, Any],
+) -> bool:
+    if candidate_score.get("confidence") != "high":
+        return False
+    if candidate_score.get("type_family_left") != candidate_score.get("type_family_right"):
+        return False
+    if not _has_strict_label_overlap(left, right):
+        return False
+    if float(candidate_score.get("label_similarity") or 0) < 0.999:
+        return False
+    if float(candidate_score.get("role_score") or 0) <= 0:
+        return False
+    return True
+
+
+def _score_same_entity_candidate(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    left_family = _entity_type_family(left.get("entity_type"))
+    right_family = _entity_type_family(right.get("entity_type"))
+    label_score = _label_similarity(left, right)
+    role_score = _role_compatibility(left, right)
+    source_overlap = set(_normalize_key(value) for value in left.get("source_labels", []) if _normalize_key(value)) & set(
+        _normalize_key(value) for value in right.get("source_labels", []) if _normalize_key(value)
+    )
+
+    reasons: list[str] = []
+    score = 0.0
+
+    if left_family == right_family and left_family != "unknown":
+        score += 0.25
+        reasons.append(f"entity_type_family:{left_family}")
+    elif left_family != right_family:
+        reasons.append(f"entity_type_mismatch:{left_family}->{right_family}")
+
+    if label_score >= 0.999:
+        score += 0.5
+        reasons.append("shared_normalized_label")
+    elif label_score >= 0.9:
+        score += 0.4
+        reasons.append("very_high_label_similarity")
+    elif label_score >= 0.75:
+        score += 0.25
+        reasons.append("high_label_similarity")
+    elif label_score >= 0.6:
+        score += 0.12
+        reasons.append("moderate_label_similarity")
+
+    if source_overlap:
+        score += 0.15
+        reasons.append("overlapping_source_labels")
+
+    if role_score >= 0.8:
+        score += 0.1
+        reasons.append("role_alignment")
+    elif role_score > 0:
+        score += 0.05
+        reasons.append("partial_role_alignment")
+
+    left_mentions = len(left.get("mentions") or [])
+    right_mentions = len(right.get("mentions") or [])
+    if left_mentions > 0 and right_mentions > 0:
+        score += 0.05
+        reasons.append("both_have_mentions")
+
+    score = round(min(score, 1.0), 4)
+    high_confidence = (
+        score >= 0.92
+        and left_family == right_family
+        and _has_strict_label_overlap(left, right)
+    )
+    confidence = "low"
+    if high_confidence:
+        confidence = "high"
+    elif score >= 0.55:
+        confidence = "medium"
+
+    auto_merge_recommended = _is_auto_merge_candidate(
+        left,
+        right,
+        candidate_score={
+            "confidence": confidence,
+            "label_similarity": label_score,
+            "role_score": role_score,
+            "type_family_left": left_family,
+            "type_family_right": right_family,
+        },
+    )
+
+    if auto_merge_recommended:
+        reasons.append("strict_auto_merge_gate")
+
+    return {
+        "score": score,
+        "confidence": confidence,
+        "reasons": reasons,
+        "label_similarity": round(label_score, 4),
+        "role_score": round(role_score, 4),
+        "type_family_left": left_family,
+        "type_family_right": right_family,
+        "auto_merge_recommended": auto_merge_recommended,
+    }
+
+
 def _conversation_title_lookup(conversation_summaries: list[dict[str, Any]] | None) -> dict[int, str]:
     lookup: dict[int, str] = {}
     for item in conversation_summaries or []:
@@ -79,6 +314,102 @@ def _mention_identity(mention: dict[str, Any], entity_id: str, conversation_id: 
     return f"conversation:{conversation_id}:mention:{_stable_id(entity_id, mention.get('raw_label'), mention.get('raw_node_id'))}"
 
 
+_RESPONSIBLE_ENTITY_TYPES = {
+    "person",
+    "natural_person",
+    "human",
+    "organization",
+    "company",
+    "employer",
+    "unit",
+    "department",
+    "authority",
+    "agency",
+    "institution",
+    "arbitration_body",
+    "court",
+    "role",
+    "representative",
+    "hr",
+    "manager",
+    "manager_or_hr",
+    "person_role",
+    "person_or_role",
+}
+
+_FACT_ENTITY_TYPES = {
+    "event",
+    "fact",
+    "evidence",
+    "document",
+    "contract",
+    "amount",
+    "money",
+    "salary",
+    "time",
+    "date",
+    "law",
+    "statute",
+    "claim",
+    "procedure",
+    "issue",
+    "action",
+    "benefit",
+    "notice",
+    "result",
+    "consequence",
+    "social_insurance",
+    "economic_loss",
+    "compensation",
+    "damage",
+}
+
+_FACT_LABEL_HINTS = {
+    "合同",
+    "劳动合同",
+    "社保",
+    "社会保险",
+    "工资",
+    "月薪",
+    "薪资",
+    "薪酬",
+    "通知",
+    "确认书",
+    "证据",
+    "证明",
+    "时间",
+    "日期",
+    "赔偿",
+    "赔偿金",
+    "补偿",
+    "后果",
+    "结果",
+    "请求",
+    "申请书",
+    "仲裁申请书",
+    "经济损失",
+    "损失",
+    "违约金",
+}
+
+
+def _is_responsible_entity(label: str, entity_type: str) -> bool:
+    normalized_type = _normalize_key(entity_type)
+    if normalized_type in {"客体", "事件", "后果"}:
+        return False
+    if normalized_type == "主体":
+        normalized_type = "unknown"
+    elif normalized_type == "dynamiccaseentity":
+        return False
+    if normalized_type in _FACT_ENTITY_TYPES:
+        return False
+    if any(hint in label for hint in _FACT_LABEL_HINTS):
+        return False
+    if normalized_type in _RESPONSIBLE_ENTITY_TYPES:
+        return True
+    return normalized_type == "unknown" and bool(label)
+
+
 def _entity_from_conversation_entity(
     entity: dict[str, Any],
     *,
@@ -95,6 +426,8 @@ def _entity_from_conversation_entity(
     if source == "fallback_rules":
         return None
     if role == "current_party" and confidence == "low" and label in {"当前会话当事人", "未解析当事人"}:
+        return None
+    if not _is_responsible_entity(label, entity_type):
         return None
     source_entity_id = _entity_identity(entity, conversation_id)
     mentions: list[dict[str, Any]] = []
@@ -354,13 +687,50 @@ def _state_relations(
 
 
 def _candidate_entities_are_same_label(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    left_label = _normalize_key(left.get("canonical_label") or left.get("label"))
-    right_label = _normalize_key(right.get("canonical_label") or right.get("label"))
-    if left_label and right_label and left_label == right_label:
-        return True
-    left_labels = {_normalize_key(value) for value in left.get("source_labels", []) if _normalize_key(value)}
-    right_labels = {_normalize_key(value) for value in right.get("source_labels", []) if _normalize_key(value)}
-    return bool(left_labels & right_labels)
+    score = _score_same_entity_candidate(left, right)
+    return score["label_similarity"] >= 0.75 or bool(
+        set(_normalize_key(value) for value in left.get("source_labels", []) if _normalize_key(value))
+        & set(_normalize_key(value) for value in right.get("source_labels", []) if _normalize_key(value))
+    )
+
+
+def _should_auto_merge_pair(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    decision_index: dict[str, str],
+    dossier_id: int | None,
+) -> bool:
+    base_task_key = _task_key(left["id"], right["id"])
+    canonical_task_key = _task_key(
+        _singleton_canonical_id(left, dossier_id=dossier_id),
+        _singleton_canonical_id(right, dossier_id=dossier_id),
+    )
+    if decision_index.get(base_task_key) == "not_same" or decision_index.get(canonical_task_key) == "not_same":
+        return False
+    candidate_score = _score_same_entity_candidate(left, right)
+    if not candidate_score["auto_merge_recommended"]:
+        return False
+    blockers = identity_merge_blockers(
+        left,
+        right,
+        requires_user_confirmation=False,
+        user_confirmed=False,
+        source_dossier_id=dossier_id,
+        target_dossier_id=dossier_id,
+    )
+    return not blockers
+
+
+def _can_surface_identity_candidate(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    blockers = identity_merge_blockers(
+        left,
+        right,
+        requires_user_confirmation=False,
+        user_confirmed=False,
+    )
+    hard_blockers = set(blockers) - {"role_person_not_auto_identity_merge"}
+    return not hard_blockers
 
 
 def _build_confirmation_tasks(
@@ -388,13 +758,19 @@ def _build_confirmation_tasks(
             right_conversations = set(right.get("source_conversation_ids") or [])
             if left_conversations & right_conversations:
                 continue
-            if not _candidate_entities_are_same_label(left, right):
+            candidate_score = _score_same_entity_candidate(left, right)
+            if candidate_score["score"] < 0.55:
                 continue
-            if not can_create_identity_candidate(left, right):
+            if candidate_score["confidence"] not in {"high", "medium"}:
+                continue
+            if not _can_surface_identity_candidate(left, right):
                 continue
             task_key = _task_key(left["id"], right["id"])
             if decision_index.get(task_key) in {"same", "not_same"}:
                 continue
+            is_high_priority = candidate_score["confidence"] == "high" or bool(
+                candidate_score["auto_merge_recommended"]
+            )
             tasks.append(
                 {
                     "id": task_key,
@@ -409,12 +785,30 @@ def _build_confirmation_tasks(
                         list(left.get("source_conversation_ids") or [])
                         + list(right.get("source_conversation_ids") or [])
                     ),
-                    "reason": "不同会话出现相同或重叠主体称呼，需要用户确认是否为同一案卷实体。",
-                    "confidence": "medium",
+                    "reason": (
+                        "系统高度怀疑不同会话中的主体为同一实体，但仍需要用户确认后归并。"
+                        if is_high_priority
+                        else "不同会话中的主体存在较高同一实体相似度，需要用户确认是否归并。"
+                    ),
+                    "confidence": candidate_score["confidence"],
+                    "score": candidate_score["score"],
+                    "scoring_reasons": candidate_score["reasons"],
+                    "label_similarity": candidate_score["label_similarity"],
+                    "role_score": candidate_score["role_score"],
+                    "auto_merge_recommended": candidate_score["auto_merge_recommended"],
+                    "priority": "high" if is_high_priority else "normal",
+                    "high_priority": is_high_priority,
                     "allowed_actions": ["confirm", "reject", "defer"],
                     "requires_user_confirmation": True,
                 }
             )
+    tasks.sort(
+        key=lambda item: (
+            0 if item.get("high_priority") else 1,
+            -float(item.get("score") or 0),
+            str(item.get("task_key")),
+        )
+    )
     return tasks
 
 
@@ -463,13 +857,22 @@ def build_dossier_entity_state(
                 _singleton_canonical_id(left, dossier_id=dossier_id),
                 _singleton_canonical_id(right, dossier_id=dossier_id),
             )
-            if decision_index.get(base_task_key) != "same" and decision_index.get(canonical_task_key) != "same":
+            user_confirmed_same = decision_index.get(base_task_key) == "same" or decision_index.get(canonical_task_key) == "same"
+            auto_merge_same = False
+            if not user_confirmed_same:
+                auto_merge_same = _should_auto_merge_pair(
+                    left,
+                    right,
+                    decision_index=decision_index,
+                    dossier_id=dossier_id,
+                )
+            if not user_confirmed_same and not auto_merge_same:
                 continue
             blockers = identity_merge_blockers(
                 left,
                 right,
-                requires_user_confirmation=True,
-                user_confirmed=True,
+                requires_user_confirmation=not (user_confirmed_same or auto_merge_same),
+                user_confirmed=user_confirmed_same,
                 source_dossier_id=dossier_id,
                 target_dossier_id=dossier_id,
             )

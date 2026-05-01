@@ -146,31 +146,22 @@ def test_temporary_fact_update_runs_legal_analysis_without_persistence(
     trace = result["execution_trace"]
     step_names = [step["name"] for step in trace["steps"]]
     assert result["status"] == "success"
-    assert result["route_intent"] == "CASE_UPDATE"
+    assert result["route_intent"] == "GENERAL_CONSULT"
     assert trackers["legal_agent_calls"] == 1
     assert trackers["ack_calls"] == 0
     assert trace["execution_plan"]["response_mode"] == "temporary_case_analysis"
     assert "legal_agent_answer" in step_names
-    assert "fact_persistence" in step_names
-    assert "graph_update" in step_names
+    # temporary mode should not include persistence steps at all
+    assert "fact_persistence" not in step_names
+    assert "graph_update" not in step_names
     assert any(
-        step["name"] == "fact_persistence" and step["status"] == "skipped"
+        step["name"] == "legal_agent_answer" and step["status"] == "success"
         for step in trace["steps"]
     )
-    assert any(
-        step["name"] == "graph_update" and step["status"] == "skipped"
-        for step in trace["steps"]
-    )
-    assert any(
-        guard["name"] == "temporary_blocks_persistence" and guard["triggered"] is True
-        for guard in trace["guards_applied"]
-    )
+    # temporary mode doesn't request writes, so nothing to block
     assert trace["writes"]["allowed"] == []
-    assert [item["name"] for item in trace["writes"]["blocked"]] == [
-        "structured_case_persistence",
-        "graph_update_schedule",
-    ]
-    assert [item["status"] for item in trace["writes"]["results"]] == ["blocked", "blocked"]
+    assert trace["writes"]["blocked"] == []
+    assert trace["writes"]["results"] == []
     assert graph_calls == []
     assert persisted["case_summary"] == ""
     assert persisted["case_state_dict"] is None

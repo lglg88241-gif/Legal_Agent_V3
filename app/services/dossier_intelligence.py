@@ -27,6 +27,7 @@ from app.services.dossier_display_graph import build_dossier_display_graph
 from app.services.dossier_entity_onboarding_agent import (
     build_dossier_entity_onboarding_decision,
 )
+from app.services.dossier_state_snapshot import build_dossier_state_snapshot
 from app.services.dossier_graph import get_dossier_graph_payload
 from app.services.message_understanding_agent import (
     _call_openai_json_model,
@@ -1403,6 +1404,112 @@ def _build_candidate_evidence(
     }
 
 
+def _canonical_same_entity_task_to_confirmation_task(task: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(task, dict):
+        return None
+    if _normalize_candidate_task_type(task.get("task_type")) != "cross_conversation_same_entity":
+        return None
+
+    source_entity = task.get("source_entity") if isinstance(task.get("source_entity"), dict) else {}
+    target_entity = task.get("target_entity") if isinstance(task.get("target_entity"), dict) else {}
+    task_key = _normalize_text(task.get("task_key") or task.get("id"))
+    if not task_key or not source_entity or not target_entity:
+        return None
+
+    source_conversation_ids = _sorted_unique_ints(
+        list(source_entity.get("source_conversation_ids") or [])
+    )
+    target_conversation_ids = _sorted_unique_ints(
+        list(target_entity.get("source_conversation_ids") or [])
+    )
+
+    return {
+        "task_type": "cross_conversation_same_entity",
+        "type": "cross_conversation_same_entity",
+        "status": _normalize_text(task.get("status")) or "pending",
+        "task_key": task_key,
+        "candidate_key": task_key,
+        "dossier_id": _positive_int(task.get("dossier_id")),
+        "reason": _normalize_text(task.get("reason")),
+        "confidence": _normalize_key(task.get("confidence")) or "medium",
+        "score": float(task.get("score") or 0),
+        "scoring_reasons": _sorted_unique_strings(task.get("scoring_reasons") or []),
+        "label_similarity": float(task.get("label_similarity") or 0),
+        "role_score": float(task.get("role_score") or 0),
+        "auto_merge_recommended": _coerce_bool(task.get("auto_merge_recommended"), False),
+        "priority": _normalize_key(task.get("priority")) or "normal",
+        "high_priority": _coerce_bool(task.get("high_priority"), False),
+        "allowed_actions": task.get("allowed_actions") if isinstance(task.get("allowed_actions"), list) else ["confirm", "reject", "defer"],
+        "requires_user_confirmation": True,
+        "should_show_to_user": True,
+        "origin": "dossier_entity_state",
+        "source": "dossier_intelligence_canonical",
+        "source_entity": source_entity,
+        "target_entity": target_entity,
+        "source_conversation_ids": _sorted_unique_ints(
+            list(task.get("source_conversation_ids") or [])
+            + source_conversation_ids
+            + target_conversation_ids
+        ),
+        "subject_node": {
+            "graph_node_id": _normalize_text(source_entity.get("id")),
+            "graph_node_label": _normalize_text(source_entity.get("label")),
+            "raw_label": _normalize_text(source_entity.get("label")),
+            "graph_node_type": _normalize_key(source_entity.get("entity_type")) or "unknown",
+            "conversation_id": source_conversation_ids[0] if source_conversation_ids else 0,
+            "subject_kind": _normalize_key(source_entity.get("entity_type")) or "unknown",
+            "is_role_person": is_role_person_label(source_entity.get("label")),
+            "is_self_anchor": _is_self_anchor_candidate_label(source_entity.get("label")),
+            "is_organization": _normalize_key(source_entity.get("entity_type")) in {"organization", "company", "employer"}
+            or _is_organization_like_label(source_entity.get("label")),
+        },
+        "object_node": {
+            "graph_node_id": _normalize_text(target_entity.get("id")),
+            "graph_node_label": _normalize_text(target_entity.get("label")),
+            "raw_label": _normalize_text(target_entity.get("label")),
+            "graph_node_type": _normalize_key(target_entity.get("entity_type")) or "unknown",
+            "conversation_id": target_conversation_ids[0] if target_conversation_ids else 0,
+            "subject_kind": _normalize_key(target_entity.get("entity_type")) or "unknown",
+            "is_role_person": is_role_person_label(target_entity.get("label")),
+            "is_self_anchor": _is_self_anchor_candidate_label(target_entity.get("label")),
+            "is_organization": _normalize_key(target_entity.get("entity_type")) in {"organization", "company", "employer"}
+            or _is_organization_like_label(target_entity.get("label")),
+        },
+        "evidence_summary": _normalize_text(task.get("reason")) or "跨会话主体相似度候选",
+        "evidence": {
+            "source_entity_ids": _sorted_unique_strings(source_entity.get("source_entity_ids") or []),
+            "target_entity_ids": _sorted_unique_strings(target_entity.get("source_entity_ids") or []),
+            "source_aliases": _sorted_unique_strings(source_entity.get("aliases") or []),
+            "target_aliases": _sorted_unique_strings(target_entity.get("aliases") or []),
+            "source_conversation_ids": source_conversation_ids,
+            "target_conversation_ids": target_conversation_ids,
+            "summary": _normalize_text(task.get("reason")) or "跨会话主体相似度候选",
+        },
+    }
+
+
+def _canonical_confirmation_tasks_from_snapshot(
+    snapshot: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    payload = snapshot if isinstance(snapshot, dict) else {}
+    dossier_entity_state = (
+        payload.get("dossier_entity_state")
+        if isinstance(payload.get("dossier_entity_state"), dict)
+        else {}
+    )
+    tasks = dossier_entity_state.get("confirmation_tasks")
+    if not isinstance(tasks, list):
+        return []
+    return [
+        confirmation_task
+        for confirmation_task in (
+            _canonical_same_entity_task_to_confirmation_task(task)
+            for task in tasks
+        )
+        if isinstance(confirmation_task, dict)
+    ]
+
+
 def _candidate_prior_decision_types(candidate: dict[str, Any]) -> set[str]:
     evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
     prior_decisions = evidence.get("prior_decisions") if isinstance(evidence.get("prior_decisions"), list) else []
@@ -2110,6 +2217,36 @@ async def build_dossier_intelligence(
             "build_self_identity_tasks",
             "success",
             task_count=len(self_identity_tasks),
+        )
+    )
+
+    dossier_state_snapshot = build_dossier_state_snapshot(
+        conversation_entity_states=conversation_entity_states,
+        dossier_id=dossier.id,
+        user_id=user_id,
+        resolution_decisions=(
+            raw_graph_payload.get("entity_resolution_decisions")
+            if isinstance(raw_graph_payload, dict)
+            else []
+        ),
+        conversation_summaries=[
+            {
+                "id": _positive_int(state.get("conversation_id")),
+                "title": f"conversation {_positive_int(state.get('conversation_id'))}",
+            }
+            for state in conversation_entity_states
+            if isinstance(state, dict) and _positive_int(state.get("conversation_id")) > 0
+        ],
+    )
+    canonical_confirmation_tasks = _canonical_confirmation_tasks_from_snapshot(
+        dossier_state_snapshot
+    )
+    confirmation_tasks.extend(canonical_confirmation_tasks)
+    steps.append(
+        _step(
+            "build_canonical_confirmation_tasks",
+            "success",
+            task_count=len(canonical_confirmation_tasks),
         )
     )
 

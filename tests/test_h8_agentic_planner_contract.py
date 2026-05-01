@@ -49,10 +49,12 @@ def test_subject_reference_plan_contract_is_explicit() -> None:
     assert plan["needs_legal_rag"] is False
     assert plan["writes_requested"] == []
     assert "current_conversation_graph" in plan["context_requirements"]
-    assert "pending_clarification" in plan["context_requirements"]
+    assert "recent_messages" in plan["context_requirements"]
+    assert "dossier_graph_context" in plan["context_requirements"]
     assert _tool_names(plan) == [
         "current_conversation_graph_query",
         "current_conversation_messages_query",
+        "dossier_graph_context_query",
         "subject_reference_resolve",
         "memory_answer_compose",
     ]

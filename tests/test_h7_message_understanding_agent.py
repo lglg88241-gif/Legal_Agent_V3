@@ -360,3 +360,35 @@ def test_understand_message_with_agent_detects_pending_subject_reference_clarifi
     assert result["fallback_reason"] is None
     assert result["clarification_response"]["target_mention"] == "公司"
     assert result["trace"]["steps"] == ["build_request", "detect_pending_clarification"]
+
+
+def test_pending_subject_reference_does_not_swallow_fact_memory_question_without_llm() -> None:
+    result = _run(
+        message_understanding_agent.understand_message_with_agent(
+            message="李四是谁",
+            recent_messages=[
+                {
+                    "message_id": 12,
+                    "role": "assistant",
+                    "content": "当前还不能稳定确定“公司”具体指向哪个主体。",
+                    "metadata": {
+                        "pending_clarification": {
+                            "type": "subject_reference_resolution",
+                            "target_mention": "蓝海科技",
+                            "reference_type": "organization",
+                            "previous_question": "这里的蓝海科技具体指谁？",
+                            "scope_attempted": ["current_conversation_graph"],
+                            "expected_response": "entity_name_or_context",
+                            "pending_graph_update_input_text": "蓝海科技的老板叫李四。",
+                        }
+                    },
+                }
+            ],
+            use_llm=False,
+        )
+    )
+
+    assert result["intent"] == "unknown"
+    assert result["provider"] == "fallback"
+    assert result["fallback_reason"] == "llm_disabled"
+    assert "detect_pending_clarification" not in result["trace"]["steps"]

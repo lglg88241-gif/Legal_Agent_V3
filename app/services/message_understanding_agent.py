@@ -96,6 +96,7 @@ _SYSTEM_PROMPT = """你是消息理解智能体，不负责提供法律建议。
 9. 如果是明确法条/法规定义问题，应识别为 legal_question，并设置 needs_legal_rag=true。
 10. 如果信息不足，返回 unknown，保持保守。
 11. 如果是主体指代问题，请输出一个 reference resolution plan，明确 reference_type、scope_order，以及是否在歧义时要求澄清。
+12. 如果用户询问已记录案情事实（例如“劳动者任职的公司叫什么”“被拖欠的工资是多少”“谁拖欠了劳动者工资”“有哪些证据”），这属于案卷记忆问答，不是法律咨询、不是新增事实；应识别为 subject_reference，route_hint=DOSSIER_MEMORY，needs_dossier_graph_context=true，needs_structured_persistence=false，needs_graph_update=false。这里的 subject_reference 表示“案卷事实记忆解析计划”，不只限于主体是谁。
 
 请输出包含以下顶层字段的 JSON：
 {
@@ -470,6 +471,10 @@ def _normalize_clarification_response(
         "expected_response": _normalize_text(
             payload.get("expected_response") or pending.get("expected_response")
         ) or "entity_name_or_context",
+        "pending_graph_update_input_text": _normalize_text(
+            payload.get("pending_graph_update_input_text")
+            or pending.get("pending_graph_update_input_text")
+        ),
     }
 
 

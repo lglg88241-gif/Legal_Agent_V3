@@ -119,6 +119,7 @@ def test_tracked_conversation_does_not_repeat_prompt() -> None:
             message_understanding=_fact_understanding(),
             conversation_mode="TRACKED_CASE",
             persistence_consent="tracked",
+            dossier_id=101,  # tracked requires bound dossier
         )
     )
 
@@ -172,6 +173,12 @@ def _install_dialog_stubs() -> None:
 
     fake_llm_provider = ModuleType("app.core.llm_provider")
 
+    class LLMProvider:
+        GPT_5_4 = "GPT_5_4"
+        GPT_5_1 = "GPT_5_1"
+        ZHIPU = "ZHIPU"
+        LOCAL_VLLM = "LOCAL_VLLM"
+
     class FakeRouter:
         local_enabled = False
         vllm_base_url = "http://127.0.0.1:8001"
@@ -184,6 +191,7 @@ def _install_dialog_stubs() -> None:
         def set_local_enabled(self, enabled: bool) -> None:
             self.local_enabled = enabled
 
+    fake_llm_provider.LLMProvider = LLMProvider
     fake_llm_provider.get_llm_router = lambda: FakeRouter()
     sys.modules["app.core.llm_provider"] = fake_llm_provider
 

@@ -201,13 +201,9 @@ def test_dialog_keeps_legacy_behavior_when_mode_consent_disabled(
     async def fake_list_recent_conversation_messages(db, conversation_id: int, limit: int = 6):
         return []
 
-    async def fake_detect_case_boundary(**kwargs):
-        return "SAME_CASE"
-
     monkeypatch.setattr(dialog_api, "ensure_storage_schema", fake_ensure_storage_schema)
     monkeypatch.setattr(dialog_api, "get_conversation_for_user", fake_get_conversation_for_user)
     monkeypatch.setattr(dialog_api, "list_recent_conversation_messages", fake_list_recent_conversation_messages)
-    monkeypatch.setattr(dialog_api, "detect_case_boundary", fake_detect_case_boundary)
 
     result = asyncio.run(
         dialog_api.process_dialog(
@@ -254,13 +250,9 @@ def test_dialog_returns_mode_consent_when_enabled_for_case_analysis(
     async def fake_list_recent_conversation_messages(db, conversation_id: int, limit: int = 6):
         return []
 
-    async def fake_detect_case_boundary(**kwargs):
-        return "SAME_CASE"
-
     monkeypatch.setattr(dialog_api, "ensure_storage_schema", fake_ensure_storage_schema)
     monkeypatch.setattr(dialog_api, "get_conversation_for_user", fake_get_conversation_for_user)
     monkeypatch.setattr(dialog_api, "list_recent_conversation_messages", fake_list_recent_conversation_messages)
-    monkeypatch.setattr(dialog_api, "detect_case_boundary", fake_detect_case_boundary)
 
     result = asyncio.run(
         dialog_api.process_dialog(
@@ -320,13 +312,9 @@ def test_dialog_does_not_repeat_mode_consent_for_bound_dossier_case_conversation
     async def fake_list_recent_conversation_messages(db, conversation_id: int, limit: int = 6):
         return []
 
-    async def fake_detect_case_boundary(**kwargs):
-        return "SAME_CASE"
-
     monkeypatch.setattr(dialog_api, "ensure_storage_schema", fake_ensure_storage_schema)
     monkeypatch.setattr(dialog_api, "get_conversation_for_user", fake_get_conversation_for_user)
     monkeypatch.setattr(dialog_api, "list_recent_conversation_messages", fake_list_recent_conversation_messages)
-    monkeypatch.setattr(dialog_api, "detect_case_boundary", fake_detect_case_boundary)
 
     result = asyncio.run(
         dialog_api.process_dialog(
@@ -345,7 +333,7 @@ def test_dialog_does_not_repeat_mode_consent_for_bound_dossier_case_conversation
     assert result.get("action") is None
 
 
-def test_dialog_prioritizes_suggest_new_case_over_mode_consent(
+def test_dialog_ignores_legacy_new_case_boundary_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dialog_api = _load_dialog_api_module()
@@ -373,13 +361,9 @@ def test_dialog_prioritizes_suggest_new_case_over_mode_consent(
     async def fake_list_recent_conversation_messages(db, conversation_id: int, limit: int = 6):
         return []
 
-    async def fake_detect_case_boundary(**kwargs):
-        return "NEW_CASE"
-
     monkeypatch.setattr(dialog_api, "ensure_storage_schema", fake_ensure_storage_schema)
     monkeypatch.setattr(dialog_api, "get_conversation_for_user", fake_get_conversation_for_user)
     monkeypatch.setattr(dialog_api, "list_recent_conversation_messages", fake_list_recent_conversation_messages)
-    monkeypatch.setattr(dialog_api, "detect_case_boundary", fake_detect_case_boundary)
 
     result = asyncio.run(
         dialog_api.process_dialog(
@@ -394,8 +378,9 @@ def test_dialog_prioritizes_suggest_new_case_over_mode_consent(
     )
 
     assert result["status"] == "needs_confirmation"
-    assert result["action"] == "suggest_new_case"
-    assert "detected_mode" not in result
+    assert result["action"] == "mode_consent"
+    assert result["case_boundary"] == "SAME_CASE"
+    assert result["detected_mode"] == "CASE_ANALYSIS"
 
 
 def test_mode_consent_api_updates_tracked_case(monkeypatch: pytest.MonkeyPatch) -> None:

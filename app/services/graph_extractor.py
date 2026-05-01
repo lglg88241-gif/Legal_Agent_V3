@@ -21,6 +21,7 @@ from app.agent.prompts.extractor import (  # noqa: E402
     BELIEF_REVISION_PROMPT,
     BELIEF_REVISION_PROMPT_V2,
 )
+from app.services.graph_reference_guard import evaluate_graph_action_reference_guard_async
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,18 @@ ORDER BY name
 LIMIT 500
 """
 
+FETCH_NODE_RECORDS_QUERY = """
+MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
+RETURN n.name AS name,
+       n.category AS category,
+       n.node_type AS node_type,
+       n.entity_type AS entity_type,
+       n.role AS role,
+       n.participant_role AS participant_role
+ORDER BY name
+LIMIT 500
+"""
+
 FETCH_USER_CASES_QUERY = """
 MATCH (n:DynamicCaseEntity {user_id: $user_id})
 WITH DISTINCT n.conversation_id AS case_id
@@ -130,6 +143,167 @@ ENTITY_ALIAS_MAP = {
     "肇事车": "肇事车辆",
 }
 
+SELF_ANCHOR_NAMES = {"我", "本人", "自己", "用户", "我们", "咱们", "当事人", "劳动者", "申请人"}
+GENERIC_PERSON_NAMES = SELF_ANCHOR_NAMES | {"员工", "职工", "个人"}
+ORG_NAME_HINTS = {
+    "有限责任公司",
+    "股份有限公司",
+    "集团有限公司",
+    "集团公司",
+    "有限公司",
+    "公司",
+    "科技",
+    "集团",
+    "企业",
+    "单位",
+    "工厂",
+    "厂",
+    "事务所",
+    "银行",
+    "医院",
+    "学校",
+    "机构",
+}
+RESPONSIBLE_ORG_ENTITY_HINTS = {
+    "有限责任公司",
+    "股份有限公司",
+    "集团有限公司",
+    "集团公司",
+    "有限公司",
+    "公司",
+    "集团",
+    "企业",
+    "单位",
+    "工厂",
+    "厂",
+    "事务所",
+    "银行",
+    "医院",
+    "学校",
+    "机构",
+}
+AUTHORITY_NAME_HINTS = {"法院", "仲裁委", "委员会", "人社局", "社保局", "劳动监察", "劳动局"}
+ROLE_NAME_HINTS = {"HR", "hr", "人事", "经理", "主管", "主任", "负责人", "法人", "法定代表人", "代表", "代理人", "老板", "法务"}
+EVIDENCE_NAME_HINTS = {
+    "证据",
+    "证明",
+    "工资流水",
+    "银行流水",
+    "微信",
+    "企业微信",
+    "钉钉",
+    "飞书",
+    "短信",
+    "邮件",
+    "邮箱",
+    "电话",
+    "通话",
+    "录音",
+    "微信聊天",
+    "微信聊天记录",
+    "聊天记录",
+    "聊天截图",
+    "打卡记录",
+    "考勤记录",
+    "转账记录",
+    "录音",
+    "截图",
+    "凭证",
+    "证人证言",
+}
+COMMUNICATION_TOOL_NAME_HINTS = {
+    "微信",
+    "企业微信",
+    "钉钉",
+    "飞书",
+    "QQ",
+    "qq",
+    "短信",
+    "邮件",
+    "邮箱",
+    "电话",
+    "手机",
+    "通话",
+    "语音",
+    "视频会议",
+    "会议软件",
+    "聊天软件",
+    "沟通软件",
+    "办公软件",
+}
+OBJECT_NAME_HINTS = {
+    "车辆",
+    "合同",
+    "劳动合同",
+    "工资",
+    "薪资",
+    "薪酬",
+    "社保",
+    "社会保险",
+    "岗位",
+    "保险",
+    "金额",
+    "平台",
+    "软件",
+    "系统",
+    "APP",
+    "app",
+    "客户端",
+    "小程序",
+}
+EVENT_NAME_HINTS = {
+    "事故",
+    "争议",
+    "仲裁申请",
+    "仲裁",
+    "申请",
+    "解除",
+    "辞退",
+    "开除",
+    "工伤认定",
+    "索赔",
+    "违约",
+    "受伤",
+    "拖欠",
+    "欠薪",
+    "未签",
+    "未缴纳",
+    "补缴",
+    "通知",
+}
+CONSEQUENCE_NAME_HINTS = {
+    "赔偿",
+    "补偿",
+    "损失",
+    "经济损失",
+    "医疗费",
+    "工伤待遇",
+    "伤残",
+    "后果",
+}
+RESPONSIBLE_RELATION_HINTS = {
+    "任职",
+    "就职",
+    "工作",
+    "受雇",
+    "雇佣",
+    "用工",
+    "劳动关系",
+    "签约方",
+    "发放工资",
+    "缴纳社保",
+    "拖欠工资",
+    "欠薪",
+    "未缴纳",
+    "未签",
+    "解除",
+    "辞退",
+    "开除",
+    "通知",
+    "实施",
+    "管理",
+}
+
 
 def _get_graph_llm() -> ChatZhipuAI:
     global _graph_llm
@@ -161,23 +335,145 @@ def _canonicalize_entity(name: str) -> str:
     return ENTITY_ALIAS_MAP.get(cleaned, cleaned)
 
 
-def _normalize_category(value: Any, entity_name: str = "") -> str:
-    if isinstance(value, str):
-        cleaned = value.strip()
-        if cleaned in ALLOWED_CATEGORIES:
-            return cleaned
+def _contains_any(value: str, hints: set[str]) -> bool:
+    return any(hint in value for hint in hints)
 
+
+def _looks_like_specific_person_name(name: str) -> bool:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned or cleaned in GENERIC_PERSON_NAMES:
+        return False
+    if _contains_any(
+        cleaned,
+        ORG_NAME_HINTS
+        | AUTHORITY_NAME_HINTS
+        | ROLE_NAME_HINTS
+        | EVIDENCE_NAME_HINTS
+        | COMMUNICATION_TOOL_NAME_HINTS
+        | OBJECT_NAME_HINTS
+        | EVENT_NAME_HINTS
+        | CONSEQUENCE_NAME_HINTS,
+    ):
+        return False
+    return len(cleaned) in {2, 3, 4} and all("\u4e00" <= char <= "\u9fff" for char in cleaned)
+
+
+def _looks_like_responsible_entity_name(name: str) -> bool:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned:
+        return False
+    if _looks_like_non_responsible_name(cleaned):
+        return False
+    if cleaned in SELF_ANCHOR_NAMES:
+        return True
+    if _contains_any(cleaned, ORG_NAME_HINTS | AUTHORITY_NAME_HINTS | ROLE_NAME_HINTS):
+        return True
+    return _looks_like_specific_person_name(cleaned)
+
+
+def _looks_like_amount_or_time_name(name: str) -> bool:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned:
+        return False
+    if any(char.isdigit() for char in cleaned) and _contains_any(
+        cleaned,
+        {"元", "万元", "块", "人民币", "年", "月", "日", "号", "天", "个月", "%", "％"},
+    ):
+        return True
+    return False
+
+
+def _looks_like_communication_tool_name(name: str) -> bool:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned:
+        return False
+    if _contains_any(cleaned, RESPONSIBLE_ORG_ENTITY_HINTS | AUTHORITY_NAME_HINTS):
+        return False
+    return _contains_any(cleaned, COMMUNICATION_TOOL_NAME_HINTS)
+
+
+def _looks_like_non_responsible_name(name: str) -> bool:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned:
+        return False
+    if _contains_any(cleaned, RESPONSIBLE_ORG_ENTITY_HINTS | AUTHORITY_NAME_HINTS):
+        return False
+    if _looks_like_communication_tool_name(cleaned):
+        return True
+    if _looks_like_amount_or_time_name(cleaned):
+        return True
+    return _contains_any(
+        cleaned,
+        EVIDENCE_NAME_HINTS
+        | COMMUNICATION_TOOL_NAME_HINTS
+        | OBJECT_NAME_HINTS
+        | EVENT_NAME_HINTS
+        | CONSEQUENCE_NAME_HINTS,
+    )
+
+
+def _is_self_anchor_name(name: Any) -> bool:
+    return _canonicalize_entity(str(name or "")) in SELF_ANCHOR_NAMES
+
+
+def _resolve_self_anchor_name(name: str, self_anchor_target: str = "") -> str:
+    canonical = _canonicalize_entity(name)
+    if self_anchor_target and canonical in SELF_ANCHOR_NAMES:
+        return self_anchor_target
+    return canonical
+
+
+def _normalize_category(value: Any, entity_name: str = "") -> str:
     name = entity_name.strip()
     if not name:
         return CATEGORY_OBJECT
 
-    if any(token in name for token in ("赔偿", "补偿", "损失", "医疗费", "工伤待遇", "伤残", "后果", "责任")):
-        return CATEGORY_CONSEQUENCE
-    if any(token in name for token in ("事故", "争议", "仲裁", "解除", "辞退", "工伤认定", "索赔", "违约", "受伤")):
-        return CATEGORY_EVENT
-    if any(token in name for token in ("车辆", "合同", "工资", "社保", "岗位", "证据", "保险")):
+    explicit_category = value.strip() if isinstance(value, str) else ""
+    if _looks_like_amount_or_time_name(name):
         return CATEGORY_OBJECT
-    return CATEGORY_SUBJECT
+    if _looks_like_communication_tool_name(name):
+        return CATEGORY_OBJECT
+    if _looks_like_non_responsible_name(name):
+        if _contains_any(name, CONSEQUENCE_NAME_HINTS):
+            return CATEGORY_CONSEQUENCE
+        if _contains_any(name, EVENT_NAME_HINTS):
+            return CATEGORY_EVENT
+        return CATEGORY_OBJECT
+    if _looks_like_responsible_entity_name(name):
+        return CATEGORY_SUBJECT
+    if _contains_any(name, CONSEQUENCE_NAME_HINTS):
+        return CATEGORY_CONSEQUENCE
+    if _contains_any(name, EVENT_NAME_HINTS):
+        return CATEGORY_EVENT
+    if _contains_any(name, EVIDENCE_NAME_HINTS | OBJECT_NAME_HINTS):
+        return CATEGORY_OBJECT
+    if explicit_category in ALLOWED_CATEGORIES:
+        return explicit_category
+    return CATEGORY_OBJECT
+
+
+def _normalize_fact_categories(
+    *,
+    source: str,
+    source_category: Any,
+    relation: str,
+    target: str,
+    target_category: Any,
+) -> tuple[str, str]:
+    normalized_source_category = _normalize_category(source_category, source)
+    normalized_target_category = _normalize_category(target_category, target)
+    relation_text = _normalize_relation(relation)
+    relation_implies_responsible = _contains_any(relation_text, RESPONSIBLE_RELATION_HINTS)
+
+    if relation_implies_responsible and _looks_like_responsible_entity_name(source):
+        normalized_source_category = CATEGORY_SUBJECT
+    if relation_implies_responsible and _looks_like_responsible_entity_name(target):
+        normalized_target_category = CATEGORY_SUBJECT
+    if _looks_like_non_responsible_name(source):
+        normalized_source_category = _normalize_category("", source)
+    if _looks_like_non_responsible_name(target):
+        normalized_target_category = _normalize_category("", target)
+    return normalized_source_category, normalized_target_category
 
 
 def _normalize_relation(value: Any) -> str:
@@ -278,14 +574,21 @@ def _normalize_triples(raw_payload: Any) -> list[dict[str, str]]:
         if key in seen:
             continue
         seen.add(key)
+        source_category, target_category = _normalize_fact_categories(
+            source=source,
+            source_category=item.get("source_category"),
+            relation=relation,
+            target=target,
+            target_category=item.get("target_category"),
+        )
 
         normalized.append(
             {
                 "source": source,
-                "source_category": _normalize_category(item.get("source_category"), source),
+                "source_category": source_category,
                 "relation": relation,
                 "target": target,
-                "target_category": _normalize_category(item.get("target_category"), target),
+                "target_category": target_category,
             }
         )
 
@@ -305,7 +608,24 @@ def _resolve_existing_node_name(name: Any, existing_nodes: set[str] | None = Non
     return canonical or cleaned
 
 
-def _normalize_actions(raw_payload: Any, existing_nodes: set[str] | None = None) -> list[dict[str, str]]:
+def _resolve_action_entity_name(
+    name: Any,
+    existing_nodes: set[str] | None = None,
+    self_anchor_target: str = "",
+) -> str:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned:
+        return ""
+    if self_anchor_target and _is_self_anchor_name(cleaned):
+        return self_anchor_target
+    return _resolve_existing_node_name(cleaned, existing_nodes)
+
+
+def _normalize_actions(
+    raw_payload: Any,
+    existing_nodes: set[str] | None = None,
+    self_anchor_target: str = "",
+) -> list[dict[str, str]]:
     if isinstance(raw_payload, dict):
         candidates = raw_payload.get("actions", [])
     elif isinstance(raw_payload, list):
@@ -323,13 +643,22 @@ def _normalize_actions(raw_payload: Any, existing_nodes: set[str] | None = None)
         if action not in ALLOWED_ACTIONS:
             continue
 
-        source = _resolve_existing_node_name(item.get("source", ""), existing_nodes)
+        source = _resolve_action_entity_name(item.get("source", ""), existing_nodes, self_anchor_target)
         relation = _normalize_relation(item.get("relation", ""))
-        target = _resolve_existing_node_name(item.get("new_target", "") or item.get("target", ""), existing_nodes)
-        old_target = _resolve_existing_node_name(item.get("old_target", "") or item.get("target", ""), existing_nodes)
-        target_name = _resolve_existing_node_name(
+        target = _resolve_action_entity_name(
+            item.get("new_target", "") or item.get("target", ""),
+            existing_nodes,
+            self_anchor_target,
+        )
+        old_target = _resolve_action_entity_name(
+            item.get("old_target", "") or item.get("target", ""),
+            existing_nodes,
+            self_anchor_target,
+        )
+        target_name = _resolve_action_entity_name(
             item.get("target_name", "") or item.get("target", "") or item.get("old_target", ""),
             existing_nodes,
+            self_anchor_target,
         )
 
         if action == "ADD" and (not source or not relation or not target):
@@ -338,15 +667,22 @@ def _normalize_actions(raw_payload: Any, existing_nodes: set[str] | None = None)
             continue
         if action == "DELETE" and not (target_name or (source and relation and old_target)):
             continue
+        source_category, target_category = _normalize_fact_categories(
+            source=source,
+            source_category=item.get("source_category"),
+            relation=relation,
+            target=target,
+            target_category=item.get("target_category"),
+        )
 
         normalized.append(
             {
                 "action": action,
                 "source": source,
-                "source_category": _normalize_category(item.get("source_category"), source),
+                "source_category": source_category,
                 "relation": relation,
                 "target": target if action != "DELETE" else target_name,
-                "target_category": _normalize_category(item.get("target_category"), target),
+                "target_category": target_category,
                 "old_target": old_target,
                 "target_name": target_name,
             }
@@ -452,6 +788,40 @@ def _delete_node(session, conversation_id: int, target_name: str) -> None:
     ).consume()
 
 
+def _infer_self_anchor_target_from_records(records: list[dict[str, Any]]) -> str:
+    candidates: list[str] = []
+    for record in records:
+        name = _canonicalize_entity(str(record.get("name") or "").strip())
+        if not _looks_like_specific_person_name(name):
+            continue
+        category = str(record.get("category") or record.get("node_type") or "").strip()
+        role = str(record.get("role") or record.get("participant_role") or "").strip()
+        if category and category != CATEGORY_SUBJECT:
+            continue
+        if role in {"current_party", "劳动者", "申请人", "当事人"}:
+            return name
+        candidates.append(name)
+
+    unique_candidates = sorted(set(candidates))
+    return unique_candidates[0] if len(unique_candidates) == 1 else ""
+
+
+def _get_self_anchor_target_sync(session, conversation_id: int) -> str:
+    result = session.run(
+        """
+        MATCH (n:DynamicCaseEntity {conversation_id: $conversation_id})
+        RETURN n.name AS name,
+               n.category AS category,
+               n.node_type AS node_type,
+               n.role AS role,
+               n.participant_role AS participant_role
+        """,
+        {"conversation_id": conversation_id},
+    )
+    records = [dict(record) for record in result]
+    return _infer_self_anchor_target_from_records(records)
+
+
 def _execute_graph_actions_sync(
     conversation_id: int,
     actions: list[dict[str, str]],
@@ -462,7 +832,13 @@ def _execute_graph_actions_sync(
 
     try:
         with driver.session() as session:
-            for action in actions:
+            self_anchor_target = _get_self_anchor_target_sync(session, conversation_id)
+            actions_to_apply = (
+                _normalize_actions({"actions": actions}, self_anchor_target=self_anchor_target)
+                if self_anchor_target
+                else actions
+            )
+            for action in actions_to_apply:
                 action_type = action["action"]
                 if action_type == "ADD":
                     _merge_fact(
@@ -523,7 +899,7 @@ def _execute_graph_actions_sync(
     return {
         "conversation_id": conversation_id,
         "actions_applied": applied,
-        "actions": actions,
+        "actions": actions_to_apply if "actions_to_apply" in locals() else actions,
     }
 
 
@@ -542,13 +918,20 @@ def _fetch_case_graph_facts_sync(conversation_id: int) -> list[dict[str, str]]:
         target = str(record.get("target_name") or "").strip()
         if not source or not relation or not target:
             continue
+        source_category, target_category = _normalize_fact_categories(
+            source=source,
+            source_category=record.get("source_category"),
+            relation=relation,
+            target=target,
+            target_category=record.get("target_category"),
+        )
         facts.append(
             {
                 "source": source,
-                "source_category": _normalize_category(record.get("source_category"), source),
+                "source_category": source_category,
                 "relation": relation,
                 "target": target,
-                "target_category": _normalize_category(record.get("target_category"), target),
+                "target_category": target_category,
             }
         )
     return facts
@@ -571,6 +954,15 @@ def _fetch_case_graph_node_names_sync(conversation_id: int) -> list[str]:
         seen.add(name)
         names.append(name)
     return names
+
+
+def _fetch_case_graph_node_records_sync(conversation_id: int) -> list[dict[str, Any]]:
+    driver = _build_driver()
+    try:
+        with driver.session() as session:
+            return session.run(FETCH_NODE_RECORDS_QUERY, {"conversation_id": conversation_id}).data()
+    finally:
+        driver.close()
 
 
 def _fetch_user_cases_sync(user_id: int) -> list[dict[str, Any]]:
@@ -675,6 +1067,14 @@ async def get_case_graph_node_names(conversation_id: int) -> list[str]:
         return await asyncio.to_thread(_fetch_case_graph_node_names_sync, conversation_id)
     except Exception as exc:
         logger.warning("Failed to load case graph node names for conversation %s: %s", conversation_id, exc)
+        return []
+
+
+async def get_case_graph_node_records(conversation_id: int) -> list[dict[str, Any]]:
+    try:
+        return await asyncio.to_thread(_fetch_case_graph_node_records_sync, conversation_id)
+    except Exception as exc:
+        logger.warning("Failed to load case graph node records for conversation %s: %s", conversation_id, exc)
         return []
 
 
@@ -875,7 +1275,9 @@ async def refresh_case_graph(
     user_input: str,
     case_summary: str = "",
     user_id: int = 0,
+    prior_reference_guard: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_user_input = " ".join((user_input or "").strip().split())
     add_actions = await extract_incremental_graph_actions(user_input)
 
     if not add_actions:
@@ -892,6 +1294,35 @@ async def refresh_case_graph(
             }
             for triple in triples
         ]
+
+    node_records = await get_case_graph_node_records(conversation_id)
+    guard_result = await evaluate_graph_action_reference_guard_async(
+        user_input=normalized_user_input,
+        actions=add_actions,
+        existing_node_records=node_records,
+        prior_reference_guard=prior_reference_guard,
+    )
+    add_actions = [
+        action
+        for action in guard_result.get("allowed_actions", [])
+        if isinstance(action, dict)
+    ]
+    if guard_result.get("needs_clarification") and not add_actions:
+        return {
+            "conversation_id": conversation_id,
+            "actions_applied": 0,
+            "actions": [],
+            "added_actions": [],
+            "added_count": 0,
+            "obsolete_nodes": [],
+            "obsolete_edges": [],
+            "deleted_count": 0,
+            "deleted_edge_count": 0,
+            "needs_clarification": True,
+            "clarification_questions": guard_result.get("clarification_questions", []),
+            "pending_clarification": guard_result.get("pending_clarification"),
+            "reference_guard": guard_result,
+        }
 
     add_result = await execute_graph_actions(conversation_id, add_actions, user_id=user_id)
     current_nodes = await get_case_graph_node_names(conversation_id)
@@ -912,6 +1343,10 @@ async def refresh_case_graph(
         "obsolete_edges": obsolete_edges,
         "deleted_count": deleted_count,
         "deleted_edge_count": deleted_edge_count,
+        "needs_clarification": bool(guard_result.get("needs_clarification")),
+        "clarification_questions": guard_result.get("clarification_questions", []),
+        "pending_clarification": guard_result.get("pending_clarification"),
+        "reference_guard": guard_result,
     }
 
 

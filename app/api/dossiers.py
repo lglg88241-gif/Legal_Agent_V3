@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -46,6 +47,7 @@ from app.services.dossier_coordination_graph import (
     build_dossier_coordination_graph_for_user,
 )
 from app.services.dossier_graph import get_dossier_graph_payload
+from app.services.dossier_hard_guards import identity_merge_blockers
 from app.services.dossier_intelligence import build_dossier_intelligence
 from app.services.dossier_summary import generate_dossier_auto_summary
 
@@ -160,6 +162,22 @@ class CrossConversationResolutionDecisionRequest(BaseModel):
     task_key: str | None = Field(default=None, max_length=255)
 
 
+class CanonicalEntityManualMergeEntityRequest(BaseModel):
+    id: str = Field(..., min_length=1, max_length=255)
+    label: str = Field(..., min_length=1, max_length=255)
+    entity_type: str | None = Field(default=None, max_length=100)
+    role: str | None = Field(default=None, max_length=100)
+    source_entity_ids: list[str] = Field(..., min_length=1, max_length=200)
+    source_conversation_ids: list[int] = Field(..., min_length=1, max_length=200)
+
+
+class CanonicalEntityManualMergeRequest(BaseModel):
+    source_entity: CanonicalEntityManualMergeEntityRequest
+    target_entity: CanonicalEntityManualMergeEntityRequest
+    reason: str | None = Field(default=None, max_length=1000)
+    task_key: str | None = Field(default=None, max_length=255)
+
+
 _SELF_ANCHOR_SUBJECT = "self_anchor"
 _CROSS_CONVERSATION_IDENTITY_SUBJECT = "cross_conversation_identity"
 _PARTY_NAMING_ROLE = "当事人"
@@ -208,6 +226,22 @@ def _positive_int(value: Any) -> int:
     except (TypeError, ValueError):
         normalized = 0
     return normalized if normalized > 0 else 0
+
+
+def _sorted_unique_strings(values: list[Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = _normalize_text(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _sorted_unique_ints(values: list[Any]) -> list[int]:
+    return sorted({_positive_int(value) for value in values if _positive_int(value) > 0})
 
 
 def _normalize_self_identity_action(value: Any) -> str:
@@ -386,6 +420,156 @@ def _find_cross_conversation_resolution_decision(
             continue
         return decision
     return None
+
+
+def _canonical_merge_task_key(left_id: str, right_id: str) -> str:
+    ordered = sorted((_normalize_text(left_id), _normalize_text(right_id)))
+    return f"cross-conversation-same:{ordered[0]}::{ordered[1]}"
+
+
+def _canonical_entity_merge_pair_key(source_entity_ids: list[str], target_entity_ids: list[str]) -> str:
+    normalized_source_ids = sorted(
+        {
+            _normalize_text(value)
+            for value in source_entity_ids
+            if _normalize_text(value)
+        }
+    )
+    normalized_target_ids = sorted(
+        {
+            _normalize_text(value)
+            for value in target_entity_ids
+            if _normalize_text(value)
+        }
+    )
+    if not normalized_source_ids or not normalized_target_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="manual merge requires source_entity_ids for both canonical entities",
+        )
+    digest = hashlib.sha1(
+        "|".join(normalized_source_ids + ["::"] + normalized_target_ids).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"canonical-merge:{digest}"
+
+
+def _validate_manual_merge_entity(
+    entity: CanonicalEntityManualMergeEntityRequest,
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    entity_id = _normalize_text(entity.id)
+    label = _normalize_text(entity.label)
+    entity_type = _normalize_text(entity.entity_type) or "unknown"
+    role = _normalize_text(entity.role)
+    source_entity_ids = _sorted_unique_strings(entity.source_entity_ids)
+    source_conversation_ids = _sorted_unique_ints(entity.source_conversation_ids)
+    if not entity_id or not label:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} id and label are required",
+        )
+    if not source_entity_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} source_entity_ids are required",
+        )
+    if not source_conversation_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} source_conversation_ids are required",
+        )
+    return {
+        "id": entity_id,
+        "label": label,
+        "entity_type": entity_type,
+        "role": role,
+        "source_entity_ids": source_entity_ids,
+        "source_conversation_ids": source_conversation_ids,
+    }
+
+
+def _cross_conversation_nodes_from_canonical_entity(entity: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes: list[dict[str, Any]] = []
+    label = _normalize_text(entity.get("label"))
+    entity_type = _normalize_text(entity.get("entity_type")) or None
+    for source_entity_id in _sorted_unique_strings(entity.get("source_entity_ids") or []):
+        parts = source_entity_id.split(":")
+        if len(parts) < 4 or parts[0] != "conversation" or parts[2] != "entity":
+            continue
+        conversation_id = _positive_int(parts[1])
+        if conversation_id <= 0:
+            continue
+        nodes.append(
+            {
+                "conversation_id": conversation_id,
+                "raw_label": label,
+                "graph_node_id": source_entity_id,
+                "graph_node_label": label,
+                "graph_node_type": entity_type,
+            }
+        )
+    return nodes
+
+
+async def _upsert_cross_conversation_decision(
+    *,
+    db: AsyncSession,
+    dossier,
+    current_user: AuthenticatedUser,
+    decisions: list[Any],
+    decision_type: str,
+    source_node: dict[str, Any],
+    target_node: dict[str, Any],
+) -> tuple[Any, str]:
+    try:
+        pair_key = build_cross_conversation_resolution_pair_key(
+            source_node["graph_node_id"],
+            target_node["graph_node_id"],
+        )
+        pair_hash = build_cross_conversation_resolution_pair_hash(pair_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    ordered_nodes = sorted(
+        [source_node, target_node],
+        key=lambda item: str(item.get("graph_node_id") or ""),
+    )
+    primary_node = ordered_nodes[0]
+    secondary_node = ordered_nodes[1]
+    decision = _find_cross_conversation_resolution_decision(
+        decisions,
+        pair_key=pair_key,
+        pair_hash=pair_hash,
+    )
+    if decision is None:
+        try:
+            decision = await create_dossier_entity_resolution_decision(
+                db,
+                dossier=dossier,
+                user_id=current_user.user_id,
+                decision_type=decision_type,
+                subject=_CROSS_CONVERSATION_IDENTITY_SUBJECT,
+                source_conversation_id=primary_node["conversation_id"],
+                source_graph_node_id=pair_key,
+                source_raw_label=primary_node["raw_label"],
+                target_participant_id=pair_hash,
+                target_display_label=secondary_node["raw_label"],
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        decisions.append(decision)
+    else:
+        decision.decision_type = decision_type
+        decision.source_conversation_id = primary_node["conversation_id"]
+        decision.source_graph_node_id = pair_key
+        decision.source_raw_label = primary_node["raw_label"]
+        decision.target_participant_id = pair_hash
+        decision.target_display_label = secondary_node["raw_label"]
+        db.add(decision)
+        await db.flush()
+        await touch_dossier(db, dossier=dossier)
+    return decision, pair_key
 
 
 def _build_party_naming_mentions_payload(
@@ -1307,19 +1491,10 @@ async def decide_cross_conversation_participant_resolution(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
     _ensure_dossier_participant_write_allowed(dossier)
 
-    subject = _normalize_cross_conversation_subject(payload.subject)
+    _normalize_cross_conversation_subject(payload.subject)
     decision_type = _normalize_cross_conversation_decision(payload.decision)
     source_node = _validate_cross_conversation_node(payload.source_node, field_name="source_node")
     target_node = _validate_cross_conversation_node(payload.target_node, field_name="target_node")
-
-    try:
-        pair_key = build_cross_conversation_resolution_pair_key(
-            source_node["graph_node_id"],
-            target_node["graph_node_id"],
-        )
-        pair_hash = build_cross_conversation_resolution_pair_hash(pair_key)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     if source_node["graph_node_id"] == target_node["graph_node_id"]:
         raise HTTPException(
@@ -1327,50 +1502,20 @@ async def decide_cross_conversation_participant_resolution(
             detail="cross conversation resolution requires two different graph nodes",
         )
 
-    ordered_nodes = sorted(
-        [source_node, target_node],
-        key=lambda item: str(item.get("graph_node_id") or ""),
-    )
-    primary_node = ordered_nodes[0]
-    secondary_node = ordered_nodes[1]
-
     decisions = await list_dossier_entity_resolution_decisions(
         db,
         current_user.user_id,
         dossier.id,
     )
-    decision = _find_cross_conversation_resolution_decision(
-        decisions,
-        pair_key=pair_key,
-        pair_hash=pair_hash,
+    decision, pair_key = await _upsert_cross_conversation_decision(
+        db=db,
+        dossier=dossier,
+        current_user=current_user,
+        decisions=decisions,
+        decision_type=decision_type,
+        source_node=source_node,
+        target_node=target_node,
     )
-
-    if decision is None:
-        try:
-            decision = await create_dossier_entity_resolution_decision(
-                db,
-                dossier=dossier,
-                user_id=current_user.user_id,
-                decision_type=decision_type,
-                subject=subject,
-                source_conversation_id=primary_node["conversation_id"],
-                source_graph_node_id=pair_key,
-                source_raw_label=primary_node["raw_label"],
-                target_participant_id=pair_hash,
-                target_display_label=secondary_node["raw_label"],
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    else:
-        decision.decision_type = decision_type
-        decision.source_conversation_id = primary_node["conversation_id"]
-        decision.source_graph_node_id = pair_key
-        decision.source_raw_label = primary_node["raw_label"]
-        decision.target_participant_id = pair_hash
-        decision.target_display_label = secondary_node["raw_label"]
-        db.add(decision)
-        await db.flush()
-        await touch_dossier(db, dossier=dossier)
 
     await db.commit()
     await db.refresh(decision)
@@ -1386,6 +1531,129 @@ async def decide_cross_conversation_participant_resolution(
             "candidate_key": _normalize_text(payload.candidate_key) or None,
             "task_key": _normalize_text(payload.task_key) or None,
         },
+    }
+
+
+@router.post("/{dossier_id}/canonical-entities/manual-merge")
+async def manual_merge_dossier_canonical_entities(
+    dossier_id: int,
+    payload: CanonicalEntityManualMergeRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await ensure_storage_schema()
+    dossier = await get_dossier_for_user(db, current_user.user_id, dossier_id)
+    if dossier is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dossier not found")
+    _ensure_dossier_participant_write_allowed(dossier)
+
+    source_entity = _validate_manual_merge_entity(payload.source_entity, field_name="source_entity")
+    target_entity = _validate_manual_merge_entity(payload.target_entity, field_name="target_entity")
+    if source_entity["id"] == target_entity["id"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="manual merge requires two different canonical entities",
+        )
+
+    blockers = identity_merge_blockers(
+        source_entity,
+        target_entity,
+        requires_user_confirmation=True,
+        user_confirmed=True,
+        source_dossier_id=dossier.id,
+        target_dossier_id=dossier.id,
+    )
+    if blockers:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "manual merge is blocked for this canonical entity pair",
+                "blocked_by": blockers,
+            },
+        )
+
+    source_nodes = _cross_conversation_nodes_from_canonical_entity(source_entity)
+    target_nodes = _cross_conversation_nodes_from_canonical_entity(target_entity)
+    if not source_nodes or not target_nodes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="manual merge requires canonical entities with source conversation provenance",
+        )
+
+    shared_conversations = set(source_entity["source_conversation_ids"]) & set(
+        target_entity["source_conversation_ids"]
+    )
+    if shared_conversations:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="manual merge only supports cross-conversation canonical entities",
+        )
+
+    decisions = await list_dossier_entity_resolution_decisions(
+        db,
+        current_user.user_id,
+        dossier.id,
+    )
+    task_key = _normalize_text(payload.task_key) or _canonical_merge_task_key(
+        source_entity["id"],
+        target_entity["id"]
+    )
+    candidate_key = _canonical_entity_merge_pair_key(
+        source_entity["source_entity_ids"],
+        target_entity["source_entity_ids"],
+    )
+    persisted_pairs: list[dict[str, Any]] = []
+
+    for source_node in source_nodes:
+        for target_node in target_nodes:
+            if source_node["graph_node_id"] == target_node["graph_node_id"]:
+                continue
+            decision, pair_key = await _upsert_cross_conversation_decision(
+                db=db,
+                dossier=dossier,
+                current_user=current_user,
+                decisions=decisions,
+                decision_type="same",
+                source_node=source_node,
+                target_node=target_node,
+            )
+            persisted_pairs.append(
+                {
+                    **serialize_dossier_entity_resolution_decision(decision),
+                    "pair_key": pair_key,
+                    "source_node": source_node,
+                    "target_node": target_node,
+                }
+            )
+
+    if not persisted_pairs:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="manual merge produced no actionable cross-conversation source pairs",
+        )
+
+    await db.commit()
+    for pair in persisted_pairs:
+        decision_id = _positive_int(pair.get("id"))
+        if decision_id <= 0:
+            continue
+        for decision in decisions:
+            if _positive_int(getattr(decision, "id", 0)) == decision_id:
+                await db.refresh(decision)
+                pair.update(serialize_dossier_entity_resolution_decision(decision))
+                break
+
+    return {
+        "status": "success",
+        "action": "manual_merge",
+        "dossier_id": dossier.id,
+        "task_key": task_key,
+        "candidate_key": candidate_key,
+        "reason": _normalize_text(payload.reason) or None,
+        "source_entity": source_entity,
+        "target_entity": target_entity,
+        "persisted_pair_count": len(persisted_pairs),
+        "decisions": persisted_pairs,
     }
 
 

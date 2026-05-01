@@ -13,6 +13,7 @@ from app.services.case_update_acknowledgement import (
 
 
 FACT_MESSAGE = "B公司的人事通知我去签确认书，而且人事王经理口头通知我不用来了。"
+ANCHORED_FACT_MESSAGE = "我叫张三，在上海一家叫蓝海科技的公司做后端开发。公司从2023年5月开始拖欠我工资，到现在大概欠了我6万元。"
 
 
 def _fact_update_result() -> dict[str, object]:
@@ -45,6 +46,42 @@ def _fact_update_result() -> dict[str, object]:
         "legal_question": None,
         "confidence": "high",
         "reason": "Current message adds case facts.",
+        "provider": "openai",
+        "model": "gpt-5.1",
+        "fallback_reason": None,
+        "trace": {"steps": ["call_llm"], "warnings": []},
+    }
+
+
+def _anchored_fact_update_result() -> dict[str, object]:
+    return {
+        "source": "message_understanding_agent",
+        "intent": "fact_update",
+        "route_hint": "CASE_UPDATE",
+        "needs_legal_rag": False,
+        "needs_dossier_graph_context": False,
+        "needs_structured_persistence": True,
+        "needs_graph_update": True,
+        "subject_reference": None,
+        "fact_update": {
+            "enabled": True,
+            "fact_text": ANCHORED_FACT_MESSAGE,
+            "entities": [
+                {"label": "张三", "type": "person"},
+                {"label": "蓝海科技", "type": "organization"},
+            ],
+            "events": [
+                {
+                    "summary": "蓝海科技拖欠张三工资",
+                    "participants": ["蓝海科技", "张三"],
+                }
+            ],
+        },
+        "previous_fact_confirmation": None,
+        "advice_question": None,
+        "legal_question": None,
+        "confidence": "high",
+        "reason": "Current message anchors self and company in the same fact update.",
         "provider": "openai",
         "model": "gpt-5.1",
         "fallback_reason": None,
@@ -114,6 +151,15 @@ def _install_celery_import_stubs() -> None:
     fake_graph_extractor.refresh_case_graph = _refresh_case_graph
     fake_graph_extractor.get_case_graph = _get_case_graph
     sys.modules["app.services.graph_extractor"] = fake_graph_extractor
+
+    fake_legal_agent_module = ModuleType("app.services.legal_agent")
+
+    class FakeImportLegalAgent:
+        async def ask(self, *args, **kwargs):
+            return {"response": "", "sources": [], "route_intent": "GENERAL_CONSULT"}
+
+    fake_legal_agent_module.legal_agent = FakeImportLegalAgent()
+    sys.modules["app.services.legal_agent"] = fake_legal_agent_module
 
     fake_redis_mgr = ModuleType("app.memory.redis_mgr")
     fake_redis_mgr.get_redis_saver_for_current_loop = lambda: None
@@ -227,9 +273,9 @@ def test_fact_update_uses_case_update_acknowledgement_specialist(
 ) -> None:
     result, persisted, graph_calls, trackers = _run_case_update_task(
         monkeypatch,
-        question="后来王经理又口头说让我不用再来上班。",
+        question=ANCHORED_FACT_MESSAGE,
         recent_messages=[],
-        message_understanding_result=_fact_update_result(),
+        message_understanding_result=_anchored_fact_update_result(),
         legal_agent_response={
             "response": "可以先固定这条事实，再准备确认书、社保记录和沟通证据。",
             "sources": [],
@@ -244,7 +290,7 @@ def test_fact_update_uses_case_update_acknowledgement_specialist(
     assert trackers["legal_agent_calls"] == 0
     assert len(trackers["ack_calls"]) == 1
     assert "已记录这条新的案情事实" in result["response"]
-    assert "王经理" in result["response"]
+    assert "蓝海科技" in result["response"]
     assert "法律" not in result["response"]
     assert "参与者" not in result["response"]
     assert "映射" not in result["response"]
@@ -254,6 +300,30 @@ def test_fact_update_uses_case_update_acknowledgement_specialist(
     assert all("Retrieval pipeline completed" not in summary for summary in action_summaries)
     assert all("Final legal response generated" not in summary for summary in action_summaries)
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
+    assert persisted["user_metadata"]["graph_update_input_text"] == ANCHORED_FACT_MESSAGE
+    assert "reference_guard" not in persisted["user_metadata"]
+
+
+def test_oral_reference_fact_update_schedules_graph_write_without_preblocking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, persisted, graph_calls, trackers = _run_case_update_task(
+        monkeypatch,
+        question="后来王经理又口头说让我不用再来上班。",
+        recent_messages=[],
+        message_understanding_result=_fact_update_result(),
+        fail_on_legal_agent=True,
+    )
+
+    assert result["status"] == "success"
+    assert result["route_intent"] == "CASE_UPDATE"
+    assert trackers["legal_agent_calls"] == 0
+    assert len(trackers["ack_calls"]) == 1
+    assert "已记录这条新的案情事实" in result["response"]
+    assert "王经理" in result["response"]
+    assert graph_calls == [(9, 1, 101)]
+    assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
+    assert persisted["user_metadata"]["graph_update_input_text"] == "后来王经理又口头说让我不用再来上班。"
 
 
 def test_confirm_previous_fact_uses_previous_fact_text(
@@ -318,7 +388,7 @@ def test_temporary_fact_update_uses_transient_legal_analysis_branch(
     )
 
     assert result["status"] == "success"
-    assert result["route_intent"] == "CASE_UPDATE"
+    assert result["route_intent"] == "GENERAL_CONSULT"
     assert trackers["legal_agent_calls"] == 1
     assert trackers["ack_calls"] == []
     assert "确认书" in result["response"]
@@ -337,9 +407,9 @@ def test_acknowledgement_specialist_exception_falls_back_to_legacy_legal_agent(
 
     result, persisted, graph_calls, trackers = _run_case_update_task(
         monkeypatch,
-        question="后来王经理又口头说让我不用再来上班。",
+        question=ANCHORED_FACT_MESSAGE,
         recent_messages=[],
-        message_understanding_result=_fact_update_result(),
+        message_understanding_result=_anchored_fact_update_result(),
         legal_agent_response={
             "response": "旧链路回答",
             "sources": [],
@@ -367,7 +437,7 @@ def test_acknowledgement_specialist_exception_falls_back_to_legacy_legal_agent(
         "B公司的人事通知我去签确认书，而且王经理说我不用继续来上班了。",
     ],
 )
-def test_fact_update_paraphrases_all_use_lightweight_acknowledgement(
+def test_fact_update_paraphrases_schedule_graph_update_without_preblocking(
     monkeypatch: pytest.MonkeyPatch,
     message: str,
 ) -> None:
@@ -383,9 +453,10 @@ def test_fact_update_paraphrases_all_use_lightweight_acknowledgement(
     assert result["route_intent"] == "CASE_UPDATE"
     assert trackers["legal_agent_calls"] == 0
     assert len(trackers["ack_calls"]) == 1
-    assert result["response"].startswith("已记录这条新的案情事实")
+    assert "已记录这条新的案情事实" in result["response"]
     assert "法律" not in result["response"]
     assert "案例" not in result["response"]
     assert "映射" not in result["response"]
     assert graph_calls == [(9, 1, 101)]
     assert persisted["metadata"]["route_intent"] == "CASE_UPDATE"
+    assert persisted["user_metadata"]["graph_update_input_text"] == message

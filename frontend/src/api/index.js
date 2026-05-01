@@ -96,6 +96,8 @@ export const confirmDossierSelfIdentity = (dossierId, payload) =>
   api.post(`/dossiers/${dossierId}/intelligence/tasks/self-identity/confirm`, payload)
 export const decideDossierCrossConversationResolution = (dossierId, payload) =>
   api.post(`/dossiers/${dossierId}/participants/cross-conversation/decide`, payload)
+export const manualMergeDossierCanonicalEntities = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/canonical-entities/manual-merge`, payload)
 export const getDossierParticipants = (dossierId) => api.get(`/dossiers/${dossierId}/participants`)
 export const createDossierParticipant = (dossierId, payload) =>
   api.post(`/dossiers/${dossierId}/participants`, payload)
