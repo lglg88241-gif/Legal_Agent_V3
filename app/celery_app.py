@@ -1415,8 +1415,7 @@ async def _attach_graph_clarification_to_latest_assistant_async(
                     assistant_message_id = message_id
                     break
 
-            if assistant_message_id is None:
-                return
+            target_message_id = assistant_message_id or int(user_message_id)
 
             metadata_patch: dict[str, Any] = {
                 "pending_clarification": pending_clarification,
@@ -1429,7 +1428,7 @@ async def _attach_graph_clarification_to_latest_assistant_async(
             message = await get_message_for_conversation(
                 db,
                 conversation_id=conversation_id,
-                message_id=assistant_message_id,
+                message_id=target_message_id,
             )
             if message is None:
                 return
@@ -1444,6 +1443,58 @@ async def _attach_graph_clarification_to_latest_assistant_async(
             }
             db.add(message)
             await db.commit()
+    finally:
+        await celery_engine.dispose()
+
+
+async def _load_graph_update_context_async(
+    *,
+    conversation_id: int,
+    user_id: int,
+    user_input: str,
+) -> dict[str, Any]:
+    celery_engine, session_factory = _create_celery_session_factory()
+    try:
+        await ensure_storage_schema(bind_engine=celery_engine)
+        async with session_factory() as db:
+            messages = await list_recent_conversation_messages(
+                db,
+                conversation_id=conversation_id,
+                limit=12,
+            )
+            recent_messages = []
+            for message in messages:
+                content = " ".join((getattr(message, "content", "") or "").strip().split())
+                if not content:
+                    continue
+                recent_messages.append(
+                    {
+                        "message_id": getattr(message, "id", None),
+                        "role": getattr(message, "role", ""),
+                        "content": content,
+                        "metadata": (
+                            message.message_metadata
+                            if isinstance(getattr(message, "message_metadata", None), dict)
+                            else {}
+                        ),
+                    }
+                )
+            dossier_context = await load_dossier_context_for_conversation(
+                db,
+                user_id,
+                conversation_id,
+            )
+            dossier_graph_context = await _load_controlled_dossier_graph_context_async(
+                db,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                user_message=user_input,
+            )
+        return {
+            "recent_messages": recent_messages,
+            "dossier_context": dossier_context if isinstance(dossier_context, dict) else {},
+            "dossier_graph_context": dossier_graph_context if isinstance(dossier_graph_context, dict) else {},
+        }
     finally:
         await celery_engine.dispose()
 
@@ -1500,6 +1551,12 @@ def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | 
             finally:
                 await celery_engine.dispose()
 
+            graph_update_context = await _load_graph_update_context_async(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                user_input=user_input,
+            )
+
             logger.info(
                 "Graph update task using bound message_id | conversation_id=%s user_id=%s message_id=%s",
                 conversation_id,
@@ -1520,6 +1577,7 @@ def update_graph_task(conversation_id: int, user_id: int = 0, message_id: int | 
                 case_summary=case_summary,
                 user_id=user_id,
                 prior_reference_guard=prior_reference_guard,
+                conversation_context=graph_update_context,
             )
 
         update_result = asyncio.run(_run())
@@ -1790,6 +1848,10 @@ def ask_agent_task(
         legal_answer_plan_active = (
             agentic_specialist == "legal_qa_agent"
             and agentic_route in {"LEGAL_QA", "GENERAL_CONSULT"}
+        )
+        out_of_scope_plan_active = (
+            agentic_specialist == "out_of_scope_agent"
+            and agentic_route == "OUT_OF_SCOPE"
         )
         confirm_previous_fact_active = (
             case_update_plan_active
@@ -2166,7 +2228,7 @@ def ask_agent_task(
                     final_basis_summary = "Agent 计划失败，已回退到旧的法律问答链路。"
                     final_basis_evidence = [f"fallback_reason={legacy_fallback_reason}"]
                     final_basis_source = "legacy_fallback"
-            elif legal_answer_plan_active:
+            elif legal_answer_plan_active or out_of_scope_plan_active:
                 try:
                     with execution_trace.step_context(
                         name="legal_agent_answer",
@@ -2213,7 +2275,7 @@ def ask_agent_task(
                             else None
                         )
                         if not isinstance(answer, dict):
-                            raise RuntimeError("legal_answer_compose did not return a final result")
+                            raise RuntimeError("agentic answer compose did not return a final result")
                         legal_answer_step.set_details(
                             {
                                 "tool_count": len(
@@ -2221,7 +2283,11 @@ def ask_agent_task(
                                     if isinstance(plan_execution.get("tool_results"), list)
                                     else []
                                 ),
-                                "specialist": "legal_answer_compose",
+                                "specialist": (
+                                    "out_of_scope_answer_compose"
+                                    if out_of_scope_plan_active
+                                    else "legal_answer_compose"
+                                ),
                             }
                         )
                     execution_trace.mark_legacy_fallback(used=False, reason=None)
@@ -2236,9 +2302,14 @@ def ask_agent_task(
                         and str(item.get("tool_name") or "").strip() in {"exact_law_lookup", "legal_rag_search"}
                         and str(item.get("result_summary") or "").strip()
                     ]
-                    final_basis_summary = "已通过法条查询和法律回答专员处理当前法律问题，不写入案情或图谱。"
-                    final_basis_evidence = retrieval_summaries or ["specialist=legal_answer_compose"]
-                    final_basis_source = "legal_answer_compose"
+                    if out_of_scope_plan_active:
+                        final_basis_summary = "已通过确定性超范围防护处理当前问题，未执行法律检索，不写入案情或图谱。"
+                        final_basis_evidence = ["specialist=out_of_scope_answer_compose"]
+                        final_basis_source = "out_of_scope_answer_compose"
+                    else:
+                        final_basis_summary = "已通过法条查询和法律回答专员处理当前法律问题，不写入案情或图谱。"
+                        final_basis_evidence = retrieval_summaries or ["specialist=legal_answer_compose"]
+                        final_basis_source = "legal_answer_compose"
                 except Exception as exc:
                     logger.exception(
                         "Legal answer compose failed, falling back to legacy legal agent | conversation_id=%s user_id=%s error=%s",
@@ -2342,7 +2413,7 @@ def ask_agent_task(
             answer_route_intent=route_intent,
             subject_reference_short_circuit=subject_reference_short_circuit,
             case_update_plan_active=case_update_plan_active,
-            legal_answer_plan_active=legal_answer_plan_active,
+            legal_answer_plan_active=legal_answer_plan_active or out_of_scope_plan_active,
             agentic_route=agentic_route,
         )
         updated_case_summary = answer.get("case_summary", "") if isinstance(answer, dict) else ""
@@ -2485,6 +2556,12 @@ def ask_agent_task(
                 _build_execution_plan_action(execution_plan),
                 _build_legal_qa_specialist_action(),
             ]
+        elif out_of_scope_plan_active:
+            agent_actions = [
+                _build_message_understanding_active_action(message_understanding),
+                _build_execution_plan_action(execution_plan),
+                {"tool": "out_of_scope_answer_compose", "result_summary": "Fixed out-of-scope response generated"},
+            ]
         elif route_intent == "OUT_OF_SCOPE":
             agent_actions = [
                 {"tool": "tool_router", "result_summary": "Out-of-scope route selected"},
@@ -2503,7 +2580,12 @@ def ask_agent_task(
                 {"tool": "retrieval_tools", "result_summary": "Retrieval pipeline completed"},
                 {"tool": "legal_advisor", "result_summary": "Final legal response generated"},
             ]
-        if route_intent not in {"DOSSIER_MEMORY"} and not case_update_plan_active and not legal_answer_plan_active:
+        if (
+            route_intent not in {"DOSSIER_MEMORY"}
+            and not case_update_plan_active
+            and not legal_answer_plan_active
+            and not out_of_scope_plan_active
+        ):
             agent_actions.append(_build_message_understanding_shadow_action(message_understanding))
 
         is_final = answer.get("is_final", False) if isinstance(answer, dict) else False

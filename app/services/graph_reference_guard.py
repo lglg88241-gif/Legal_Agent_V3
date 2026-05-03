@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
+from openai import AsyncOpenAI
+
 from app.core.llm_factory import create_cloud_llm
+from app.core.llm_provider import get_llm_router
 
 
 logger = logging.getLogger(__name__)
 
 PENDING_CLARIFICATION_TYPE = "subject_reference_resolution"
 GUARD_SOURCE = "graph_reference_guard"
-MODEL_NAME = "glm-4-flash"
+MODEL_NAME = "gpt-5.1"
+FALLBACK_MODEL_NAME = "glm-4-flash"
 MODEL_VERSION = "semantic-reference-guard-v1"
 NON_RESPONSIBLE_CATEGORIES = {"客体", "事件", "后果"}
 SELF_ANCHOR_PLACEHOLDER = "当事人"
@@ -72,10 +77,13 @@ SYSTEM_PROMPT = """你是案情图谱写入前的语义指代解析器，不提�
 4. 如果只有一个合理候选主体，也可以解析，但要说明依据。
 5. 如果有多个合理候选且原句无法区分，必须 needs_clarification=true，不能猜。
 6. “你/助手/系统”不是案情责任主体，不能写入图谱；遇到这种指代应要求澄清或阻断。
-7. 客体、事件、后果不是责任主体，不能作为 source/target 被错误解析成责任主体。
+7. 主体是“责任承担者”，不是语法主语。客体、事件、后果、条件、金额、日期、证据、沟通工具不是责任主体，不能作为 source/target 被错误解析成责任主体。
 8. 如果待写入动作已使用明确实体名且没有含糊指代，可以 allow。
 9. 如果只有“我/本人/当事人/劳动者/申请人”等第一人称自我锚点未命名，可以保留为“当事人”锚点写入会话图谱，同时要求用户确认真实姓名；不要因此整批丢弃 A 公司、劳动合同、辞退等明确事实。
 10. 如果未解析的是“他/她/对方/公司/单位/人事/经理”等可能指向多个责任主体的泛称，必须只阻断含该泛称的动作，明确实体动作仍可写入。
+11. 不要因为句子中出现“我/他/公司”等字样就机械澄清；只有当拟写入动作中仍残留无法安全解析的责任主体泛称时才 clarify。
+12. 如果“蓝海科技的老板叫李四”这类句子已经在同一句明确给出主体关系，李四和蓝海科技都是明确责任主体，不应要求用户解释蓝海科技或李四。
+13. 如果“微信、打卡、工资流水、聊天记录、融资到账、发放工资、补签协议、劳动关系、经济损失”等被拟写入为主体，应当 block 或改写为客体/事件/后果；不要把它们加入候选责任主体。
 
 只输出 JSON object，不要 markdown，不要解释文字。格式：
 {
@@ -106,6 +114,52 @@ SYSTEM_PROMPT = """你是案情图谱写入前的语义指代解析器，不提�
   ]
 }
 """
+
+NON_RESPONSIBLE_CANDIDATE_HINTS = {
+    "\u6253\u5361",
+    "\u8003\u52e4",
+    "\u51fa\u52e4",
+    "\u7b7e\u5230",
+    "\u7b7e\u9000",
+    "\u8865\u7b7e",
+    "\u878d\u8d44",
+    "\u5230\u8d26",
+    "\u5173\u7cfb",
+    "\u5408\u540c",
+    "\u534f\u8bae",
+    "\u5de5\u8d44",
+    "\u8865\u507f",
+    "\u8d54\u507f",
+    "\u8bc1\u636e",
+    "\u8bb0\u5f55",
+    "\u6d41\u6c34",
+    "\u901a\u77e5",
+    "\u627f\u8bfa",
+    "\u62d6\u6b20",
+    "\u8f9e\u9000",
+    "\u89e3\u9664",
+    "\u79bb\u804c",
+    "\u5165\u804c",
+    "\u6761\u4ef6",
+    "\u539f\u56e0",
+    "\u7ed3\u679c",
+    "\u540e\u679c",
+    "\u4e8b\u5b9e",
+    "\u95ee\u9898",
+    "\u8bf7\u6c42",
+    "\u7533\u8bf7",
+    "\u4ef2\u88c1",
+    "\u54a8\u8be2\u4e3b\u9898",
+    "\u6848\u7531",
+    "\u7ea0\u7eb7",
+    "\u52b3\u52a8\u7ea0\u7eb7",
+    "\u4e89\u8bae",
+    "\u4e89\u8bae\u7c7b\u578b",
+    "\u6848\u4ef6\u7c7b\u578b",
+    "\u91d1\u989d",
+    "\u65e5\u671f",
+    "\u65f6\u95f4",
+}
 
 
 def _normalize_text(value: Any) -> str:
@@ -192,12 +246,41 @@ def _looks_like_organization_label(label: str) -> bool:
     return bool(normalized) and any(hint in normalized for hint in ORG_HINTS)
 
 
+def _looks_like_non_responsible_candidate(label: str) -> bool:
+    normalized = _normalize_text(label)
+    return bool(normalized) and (
+        _looks_like_duration_or_time_quantity(normalized)
+        or any(hint in normalized for hint in NON_RESPONSIBLE_CANDIDATE_HINTS)
+    )
+
+
+def _looks_like_duration_or_time_quantity(label: str) -> bool:
+    normalized = _normalize_text(label)
+    if not normalized:
+        return False
+    if any(char.isdigit() for char in normalized) and any(unit in normalized for unit in ("年", "月", "日", "天", "周", "星期", "个月")):
+        return True
+    return bool(
+        re.fullmatch(r"(?:好几|好些|多个|数个|几个|若干|很多|许多|多|数|半|一|两|三|四|五|六|七|八|九|十)[年月日天周星期个]*", normalized)
+        or re.fullmatch(r".*(?:几个月|数月|多月|好几个月|好些个月|若干个月|很久|长期|一段时间|一阵子|一段日子).*", normalized)
+    )
+
+
+def _looks_like_person_label(label: str) -> bool:
+    normalized = _normalize_text(label)
+    if not normalized or _looks_like_non_responsible_candidate(normalized):
+        return False
+    if len(normalized) in {2, 3} and all("\u4e00" <= char <= "\u9fff" for char in normalized):
+        return True
+    return len(normalized) <= 8 and any(char.isalpha() for char in normalized) and any("\u4e00" <= char <= "\u9fff" for char in normalized)
+
+
 def _candidate_kind(record: dict[str, Any]) -> str:
     label = _record_label(record)
     category = _record_category(record)
     entity_type = _normalize_key(_record_entity_type(record))
     role = _normalize_key(_record_role(record))
-    if not label or category in NON_RESPONSIBLE_CATEGORIES:
+    if not label or category in NON_RESPONSIBLE_CATEGORIES or _looks_like_non_responsible_candidate(label):
         return ""
     if role == "current_party":
         return "person"
@@ -207,7 +290,7 @@ def _candidate_kind(record: dict[str, Any]) -> str:
         return "person"
     if _looks_like_organization_label(label):
         return "organization"
-    if len(label) in {2, 3, 4} and all("\u4e00" <= char <= "\u9fff" for char in label):
+    if _looks_like_person_label(label):
         return "person"
     return "unknown"
 
@@ -608,17 +691,43 @@ def _build_model_payload(
 
 
 async def _call_reference_guard_model(payload: dict[str, Any]) -> dict[str, str]:
-    llm = create_cloud_llm(model=MODEL_NAME, temperature=0.0, max_tokens=1600)
-    response = await llm.ainvoke(
-        [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
-        ]
-    )
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
+    ]
+    router = get_llm_router()
+    if router.openai_api_key:
+        client = AsyncOpenAI(
+            api_key=router.openai_api_key,
+            base_url=router.openai_base_url,
+            timeout=60.0,
+        )
+        try:
+            response = await client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=messages,
+                temperature=0.0,
+                max_tokens=1600,
+            )
+            content = response.choices[0].message.content if response.choices else ""
+            return {
+                "provider": "openai",
+                "model": MODEL_NAME,
+                "content": content if isinstance(content, str) else str(content or ""),
+            }
+        except Exception as exc:
+            logger.warning("OpenAI reference guard failed, fallback to Zhipu %s: %s", FALLBACK_MODEL_NAME, exc)
+        finally:
+            await client.close()
+    else:
+        logger.warning("OPENAI_API_KEY not set, fallback to Zhipu for reference guard")
+
+    llm = create_cloud_llm(model=FALLBACK_MODEL_NAME, temperature=0.0, max_tokens=1600)
+    response = await llm.ainvoke(messages)
     content = response.content if hasattr(response, "content") else response
     return {
         "provider": "zhipu",
-        "model": MODEL_NAME,
+        "model": FALLBACK_MODEL_NAME,
         "content": content if isinstance(content, str) else str(content or ""),
     }
 

@@ -3988,7 +3988,17 @@ function responsePlansGraphUpdate(data = {}) {
     : null
   if (plan?.graph_update_allowed === true) return true
   const steps = Array.isArray(plan?.steps) ? plan.steps : []
-  return steps.some((step) => String(step?.name || '').trim() === 'graph_update')
+  if (steps.some((step) => String(step?.name || '').trim() === 'graph_update')) return true
+  const actions = Array.isArray(data?.agent_actions) ? data.agent_actions : []
+  return actions.some((action) => {
+    const tool = String(action?.tool || '').trim()
+    const stage = String(action?.stage || '').trim()
+    const summary = String(action?.result_summary || '').trim()
+    const route = String(action?.primary_route || action?.route_hint || '').trim()
+    return tool === 'message_orchestrator'
+      ? route === 'CASE_UPDATE' || summary.includes('graph_update')
+      : tool === 'graph_update' || stage === 'graph_update'
+  })
 }
 
 function responseGraphUpdateInputText(data = {}, fallbackText = '') {
@@ -4005,7 +4015,6 @@ function findLatestGraphClarificationMessage(options = {}) {
   for (let index = messages.value.length - 1; index >= 0; index -= 1) {
     const message = messages.value[index]
     if (afterMessageId > 0 && messageNumericId(message) <= afterMessageId) continue
-    if (message.role !== 'assistant') continue
     const pendingClarification = message.pendingClarification
     if (expectedInputText) {
       const pendingInputText = normalizeGraphClarificationText(
@@ -4051,6 +4060,59 @@ async function promptGraphClarificationIfNeeded(conversationId, options = {}) {
   handledGraphClarificationKeys.value.add(key)
   graphClarificationPromptOpen.value = true
   try {
+    const clarificationMode = String(clarification.clarification_mode || '').trim()
+    if (clarificationMode === 'cross_conversation_self_anchor') {
+      const suggestedName = String(clarification.suggested_entity_name || '').trim()
+      const sourceIds = Array.isArray(clarification.source_conversation_ids)
+        ? clarification.source_conversation_ids
+            .map((item) => Number(item))
+            .filter((item) => Number.isFinite(item) && item > 0)
+        : []
+      const sourceText = sourceIds.length
+        ? `\n\n来源会话 ID：${sourceIds.join('、')}`
+        : ''
+      const confirmText = `${question}${sourceText}\n\n选择“授权承接”后，本轮图谱会把“我/当事人”按该会话上下文写入。选择“不是，重新命名”则需要你输入本轮“我”具体是谁。`
+      let value = ''
+      try {
+        await ElMessageBox.confirm(confirmText, '确认是否承接之前会话', {
+          confirmButtonText: '授权承接',
+          cancelButtonText: '不是，重新命名',
+          distinguishCancelAndClose: true,
+          type: 'warning',
+        })
+        value = suggestedName
+          ? `是，承接上一轮：${suggestedName}`
+          : '是，承接上一轮'
+      } catch (error) {
+        if (error === 'close') return false
+        const result = await ElMessageBox.prompt('请直接输入本轮“我/当事人”的主体名称。', '重新命名本轮主体', {
+          confirmButtonText: '确认并写入',
+          cancelButtonText: '稍后处理',
+          inputPlaceholder: '例如：张三、李四',
+          inputValidator: (inputValue) => {
+            const normalized = String(inputValue || '').trim()
+            if (!normalized) return '请输入明确主体名称'
+            if (normalized.length > 40) return '主体名称过长，请直接输入名称'
+            return true
+          },
+          distinguishCancelAndClose: true,
+        })
+        value = String(result?.value || '').trim()
+      }
+      if (!value) return false
+      stopGraphRefreshPolling({
+        status: 'warning',
+        summary: '图谱落位需要跨会话承接确认，已提交确认并重新触发写入',
+        refreshDossierAfterGraph: false,
+      })
+      await sendImpl(value, {
+        conversationId,
+        modeConsentEnabled: false,
+        restoreDraftOnErrorText: value,
+      })
+      return true
+    }
+
     const result = await ElMessageBox.prompt(question, '确认图谱主体', {
       confirmButtonText: '确认并写入',
       cancelButtonText: '稍后处理',

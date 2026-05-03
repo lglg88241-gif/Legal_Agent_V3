@@ -71,6 +71,12 @@ _FOREIGN_LAW_KEYWORDS = (
     "诉讼法",
     "证据法",
 )
+_FOREIGN_LAW_KEYWORDS = _FOREIGN_LAW_KEYWORDS + (
+    "\u8054\u90a6\u6cd5",
+    "\u7f8e\u56fd\u6cd5\u5178",
+    "\u6cd5",
+)
+
 _NON_LEGAL_PATTERNS = (
     "帮我写代码",
     "写一段代码",

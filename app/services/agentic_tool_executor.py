@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from app.services.case_update_acknowledgement import build_case_update_acknowledgement
+from app.agent.nodes._llm import OUT_OF_SCOPE_RESPONSE
 from app.services.memory_resolver import (
     answer_subject_reference_message_async,
     build_subject_reference_response_text_async,
@@ -77,7 +78,7 @@ def _output_summary(tool_name: str, result: Any) -> str:
         return f"documents={len(result)}"
     if tool_name == "subject_reference_resolve" and isinstance(result, dict):
         return _preview_text(result.get("response_text"))
-    if tool_name in {"memory_answer_compose", "legal_answer_compose"} and isinstance(result, dict):
+    if tool_name in {"memory_answer_compose", "legal_answer_compose", "out_of_scope_answer_compose"} and isinstance(result, dict):
         return _preview_text(result.get("response"))
     if tool_name == "acknowledgement_compose" and isinstance(result, dict):
         return _preview_text(result.get("text"))
@@ -439,6 +440,24 @@ async def _execute_legal_answer_compose(runtime: dict[str, Any]) -> tuple[Any, d
     }
 
 
+async def _execute_out_of_scope_answer_compose(runtime: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    result = {
+        "response": OUT_OF_SCOPE_RESPONSE,
+        "sources": [],
+        "route_intent": "OUT_OF_SCOPE",
+        "case_summary": "",
+        "is_final": True,
+        "confidence_score": 1.0,
+        "missing_info": [],
+        "question": _normalize_text(runtime.get("question")),
+    }
+    return result, {
+        "route_intent": "OUT_OF_SCOPE",
+        "used_specialist": "fixed_out_of_scope_response",
+        "retrieval_skipped": True,
+    }
+
+
 async def _execute_acknowledgement_compose(runtime: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
     result = build_case_update_acknowledgement(
         plan=runtime.get("execution_plan") or {},
@@ -488,6 +507,8 @@ async def _dispatch_supported_tool(
         return await _execute_legal_rag_search(runtime)
     if tool_name == "legal_answer_compose":
         return await _execute_legal_answer_compose(runtime)
+    if tool_name == "out_of_scope_answer_compose":
+        return await _execute_out_of_scope_answer_compose(runtime)
     if tool_name == "acknowledgement_compose":
         return await _execute_acknowledgement_compose(runtime)
     raise RuntimeError(f"Unsupported executor tool: {tool_name}")
@@ -614,7 +635,7 @@ async def execute_agentic_plan_tools(
             resolution_trace = tool_result["result"].get("resolution_trace")
             if isinstance(resolution_trace, dict):
                 memory_resolution = resolution_trace
-        elif tool_name in {"legal_answer_compose", "acknowledgement_compose"} and isinstance(tool_result.get("result"), dict):
+        elif tool_name in {"legal_answer_compose", "out_of_scope_answer_compose", "acknowledgement_compose"} and isinstance(tool_result.get("result"), dict):
             final_result = tool_result.get("result")
 
     return {

@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 
 from app.core.llm_factory import create_cloud_llm
 from app.core.llm_provider import get_llm_router
+from app.agent.nodes.router import detect_out_of_scope_reason
 from app.services.agentic_request_context import AgenticRequestContext
 from app.services.memory_resolver import (
     extract_pending_subject_reference_clarification,
@@ -33,6 +34,7 @@ _SUPPORTED_ROUTE_HINTS = {
     "LEGAL_QA",
     "GENERAL_CONSULT",
     "DOCUMENT_ASSIST",
+    "OUT_OF_SCOPE",
     "UNKNOWN",
 }
 _SUPPORTED_CONFIDENCE = {"high", "medium", "low"}
@@ -63,8 +65,8 @@ _OPENAI_MODEL = "gpt-5.1"
 _ZHIPU_MODEL = "glm-4-flash"
 _FALLBACK_MODEL = "message-understanding-fallback-v1"
 _EXPLICIT_LAW_ARTICLE_PATTERNS = (
-    re.compile(r"(法|条例|规定)[^。！？\n]{0,20}第[一二三四五六七八九十百千万两\d]+条"),
-    re.compile(r"第[一二三四五六七八九十百千万两\d]+条[^。！？\n]{0,12}(规定了什么|怎么规定|是什么|内容是什么)"),
+    re.compile(r"(法|条例|规定)[^。！？\n]{0,20}第?[一二三四五六七八九十百千万两\d]+条"),
+    re.compile(r"第?[一二三四五六七八九十百千万两\d]+条[^。！？\n]{0,12}(规定了什么|怎么规定|是什么|内容是什么)"),
 )
 
 _SYSTEM_PROMPT = """你是消息理解智能体，不负责提供法律建议。
@@ -492,10 +494,43 @@ def _normalize_llm_result(
     result["fallback_reason"] = None
     result["trace"] = trace
 
+    out_of_scope_reason = detect_out_of_scope_reason(message)
+    explicit_law_question = _looks_like_explicit_law_question(message)
+
     intent = _normalize_text(parsed.get("intent")).lower() or "unknown"
     if intent not in _SUPPORTED_INTENTS:
         trace["warnings"].append(f"unsupported_intent:{intent}")
         intent = "unknown"
+
+    if out_of_scope_reason:
+        trace["warnings"].append(f"override_out_of_scope:{out_of_scope_reason}")
+        intent = "unknown"
+        parsed = {
+            **parsed,
+            "intent": "unknown",
+            "route_hint": "OUT_OF_SCOPE",
+            "needs_legal_rag": False,
+            "needs_dossier_graph_context": False,
+            "needs_structured_persistence": False,
+            "needs_graph_update": False,
+            "legal_question": None,
+            "reason": f"Deterministic out-of-scope guard: {out_of_scope_reason}.",
+        }
+    elif explicit_law_question and intent != "legal_question":
+        trace["warnings"].append("override_explicit_law_article_question")
+        intent = "legal_question"
+        parsed = {
+            **parsed,
+            "intent": "legal_question",
+            "route_hint": "LEGAL_QA",
+            "needs_legal_rag": True,
+            "needs_dossier_graph_context": False,
+            "needs_structured_persistence": False,
+            "needs_graph_update": False,
+            "legal_question": {"enabled": True, "question": message},
+            "reason": _normalize_text(parsed.get("reason"))
+            or "Deterministic explicit law article question override.",
+        }
 
     defaults = _intent_defaults(intent)
     route_hint = _normalize_text(parsed.get("route_hint")).upper() or defaults["route_hint"]
@@ -628,7 +663,17 @@ def _build_fallback_result(
     result["fallback_reason"] = fallback_reason
     result["trace"] = trace
 
-    if _looks_like_explicit_law_question(message):
+    out_of_scope_reason = detect_out_of_scope_reason(message)
+    if out_of_scope_reason:
+        result.update(
+            intent="unknown",
+            route_hint="OUT_OF_SCOPE",
+            needs_legal_rag=False,
+            confidence="high",
+            reason=f"Fallback detected deterministic out-of-scope request: {out_of_scope_reason}.",
+        )
+        trace["warnings"].append(f"override_out_of_scope:{out_of_scope_reason}")
+    elif _looks_like_explicit_law_question(message):
         result.update(
             intent="legal_question",
             route_hint="LEGAL_QA",

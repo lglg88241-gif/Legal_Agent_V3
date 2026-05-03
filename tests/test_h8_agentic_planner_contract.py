@@ -222,6 +222,78 @@ def test_legal_question_plan_is_read_only() -> None:
     assert _tool_names(plan)[-1] == "legal_answer_compose"
 
 
+def test_labor_law_article_question_uses_exact_lookup() -> None:
+    request_context = build_agentic_request_context(
+        request_id="req-labor-law-87",
+        user_id=7,
+        conversation_id=11,
+        dossier_id=None,
+        message_text="劳动法87条是什么？",
+        recent_messages=[],
+        conversation_mode="LEGAL_QA",
+        persistence_consent="tracked",
+    )
+    plan = build_agentic_plan(
+        question=request_context.message_text,
+        message_understanding={
+            "intent": "legal_question",
+            "route_hint": "LEGAL_QA",
+            "needs_legal_rag": True,
+            "needs_structured_persistence": False,
+        },
+        execution_plan={
+            "primary_route": "LEGAL_QA",
+            "response_mode": "legal_answer",
+        },
+        conversation_id=11,
+        dossier_id=None,
+        persistence_consent="tracked",
+        conversation_mode="LEGAL_QA",
+        request_context=request_context,
+    )
+
+    assert plan["writes_requested"] == []
+    assert _tool_names(plan)[0] == "exact_law_lookup"
+    assert plan["tool_calls"][0]["arguments"]["query"] == "劳动法87条是什么？"
+
+
+def test_foreign_law_article_plan_skips_legal_retrieval() -> None:
+    request_context = build_agentic_request_context(
+        request_id="req-foreign-law-44",
+        user_id=7,
+        conversation_id=11,
+        dossier_id=None,
+        message_text="美国联邦法第44条规定的什么？",
+        recent_messages=[],
+        conversation_mode="LEGAL_QA",
+        persistence_consent="tracked",
+    )
+    plan = build_agentic_plan(
+        question=request_context.message_text,
+        message_understanding={
+            "intent": "unknown",
+            "route_hint": "OUT_OF_SCOPE",
+            "needs_legal_rag": False,
+            "needs_structured_persistence": False,
+        },
+        execution_plan={
+            "primary_route": "OUT_OF_SCOPE",
+            "response_mode": "out_of_scope",
+        },
+        conversation_id=11,
+        dossier_id=None,
+        persistence_consent="tracked",
+        conversation_mode="LEGAL_QA",
+        request_context=request_context,
+    )
+
+    assert plan["route"] == "OUT_OF_SCOPE"
+    assert plan["specialist"] == "out_of_scope_agent"
+    assert plan["writes_requested"] == []
+    assert plan["needs_legal_rag"] is False
+    assert _tool_names(plan) == ["out_of_scope_answer_compose"]
+
+
 def test_document_request_enters_planner_contract() -> None:
     request_context = build_agentic_request_context(
         request_id="req-doc",

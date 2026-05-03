@@ -67,6 +67,132 @@ def test_dossier_agent_consumes_conversation_entity_state_not_party_naming_tasks
     assert dossier_state["trace"]["steps"][0] == "read_conversation_entity_state"
 
 
+def test_dossier_agent_filters_attendance_action_even_if_marked_subject() -> None:
+    conversation_state = {
+        "conversation_id": 901,
+        "should_build": True,
+        "entities": [
+            {
+                "id": "conversation:901:entity:zhang",
+                "canonical_label": "\u5f20\u4e09",
+                "entity_type": "person",
+                "role": "current_party",
+                "confidence": "high",
+                "source": "conversation_graph",
+                "mentions": [{"raw_label": "\u5f20\u4e09", "conversation_id": 901}],
+            },
+            {
+                "id": "conversation:901:entity:clock-in",
+                "canonical_label": "\u6253\u5361",
+                "entity_type": "\u4e3b\u4f53",
+                "role": "",
+                "confidence": "high",
+                "source": "conversation_graph",
+                "mentions": [{"raw_label": "\u6253\u5361", "conversation_id": 901}],
+            },
+        ],
+        "relations": [],
+    }
+
+    dossier_state = build_dossier_entity_state(
+        conversation_entity_states=[conversation_state],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+
+    assert _entity_by_label(dossier_state, "\u5f20\u4e09")
+    assert not _entity_by_label(dossier_state, "\u6253\u5361")
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "\u878d\u8d44\u5230\u8d26",
+        "\u53d1\u653e\u5de5\u8d44",
+        "\u79bb\u804c\u901a\u77e5",
+        "\u8f9e\u9000\u4e8b\u5b9e",
+        "\u52b3\u52a8\u5173\u7cfb",
+        "\u8865\u7b7e\u534f\u8bae",
+    ],
+)
+def test_dossier_agent_filters_abstract_fact_even_if_marked_subject(label: str) -> None:
+    conversation_state = {
+        "conversation_id": 904,
+        "should_build": True,
+        "entities": [
+            {
+                "id": "conversation:904:entity:zhang",
+                "canonical_label": "\u5f20\u4e09",
+                "entity_type": "person",
+                "role": "current_party",
+                "confidence": "high",
+                "source": "conversation_graph",
+                "mentions": [{"raw_label": "\u5f20\u4e09", "conversation_id": 904}],
+            },
+            {
+                "id": f"conversation:904:entity:{label}",
+                "canonical_label": label,
+                "entity_type": "\u4e3b\u4f53",
+                "role": "",
+                "confidence": "high",
+                "source": "conversation_graph",
+                "mentions": [{"raw_label": label, "conversation_id": 904}],
+            },
+        ],
+        "relations": [],
+    }
+
+    dossier_state = build_dossier_entity_state(
+        conversation_entity_states=[conversation_state],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+
+    assert _entity_by_label(dossier_state, "\u5f20\u4e09")
+    assert not _entity_by_label(dossier_state, label)
+
+
+@pytest.mark.parametrize("label", ["当事人", "劳动者", "申请人", "当前会话当事人"])
+def test_dossier_agent_rejects_unresolved_party_placeholders_as_canonical_entities(label: str) -> None:
+    conversation_state = {
+        "conversation_id": 905,
+        "should_build": True,
+        "entities": [
+            {
+                "id": f"conversation:905:entity:{label}",
+                "canonical_label": label,
+                "entity_type": "person",
+                "role": "current_party",
+                "confidence": "high",
+                "source": "conversation_graph",
+                "mentions": [{"raw_label": label, "conversation_id": 905}],
+            },
+            {
+                "id": "conversation:905:entity:company",
+                "canonical_label": "A公司",
+                "entity_type": "organization",
+                "role": "employer",
+                "confidence": "high",
+                "source": "conversation_graph",
+                "mentions": [{"raw_label": "A公司", "conversation_id": 905}],
+            },
+        ],
+        "relations": [],
+    }
+
+    dossier_state = build_dossier_entity_state(
+        conversation_entity_states=[conversation_state],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+
+    assert _entity_by_label(dossier_state, "A公司")
+    assert not _entity_by_label(dossier_state, label)
+
+
 def test_laborer_alias_does_not_create_separate_dossier_entity() -> None:
     conversation_state = _conversation_state(
         808,
@@ -356,6 +482,37 @@ def test_unresolved_current_party_placeholder_stays_out_of_dossier_graph() -> No
         for task in dossier_state["confirmation_tasks"]
     )
     assert _entity_by_label(dossier_state, "B公司")
+
+
+def test_consultation_topic_subject_stays_out_of_dossier_graph() -> None:
+    conversation_state = _conversation_state(
+        925,
+        [
+            {
+                "id": "person-925",
+                "label": "张三",
+                "type": "person",
+                "conversation_id": 925,
+                "properties": {"role": "current_party"},
+            },
+            {"id": "company-925", "label": "蓝海科技", "type": "organization", "conversation_id": 925},
+            {"id": "topic-925", "label": "劳动纠纷", "type": "主体", "conversation_id": 925},
+        ],
+        message="我想咨询一个劳动纠纷。我叫张三，在蓝海科技工作。",
+    )
+
+    dossier_state = build_dossier_entity_state(
+        conversation_entity_states=[conversation_state],
+        dossier_id=51,
+        user_id=7,
+        resolution_decisions=[],
+    )
+    graph = coordination_graph_from_dossier_entity_state(dossier_state)
+
+    assert _entity_by_label(dossier_state, "张三")
+    assert _entity_by_label(dossier_state, "蓝海科技")
+    assert not _entity_by_label(dossier_state, "劳动纠纷")
+    assert not any(entity["label"] == "劳动纠纷" for entity in graph["entities"])
 
 
 def test_confirmation_task_entities_include_guard_fields() -> None:

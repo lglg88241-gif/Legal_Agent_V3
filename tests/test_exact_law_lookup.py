@@ -138,6 +138,8 @@ def _restore_stubbed_modules():
     [
         ("劳动合同法第八十七条规定了什么？", "中华人民共和国劳动合同法", 87, "第八十七条"),
         ("劳动合同法第87条规定了什么？", "中华人民共和国劳动合同法", 87, "第八十七条"),
+        ("劳动法87条是什么？", "中华人民共和国劳动法", 87, "第八十七条"),
+        ("劳动法第87条是什么？", "中华人民共和国劳动法", 87, "第八十七条"),
         ("中华人民共和国劳动合同法第八十二条怎么规定？", "中华人民共和国劳动合同法", 82, "第八十二条"),
     ],
 )
@@ -340,3 +342,89 @@ def test_search_law_articles_keeps_exact_article_first_for_article_82(
     assert payload[0]["retrieval"] == "exact"
     assert payload[0]["metadata"]["article"] == "第八十二条"
     assert "二倍的工资" in payload[0]["content"]
+
+
+def test_search_law_articles_keeps_labor_law_article_87_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = _load_tools_module()
+
+    class FakeLawVectorstore:
+        def get(self, where=None, include=None):
+            assert include == ["documents", "metadatas"]
+            if where == {"article": "第八十七条"}:
+                return {
+                    "documents": [
+                        (
+                            "中华人民共和国劳动法\n\n"
+                            "第八十七条 县级以上各级人民政府有关部门在各自职责范围内，"
+                            "对用人单位遵守劳动法律、法规的情况进行监督。"
+                        ),
+                        (
+                            "中华人民共和国劳动合同法\n\n"
+                            "第八十七条 用人单位违法解除或者终止劳动合同的，"
+                            "应当支付赔偿金。"
+                        ),
+                    ],
+                    "metadatas": [
+                        {
+                            "source": "劳动法.docx",
+                            "article": "第八十七条",
+                            "law_title": "中华人民共和国劳动法",
+                        },
+                        {
+                            "source": "劳动合同法.docx",
+                            "article": "第八十七条",
+                            "law_title": "中华人民共和国劳动合同法",
+                        },
+                    ],
+                }
+            return {"documents": [], "metadatas": []}
+
+    def fake_retrieve_candidates(query, vectorstore, corpus, chat_history=""):
+        assert corpus == "law"
+        return (
+            ["劳动法87条是什么？"],
+            [
+                tools._build_candidate(
+                    content="中华人民共和国劳动法\n\n第八十八条 任何组织和个人对于违反劳动法律、法规的行为有权检举和控告。",
+                    source="劳动法.docx",
+                    metadata={
+                        "source": "劳动法.docx",
+                        "article": "第八十八条",
+                        "law_title": "中华人民共和国劳动法",
+                    },
+                    score=0.7,
+                    retrieval="dense",
+                    matched_query="劳动法监督检查",
+                )
+            ],
+        )
+
+    def fake_rerank(queries, candidates, top_k, rrf_k=60):
+        return [
+            {
+                "index": index,
+                "candidate": candidate,
+                "fused_score": 1.0 / (index + 1),
+                "rerank_score": float(top_k - index),
+            }
+            for index, candidate in enumerate(candidates[:top_k])
+        ]
+
+    monkeypatch.setattr(tools, "_get_law_vectorstore", lambda: FakeLawVectorstore())
+    monkeypatch.setattr(tools, "_retrieve_candidates", fake_retrieve_candidates)
+    monkeypatch.setattr(tools, "_multi_query_rerank_with_rrf", fake_rerank)
+
+    payload = json.loads(tools.search_law_articles("劳动法87条是什么？"))
+
+    assert payload
+    assert payload[0]["retrieval"] == "exact"
+    assert payload[0]["metadata"]["law_title"] == "中华人民共和国劳动法"
+    assert payload[0]["metadata"]["article"] == "第八十七条"
+    assert "有关部门在各自职责范围内" in payload[0]["content"]
+    assert all(
+        item["metadata"].get("law_title") != "中华人民共和国劳动合同法"
+        for item in payload
+        if item["retrieval"] == "exact"
+    )

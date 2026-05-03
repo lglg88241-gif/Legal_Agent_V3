@@ -413,6 +413,31 @@ def test_conversation_entity_state_prefers_graph_over_message_regex() -> None:
     assert "read_conversation_graph" in state["trace"]["steps"]
 
 
+def test_conversation_entity_state_filters_consultation_topic_subjects() -> None:
+    state = build_conversation_entity_state(
+        message_text="我想咨询一个劳动纠纷。我叫张三，在蓝海科技工作。",
+        raw_graph_payload=_graph(
+            [
+                {
+                    "id": "person-925",
+                    "label": "张三",
+                    "type": "person",
+                    "conversation_id": 925,
+                    "properties": {"role": "current_party"},
+                },
+                {"id": "company-925", "label": "蓝海科技", "type": "organization", "conversation_id": 925},
+                {"id": "topic-925", "label": "劳动纠纷", "type": "主体", "conversation_id": 925},
+            ]
+        ),
+        conversation_id=925,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    assert {"张三", "蓝海科技"}.issubset(_labels(state))
+    assert "劳动纠纷" not in _labels(state)
+
+
 def test_conversation_entity_state_reports_prefixed_org_if_graph_contains_it() -> None:
     state = build_conversation_entity_state(
         message_text="我叫张三，是这起劳动争议里的劳动者。我和B公司签了劳动合同，但B公司一直没有给我缴纳社保。",
@@ -470,3 +495,75 @@ def test_legal_qa_does_not_build_conversation_entity_state() -> None:
     assert state["skip_reason"] == "legal_qa"
     assert state["entities"] == []
     assert state["party_naming_decision"]["should_create_party_naming"] is False
+
+
+@pytest.mark.parametrize("label", ["\u6253\u5361", "\u8003\u52e4", "\u8865\u7b7e"])
+def test_attendance_action_labels_never_become_conversation_responsible_entities(label: str) -> None:
+    state = build_conversation_entity_state(
+        message_text="\u6211\u6ca1\u6709\u7b7e\u6b63\u5f0f\u52b3\u52a8\u5408\u540c\uff0c\u4f46\u662f\u6bcf\u5929\u90fd\u53bb\u516c\u53f8\u6253\u5361\u3002",
+        raw_graph_payload=_graph(
+            [
+                {
+                    "id": "person-921",
+                    "label": "\u5f20\u4e09",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 921,
+                    "properties": {"category": "\u4e3b\u4f53", "role": "current_party"},
+                },
+                {
+                    "id": f"attendance-921-{label}",
+                    "label": label,
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 921,
+                    "properties": {"category": "\u4e3b\u4f53"},
+                },
+            ]
+        ),
+        conversation_id=921,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    assert "\u5f20\u4e09" in _labels(state)
+    assert label not in _labels(state)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "\u878d\u8d44\u5230\u8d26",
+        "\u53d1\u653e\u5de5\u8d44",
+        "\u79bb\u804c\u901a\u77e5",
+        "\u8f9e\u9000\u4e8b\u5b9e",
+        "\u52b3\u52a8\u5173\u7cfb",
+        "\u8865\u7b7e\u534f\u8bae",
+    ],
+)
+def test_abstract_fact_labels_never_become_conversation_responsible_entities(label: str) -> None:
+    state = build_conversation_entity_state(
+        message_text="\u84dd\u6d77\u79d1\u6280\u7684\u8001\u677f\u627f\u8bfa\u878d\u8d44\u5230\u8d26\u5c31\u53d1\u5de5\u8d44\u3002",
+        raw_graph_payload=_graph(
+            [
+                {
+                    "id": "person-922",
+                    "label": "\u5f20\u4e09",
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 922,
+                    "properties": {"category": "\u4e3b\u4f53", "role": "current_party"},
+                },
+                {
+                    "id": f"fact-922-{label}",
+                    "label": label,
+                    "type": "DynamicCaseEntity",
+                    "conversation_id": 922,
+                    "properties": {"category": "\u4e3b\u4f53"},
+                },
+            ]
+        ),
+        conversation_id=922,
+        conversation_mode="TRACKED_CASE",
+        persistence_consent="tracked",
+    )
+
+    assert "\u5f20\u4e09" in _labels(state)
+    assert label not in _labels(state)

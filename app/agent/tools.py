@@ -101,9 +101,9 @@ _query_expansion_local_llm: Any | None = None
 _query_expansion_local_llm_lock = threading.Lock()
 _query_expansion_fallback_llm: Any | None = None
 _query_expansion_fallback_llm_lock = threading.Lock()
-_ARTICLE_NUMBER_QUERY_PATTERN = re.compile(r"第[一二三四五六七八九十百零\d]+条")
+_ARTICLE_NUMBER_QUERY_PATTERN = re.compile(r"第?[一二三四五六七八九十百零\d]+条")
 _EXPLICIT_ARTICLE_REFERENCE_PATTERN = re.compile(
-    r"第([零〇一二两三四五六七八九十百千\d]+)条"
+    r"第?([零〇一二两三四五六七八九十百千\d]+)条"
 )
 _INTRA_LAW_REFERENCE_PATTERN = re.compile(
     r"(?:依照|按照|根据|参照)?本法第([零〇一二两三四五六七八九十百千\d]+)条"

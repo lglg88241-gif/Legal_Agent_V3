@@ -481,6 +481,26 @@ AGENTIC_TOOL_REGISTRY: tuple[ToolContract, ...] = (
         notes="Kept planned because current party-naming still spans intelligence task generation and API confirmation.",
     ),
     _tool(
+        name="out_of_scope_answer_compose",
+        category="composition",
+        current_implementation="app.agent.nodes._llm::OUT_OF_SCOPE_RESPONSE",
+        description="Compose the fixed out-of-scope response without running retrieval.",
+        input_schema=_schema(
+            required=("question",),
+            properties={"question": {"type": "string"}},
+        ),
+        output_schema=_schema(
+            properties={
+                "response": {"type": "string"},
+                "sources": {"type": "array"},
+                "route_intent": {"type": "string"},
+            },
+        ),
+        hard_guards=("foreign_law_blocks_domestic_rag",),
+        planner_callable=True,
+        migration_status="ready_readonly",
+    ),
+    _tool(
         name="legal_answer_compose",
         category="composition",
         current_implementation="app.services.legal_agent::legal_agent.ask",

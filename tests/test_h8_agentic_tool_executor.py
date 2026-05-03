@@ -122,6 +122,35 @@ def test_execute_subject_reference_plan_tools(monkeypatch: pytest.MonkeyPatch) -
         assert tool_result["status"] == "success"
 
 
+def test_execute_out_of_scope_plan_skips_retrieval() -> None:
+    plan = {
+        "route": "OUT_OF_SCOPE",
+        "intent": "unknown",
+        "final_response_strategy": "fixed_out_of_scope_answer",
+        "tool_sequence": [
+            {
+                "tool_name": "out_of_scope_answer_compose",
+                "arguments": {"question": "美国联邦法第44条规定的什么？"},
+                "dispatch_mode": "specialist_owned",
+            }
+        ],
+    }
+    context = {
+        "question": "美国联邦法第44条规定的什么？",
+        "message_understanding": {
+            "intent": "unknown",
+            "route_hint": "OUT_OF_SCOPE",
+        },
+    }
+
+    result = asyncio.run(execute_agentic_plan_tools(plan, context))
+
+    assert _tool_names(result) == ["out_of_scope_answer_compose"]
+    assert result["final_result"]["route_intent"] == "OUT_OF_SCOPE"
+    assert "中国法律领域" in result["final_result"]["response"]
+    assert result["tool_results"][0]["details"]["retrieval_skipped"] is True
+
+
 def test_execute_legal_question_plan_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.services.agentic_tool_executor as tool_executor_module
 

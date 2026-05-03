@@ -24,7 +24,7 @@ SCENE_PROVIDER_MAP: dict[str, LLMProvider] = {
     "fact_updater": LLMProvider.GPT_5_1,
     "reflector": LLMProvider.GPT_5_1,
     "query_expansion": LLMProvider.ZHIPU,
-    "graph_updater": LLMProvider.ZHIPU,
+    "graph_updater": LLMProvider.GPT_5_1,
     "router": LLMProvider.ZHIPU,
 }
 

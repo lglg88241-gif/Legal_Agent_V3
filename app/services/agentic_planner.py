@@ -8,8 +8,8 @@ from app.services.tool_registry import get_tool_contract
 
 
 _EXPLICIT_LAW_ARTICLE_PATTERNS = (
-    re.compile(r"(劳动合同法|民法典|刑法|社会保险法)[^。！？\n]{0,24}第[一二三四五六七八九十百千万\d]+条"),
-    re.compile(r"第[一二三四五六七八九十百千万\d]+条[^。！？\n]{0,12}(规定了什么|怎么规定|是什么意思|内容是什么)"),
+    re.compile(r"(劳动合同法|劳动法|民法典|刑法|社会保险法)[^。！？\n]{0,24}第?[一二三四五六七八九十百千万\d]+条"),
+    re.compile(r"第?[一二三四五六七八九十百千万\d]+条[^。！？\n]{0,12}(规定了什么|怎么规定|是什么|是什么意思|内容是什么)"),
 )
 
 
@@ -202,6 +202,33 @@ def build_agentic_plan(
             needs_structured_persistence=True,
             final_response_strategy="acknowledgement",
             missing_requirements=[] if graph_update_input_text else ["pending_graph_update_input_text"],
+            fallback_allowed=False,
+        )
+        return plan
+
+    if route == "OUT_OF_SCOPE":
+        tool_sequence = [
+            _tool_call(
+                "out_of_scope_answer_compose",
+                arguments={"question": normalized_question},
+                reason="Return the fixed out-of-scope response without running legal retrieval.",
+                dispatch_mode="specialist_owned",
+            )
+        ]
+        plan.update(
+            response_mode="out_of_scope",
+            response_style="out_of_scope",
+            specialist="out_of_scope_agent",
+            plan_summary="确定性超范围问题，直接固定拒答，不检索中国法条，不写入案情或图谱。",
+            context_requirements=["message_text"],
+            tool_sequence=tool_sequence,
+            tool_calls=tool_sequence,
+            writes_requested=[],
+            needs_legal_rag=False,
+            needs_graph_context=False,
+            needs_structured_persistence=False,
+            final_response_strategy="fixed_out_of_scope_answer",
+            missing_requirements=[],
             fallback_allowed=False,
         )
         return plan

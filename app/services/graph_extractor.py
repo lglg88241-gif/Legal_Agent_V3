@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -11,9 +12,11 @@ from json_repair import repair_json
 from langchain_community.chat_models import ChatZhipuAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from neo4j import GraphDatabase
+from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError
 
 from app.core.config import settings
+from app.core.llm_provider import get_llm_router
 from app.agent.prompts.extractor import (  # noqa: E402
     GRAPH_EXTRACTION_PROMPT,
     INCREMENTAL_EXTRACTION_PROMPT,
@@ -128,6 +131,12 @@ DETACH DELETE n
 
 _graph_llm: ChatZhipuAI | None = None
 _graph_lock = threading.Lock()
+GRAPH_OPENAI_MODEL = "gpt-5.1"
+GRAPH_ZHIPU_FALLBACK_MODEL = "glm-4"
+SELF_NAME_PATTERNS = (
+    re.compile(r"(?:我叫|本人叫|本人名叫|我的名字叫|我名叫)([\u4e00-\u9fff]{2,6})"),
+    re.compile(r"我是([\u4e00-\u9fff]{2,6})(?:[，,。；;]|，?是这起|，?是本案|，?作为|这起|本案)"),
+)
 
 ENTITY_ALIAS_MAP = {
     "我": "当事人",
@@ -145,6 +154,7 @@ ENTITY_ALIAS_MAP = {
 
 SELF_ANCHOR_NAMES = {"我", "本人", "自己", "用户", "我们", "咱们", "当事人", "劳动者", "申请人"}
 GENERIC_PERSON_NAMES = SELF_ANCHOR_NAMES | {"员工", "职工", "个人"}
+ORG_ANCHOR_NAMES = {"公司", "单位", "用人单位", "企业", "老板公司", "所在公司", "任职公司"}
 ORG_NAME_HINTS = {
     "有限责任公司",
     "股份有限公司",
@@ -250,10 +260,17 @@ OBJECT_NAME_HINTS = {
     "app",
     "客户端",
     "小程序",
+    "咨询主题",
+    "案由",
+    "纠纷",
+    "劳动纠纷",
+    "争议类型",
+    "案件类型",
 }
 EVENT_NAME_HINTS = {
     "事故",
     "争议",
+    "纠纷",
     "仲裁申请",
     "仲裁",
     "申请",
@@ -281,6 +298,23 @@ CONSEQUENCE_NAME_HINTS = {
     "伤残",
     "后果",
 }
+EVENT_NAME_HINTS = EVENT_NAME_HINTS | {
+    "\u6253\u5361",
+    "\u8003\u52e4",
+    "\u51fa\u52e4",
+    "\u7b7e\u5230",
+    "\u7b7e\u9000",
+    "\u8865\u7b7e",
+    "\u4e0a\u73ed",
+    "\u878d\u8d44\u5230\u8d26",
+    "\u5230\u8d26",
+}
+OBJECT_NAME_HINTS = OBJECT_NAME_HINTS | {
+    "\u52b3\u52a8\u5173\u7cfb",
+    "\u52b3\u52a1\u5173\u7cfb",
+    "\u7528\u5de5\u5173\u7cfb",
+    "\u4e8b\u5b9e\u52b3\u52a8\u5173\u7cfb",
+}
 RESPONSIBLE_RELATION_HINTS = {
     "任职",
     "就职",
@@ -303,6 +337,83 @@ RESPONSIBLE_RELATION_HINTS = {
     "实施",
     "管理",
 }
+IDENTITY_META_RELATIONS = {
+    "姓名",
+    "名字",
+    "名称",
+    "名叫",
+    "叫",
+    "自称",
+    "本人叫",
+    "实名",
+    "身份",
+    "别名",
+    "昵称",
+}
+ATTRIBUTE_OBJECT_RELATIONS = {
+    "工作地点",
+    "办公地点",
+    "所在地",
+    "地点",
+    "城市",
+    "工作城市",
+    "岗位",
+    "职位",
+    "职务",
+    "工种",
+    "工作内容",
+    "从事工作",
+    "咨询",
+    "咨询事项",
+    "咨询主题",
+    "案由",
+    "争议类型",
+    "案件类型",
+}
+GRAPH_WRITE_GUARD_PROMPT = """
+你是会话图谱写入前的语义守卫，不提供法律建议。
+
+你的任务：审查抽取器准备写入 Neo4j 会话图谱的 ADD 动作，保证图谱节点类型严谨、责任体不被事实/证据/时间/属性污染，并和主体确认流程配合。
+
+核心契约：
+1. 会话图谱可以保留事实细节节点，例如上海、后端开发、好几个月、微信、融资到账、工资流水、聊天记录。
+2. 但“主体”只能是可承担法律、用工、支付、管理、侵权或履约责任的人、公司、单位、机构、负责人、HR、人事、经理、代理人、代表等。
+3. 地点、城市、岗位、职位、工种、金额、日期、时长、证据、软件、沟通渠道、合同、协议、劳动关系、咨询主题、案由、纠纷/争议类型、事件、条件、后果都不能是“主体”。
+4. 如果动作中出现“我/本人/当事人/劳动者/申请人/他/她/公司/单位/人事/经理”等未安全解析的责任体泛称，且原句或已有候选无法明确解析，必须 decision=clarify，并把整批写入阻断。
+5. 如果原句同一句已经明确给出主体，例如“蓝海科技的老板叫李四”，李四和蓝海科技都是明确主体，不要要求用户解释它们。
+6. 不要输出“张三-姓名-张三”“张三-叫-张三”等命名元关系或自环关系。
+7. 你可以改正 source_category/target_category，可以删除无意义动作，但不要凭空新增原动作之外的新事实。
+8. 审查前必须先阅读 payload.conversation_context.recent_messages、dossier_context、dossier_graph_context 和 existing_node_records。
+9. 如果 payload.self_anchor_target 或 payload.org_anchor_target 已提供，说明系统已从当前句或当前会话上下文解析出唯一锚点；必须把“我/当事人/劳动者/申请人”改写为 self_anchor_target，把“公司/单位/用人单位/企业”改写为 org_anchor_target 后 allow，不要要求用户重复确认。
+10. dossier_context、dossier_graph_context 中的其他会话事实只能作为跨会话候选，不能直接授权改写“我/当事人”。如果当前会话没有明确 self_anchor_target，但案卷上下文显示“我”可能是上一轮的张三，必须 decision=clarify，询问用户是否承接上一轮/同一案卷当事人；用户确认前不能写入张三。
+11. 只有在当前会话没有唯一候选、跨会话承接未确认、或同一泛称存在多个可能主体时，才 decision=clarify。
+
+类型：
+- 主体：责任承担者。
+- 客体：地点、岗位、金额、日期、时长、证据、文件、工具、渠道、合同、工资、社保、咨询主题、案由、纠纷/争议类型、属性值等。
+- 事件：拖欠工资、未签合同、违法辞退、承诺发工资、融资到账、通知、仲裁申请等行为/过程/条件。
+- 后果：经济损失、赔偿、补偿、损害后果等结果。
+
+只输出 JSON object：
+{
+  "decision": "allow" | "clarify" | "block",
+  "confidence": "high" | "medium" | "low",
+  "reason": "...",
+  "clarification_questions": [],
+  "reviewed_actions": [
+    {
+      "action": "ADD",
+      "source": "...",
+      "source_category": "主体|客体|事件|后果",
+      "relation": "...",
+      "target": "...",
+      "target_category": "主体|客体|事件|后果",
+      "old_target": "",
+      "target_name": ""
+    }
+  ]
+}
+""".strip()
 
 
 def _get_graph_llm() -> ChatZhipuAI:
@@ -312,11 +423,90 @@ def _get_graph_llm() -> ChatZhipuAI:
         with _graph_lock:
             if _graph_llm is None:
                 _graph_llm = ChatZhipuAI(
-                    model="glm-4",
+                    model=GRAPH_ZHIPU_FALLBACK_MODEL,
                     api_key=settings.ZHIPUAI_API_KEY,
                     temperature=0.1,
                 )
     return _graph_llm
+
+
+async def _call_openai_graph_model(messages: list[dict[str, str]], *, max_tokens: int = 2048) -> dict[str, str]:
+    router = get_llm_router()
+    client = AsyncOpenAI(
+        api_key=router.openai_api_key,
+        base_url=router.openai_base_url,
+        timeout=60.0,
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=GRAPH_OPENAI_MODEL,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=max_tokens,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return {
+            "provider": "openai",
+            "model": GRAPH_OPENAI_MODEL,
+            "content": content if isinstance(content, str) else str(content or ""),
+        }
+    finally:
+        await client.close()
+
+
+async def _call_zhipu_graph_model(messages: list[Any], *, max_tokens: int = 2048) -> dict[str, str]:
+    llm = _get_graph_llm()
+    if hasattr(llm, "max_tokens"):
+        try:
+            llm.max_tokens = max_tokens
+        except Exception:
+            pass
+    response = await llm.ainvoke(messages)
+    content = response.content if hasattr(response, "content") else response
+    return {
+        "provider": "zhipu",
+        "model": GRAPH_ZHIPU_FALLBACK_MODEL,
+        "content": content if isinstance(content, str) else str(content or ""),
+    }
+
+
+def _messages_for_openai(messages: list[Any]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for message in messages:
+        if isinstance(message, dict):
+            role = str(message.get("role") or "user").lower()
+            content = message.get("content", "")
+        else:
+            role = str(getattr(message, "type", type(message).__name__.replace("Message", ""))).lower()
+            content = getattr(message, "content", "")
+        if role in {"human", "user"}:
+            role = "user"
+        elif role in {"ai", "assistant"}:
+            role = "assistant"
+        elif role != "system":
+            role = "user"
+        normalized.append({"role": role, "content": content if isinstance(content, str) else str(content or "")})
+    return normalized
+
+
+async def _call_graph_model(messages: list[Any], *, max_tokens: int = 2048) -> dict[str, str]:
+    router = get_llm_router()
+    if router.openai_api_key:
+        try:
+            result = await _call_openai_graph_model(
+                _messages_for_openai(messages),
+                max_tokens=max_tokens,
+            )
+            logger.info("Graph LLM dispatch | provider=%s model=%s", result["provider"], result["model"])
+            return result
+        except Exception as exc:
+            logger.warning("OpenAI graph model failed, fallback to Zhipu %s: %s", GRAPH_ZHIPU_FALLBACK_MODEL, exc)
+    else:
+        logger.warning("OPENAI_API_KEY not set, fallback to Zhipu for graph updater")
+
+    result = await _call_zhipu_graph_model(messages, max_tokens=max_tokens)
+    logger.info("Graph LLM dispatch | provider=%s model=%s", result["provider"], result["model"])
+    return result
 
 
 def _build_driver():
@@ -339,6 +529,227 @@ def _contains_any(value: str, hints: set[str]) -> bool:
     return any(hint in value for hint in hints)
 
 
+def _extract_self_anchor_target_from_text(text: str) -> str:
+    normalized = " ".join(str(text or "").strip().split())
+    for pattern in SELF_NAME_PATTERNS:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        candidate = " ".join(str(match.group(1) or "").strip().split())
+        if candidate and _looks_like_specific_person_name(candidate):
+            return candidate
+    return ""
+
+
+def _extract_self_anchor_target_from_context(context: dict[str, Any] | None) -> str:
+    if not isinstance(context, dict):
+        return ""
+    for message in list(context.get("recent_messages") or []):
+        if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+            continue
+        target = _extract_self_anchor_target_from_text(str(message.get("content") or ""))
+        if target:
+            return target
+    for record in list(context.get("existing_node_records") or []):
+        if not isinstance(record, dict):
+            continue
+        name = str(record.get("name") or record.get("label") or "").strip()
+        role = str(record.get("role") or record.get("participant_role") or "").strip()
+        if role in {"current_party", "当事人", "劳动者", "申请人"} and _looks_like_specific_person_name(name):
+            return name
+    return ""
+
+
+def _extract_cross_conversation_self_anchor_candidates(context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(context, dict):
+        return []
+    candidates: list[dict[str, Any]] = []
+    dossier_context = context.get("dossier_context")
+    if isinstance(dossier_context, dict):
+        for item in list(dossier_context.get("confirmed_participants") or []):
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("canonical_label") or "").strip()
+            role = str(item.get("role") or item.get("participant_role") or "").strip()
+            side = str(item.get("party_side") or "").strip()
+            entity_type = str(item.get("entity_type") or item.get("type") or "").strip()
+            if not _looks_like_specific_person_name(label):
+                continue
+            if (
+                role in {"current_party", "当事人", "劳动者", "申请人", "员工", "本人"}
+                or side in {"claimant", "primary", "current_party"}
+                or entity_type in {"person", "natural_person", "human"}
+            ):
+                source_conversation_ids = []
+                for mention in list(dossier_context.get("participant_mentions") or []):
+                    if not isinstance(mention, dict):
+                        continue
+                    mention_label = str(
+                        mention.get("participant_label")
+                        or mention.get("graph_node_label")
+                        or mention.get("raw_label")
+                        or ""
+                    ).strip()
+                    if mention_label != label:
+                        continue
+                    try:
+                        mention_conversation_id = int(mention.get("conversation_id") or 0)
+                    except (TypeError, ValueError):
+                        mention_conversation_id = 0
+                    if mention_conversation_id > 0:
+                        source_conversation_ids.append(mention_conversation_id)
+                candidates.append(
+                    {
+                        "label": label,
+                        "role": role,
+                        "party_side": side,
+                        "entity_type": entity_type,
+                        "source_conversation_ids": sorted(set(source_conversation_ids)),
+                    }
+                )
+    unique: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        label = str(candidate.get("label") or "").strip()
+        if not label:
+            continue
+        existing = unique.get(label)
+        if existing:
+            existing_ids = set(existing.get("source_conversation_ids") or [])
+            existing["source_conversation_ids"] = sorted(existing_ids | set(candidate.get("source_conversation_ids") or []))
+            continue
+        unique[label] = candidate
+    return [unique[key] for key in sorted(unique)]
+
+
+ORG_NAME_PATTERNS = (
+    re.compile(r"(?:一家叫|一间叫|叫做|名为|名称为)([\u4e00-\u9fffA-Za-z0-9（）()·\-]{2,30}?)(?:的)?(?:公司|单位|企业)"),
+    re.compile(r"([\u4e00-\u9fffA-Za-z0-9（）()·\-]{2,30}?)(?:公司|单位|企业)(?:从|一直|没有|未|拖欠|通知|要求|安排|辞退|解除|补签|发放|支付|不给|不给我|的人事|的老板|的经理)"),
+)
+
+
+def _looks_like_specific_org_name(name: str) -> bool:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned or cleaned in ORG_ANCHOR_NAMES:
+        return False
+    if _looks_like_non_responsible_name(cleaned):
+        return False
+    if _contains_any(cleaned, AUTHORITY_NAME_HINTS):
+        return False
+    return _contains_any(cleaned, ORG_NAME_HINTS | RESPONSIBLE_ORG_ENTITY_HINTS) or (
+        len(cleaned) >= 2
+        and len(cleaned) <= 30
+        and any("\u4e00" <= char <= "\u9fff" for char in cleaned)
+        and not _looks_like_specific_person_name(cleaned)
+    )
+
+
+def _extract_org_anchor_target_from_text(text: str) -> str:
+    normalized = " ".join(str(text or "").strip().split())
+    for pattern in ORG_NAME_PATTERNS:
+        match = pattern.search(normalized)
+        if not match:
+            continue
+        candidate = " ".join(str(match.group(1) or "").strip().split())
+        candidate = re.sub(r"^(?:在|到|去|这家|那家|一家)", "", candidate).strip()
+        candidate = re.sub(r"(?:这家|那家|一家)$", "", candidate).strip()
+        if candidate and _looks_like_specific_org_name(candidate):
+            return candidate
+    return ""
+
+
+def _extract_org_anchor_target_from_context(context: dict[str, Any] | None) -> str:
+    if not isinstance(context, dict):
+        return ""
+    for message in list(context.get("recent_messages") or []):
+        if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+            continue
+        target = _extract_org_anchor_target_from_text(str(message.get("content") or ""))
+        if target:
+            return target
+    candidates: list[str] = []
+    for record in list(context.get("existing_node_records") or []):
+        if not isinstance(record, dict):
+            continue
+        name = str(record.get("name") or record.get("label") or "").strip()
+        category = str(record.get("category") or record.get("node_type") or "").strip()
+        if category and category != CATEGORY_SUBJECT:
+            continue
+        if _looks_like_specific_org_name(name):
+            candidates.append(name)
+    unique_candidates = sorted(set(candidates))
+    return unique_candidates[0] if len(unique_candidates) == 1 else ""
+
+
+NON_RESPONSIBLE_LABEL_HINTS = (
+    EVIDENCE_NAME_HINTS
+    | COMMUNICATION_TOOL_NAME_HINTS
+    | OBJECT_NAME_HINTS
+    | EVENT_NAME_HINTS
+    | CONSEQUENCE_NAME_HINTS
+    | {
+        "\u5173\u7cfb",
+        "\u5408\u540c",
+        "\u534f\u8bae",
+        "\u5de5\u8d44",
+        "\u85aa\u8d44",
+        "\u8865\u507f",
+        "\u8d54\u507f",
+        "\u635f\u5931",
+        "\u8bc1\u636e",
+        "\u8bb0\u5f55",
+        "\u6d41\u6c34",
+        "\u622a\u56fe",
+        "\u5f55\u97f3",
+        "\u901a\u77e5",
+        "\u627f\u8bfa",
+        "\u53d1\u653e",
+        "\u62d6\u6b20",
+        "\u6b20\u85aa",
+        "\u8f9e\u9000",
+        "\u89e3\u9664",
+        "\u79bb\u804c",
+        "\u5165\u804c",
+        "\u7b7e\u7ea6",
+        "\u8865\u7b7e",
+        "\u7f34\u7eb3",
+        "\u672a\u7b7e",
+        "\u672a\u7f34",
+        "\u5230\u8d26",
+        "\u878d\u8d44",
+        "\u6761\u4ef6",
+        "\u539f\u56e0",
+        "\u7ed3\u679c",
+        "\u540e\u679c",
+        "\u4e8b\u5b9e",
+        "\u60c5\u51b5",
+        "\u95ee\u9898",
+        "\u8bf7\u6c42",
+        "\u4e3b\u5f20",
+        "\u7533\u8bf7",
+        "\u4ef2\u88c1",
+        "\u8bc9\u8bbc",
+        "\u91d1\u989d",
+        "\u65e5\u671f",
+        "\u65f6\u95f4",
+        "\u6708\u85aa",
+        "\u793e\u4fdd",
+        "\u5c97\u4f4d",
+        "\u8003\u52e4",
+        "\u51fa\u52e4",
+        "\u6253\u5361",
+    }
+)
+
+
+def _looks_like_human_name_shape(name: str) -> bool:
+    cleaned = " ".join(str(name or "").strip().split())
+    if not cleaned:
+        return False
+    if len(cleaned) in {2, 3} and all("\u4e00" <= char <= "\u9fff" for char in cleaned):
+        return True
+    return len(cleaned) <= 8 and any(char.isalpha() for char in cleaned) and any("\u4e00" <= char <= "\u9fff" for char in cleaned)
+
+
 def _looks_like_specific_person_name(name: str) -> bool:
     cleaned = " ".join(str(name or "").strip().split())
     if not cleaned or cleaned in GENERIC_PERSON_NAMES:
@@ -355,7 +766,7 @@ def _looks_like_specific_person_name(name: str) -> bool:
         | CONSEQUENCE_NAME_HINTS,
     ):
         return False
-    return len(cleaned) in {2, 3, 4} and all("\u4e00" <= char <= "\u9fff" for char in cleaned)
+    return _looks_like_human_name_shape(cleaned)
 
 
 def _looks_like_responsible_entity_name(name: str) -> bool:
@@ -379,6 +790,10 @@ def _looks_like_amount_or_time_name(name: str) -> bool:
         cleaned,
         {"元", "万元", "块", "人民币", "年", "月", "日", "号", "天", "个月", "%", "％"},
     ):
+        return True
+    if re.fullmatch(r"(?:好几|好些|多个|数个|几个|若干|很多|许多|多|数|半|一|两|三|四|五|六|七|八|九|十)[年月日天周星期个]*", cleaned):
+        return True
+    if re.fullmatch(r".*(?:几个月|数月|多月|好几个月|好些个月|若干个月|很久|长期|一段时间|一阵子|一段日子).*", cleaned):
         return True
     return False
 
@@ -404,11 +819,7 @@ def _looks_like_non_responsible_name(name: str) -> bool:
         return True
     return _contains_any(
         cleaned,
-        EVIDENCE_NAME_HINTS
-        | COMMUNICATION_TOOL_NAME_HINTS
-        | OBJECT_NAME_HINTS
-        | EVENT_NAME_HINTS
-        | CONSEQUENCE_NAME_HINTS,
+        NON_RESPONSIBLE_LABEL_HINTS,
     )
 
 
@@ -469,15 +880,26 @@ def _normalize_fact_categories(
         normalized_source_category = CATEGORY_SUBJECT
     if relation_implies_responsible and _looks_like_responsible_entity_name(target):
         normalized_target_category = CATEGORY_SUBJECT
+    if relation_text in ATTRIBUTE_OBJECT_RELATIONS:
+        normalized_target_category = CATEGORY_OBJECT
     if _looks_like_non_responsible_name(source):
         normalized_source_category = _normalize_category("", source)
     if _looks_like_non_responsible_name(target):
         normalized_target_category = _normalize_category("", target)
+    if relation_text in ATTRIBUTE_OBJECT_RELATIONS:
+        normalized_target_category = CATEGORY_OBJECT
     return normalized_source_category, normalized_target_category
 
 
 def _normalize_relation(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def _is_degenerate_graph_fact(source: str, relation: str, target: str) -> bool:
+    normalized_relation = _normalize_relation(relation)
+    if source and target and _canonicalize_entity(source) == _canonicalize_entity(target):
+        return True
+    return normalized_relation in IDENTITY_META_RELATIONS
 
 
 def _safe_json_load(raw_content: str, fallback: Any) -> Any:
@@ -504,6 +926,300 @@ def _parse_graph_action_response(
         },
         existing_nodes,
     )
+
+
+def _parse_graph_write_guard_response(
+    raw_content: str,
+    fallback_actions: list[dict[str, str]],
+    *,
+    self_anchor_target: str = "",
+    org_anchor_target: str = "",
+) -> dict[str, Any]:
+    parsed = _safe_json_load(raw_content, {})
+    if not isinstance(parsed, dict):
+        parsed = {}
+    decision = str(parsed.get("decision") or "allow").strip().lower()
+    if decision not in {"allow", "clarify", "block"}:
+        decision = "allow"
+    raw_reviewed_actions = [
+        dict(action)
+        for action in list(parsed.get("reviewed_actions") or fallback_actions)
+        if isinstance(action, dict)
+    ]
+    reviewed_actions = _normalize_actions(
+        {"actions": raw_reviewed_actions},
+        self_anchor_target=self_anchor_target,
+        org_anchor_target=org_anchor_target,
+    )
+    validation_errors = _validate_graph_write_guard_actions(
+        raw_reviewed_actions,
+        reviewed_actions,
+        fallback_actions=fallback_actions,
+        self_anchor_target=self_anchor_target,
+    )
+    return {
+        "source": "graph_write_guard",
+        "provider": "",
+        "model": "",
+        "decision": decision,
+        "confidence": str(parsed.get("confidence") or "medium").strip().lower() or "medium",
+        "reason": str(parsed.get("reason") or "graph_write_guard_reviewed").strip(),
+        "needs_clarification": decision == "clarify",
+        "clarification_questions": [
+            str(item).strip()
+            for item in list(parsed.get("clarification_questions") or [])
+            if str(item).strip()
+        ],
+        "validation_errors": validation_errors,
+        "raw_reviewed_actions": raw_reviewed_actions,
+        "allowed_actions": reviewed_actions if decision == "allow" else [],
+        "blocked_actions": fallback_actions if decision in {"clarify", "block"} else [],
+    }
+
+
+def _validate_graph_write_guard_actions(
+    raw_actions: list[dict[str, Any]],
+    normalized_actions: list[dict[str, str]],
+    *,
+    fallback_actions: list[dict[str, str]] | None = None,
+    self_anchor_target: str = "",
+) -> list[str]:
+    errors: list[str] = []
+    if len(raw_actions) != len(normalized_actions):
+        errors.append("规则校验删除了无效动作：存在自环、命名元关系、缺字段或非法 action。")
+    for index, raw in enumerate(raw_actions):
+        source = _resolve_action_entity_name(raw.get("source", ""))
+        relation = _normalize_relation(raw.get("relation", ""))
+        target = _resolve_action_entity_name(raw.get("new_target", "") or raw.get("target", ""))
+        raw_source_category = str(raw.get("source_category") or "").strip()
+        raw_target_category = str(raw.get("target_category") or "").strip()
+        if source and relation and target and _is_degenerate_graph_fact(source, relation, target):
+            errors.append(f"第{index + 1}条违反规则：不能输出自环或命名元关系 `{source}-{relation}-{target}`。")
+        if source and raw_source_category == CATEGORY_SUBJECT and _looks_like_non_responsible_name(source):
+            errors.append(f"第{index + 1}条违反规则：source `{source}` 是事实、证据、工具、时间、时长、条件、后果或属性值，不能标为主体。")
+        if target and raw_target_category == CATEGORY_SUBJECT and _looks_like_non_responsible_name(target):
+            errors.append(f"第{index + 1}条违反规则：target `{target}` 是事实、证据、工具、时间、时长、条件、后果或属性值，不能标为主体。")
+        if relation in ATTRIBUTE_OBJECT_RELATIONS and raw_target_category == CATEGORY_SUBJECT:
+            errors.append(f"第{index + 1}条违反规则：关系 `{relation}` 的 target `{target}` 是属性值，必须标为客体。")
+    if not self_anchor_target:
+        fallback_list = [dict(action) for action in list(fallback_actions or []) if isinstance(action, dict)]
+        for index, fallback in enumerate(fallback_list):
+            reviewed = raw_actions[index] if index < len(raw_actions) else {}
+            fallback_source = _resolve_action_entity_name(fallback.get("source", ""))
+            fallback_target = _resolve_action_entity_name(fallback.get("new_target", "") or fallback.get("target", ""))
+            reviewed_source = _resolve_action_entity_name(reviewed.get("source", "")) if isinstance(reviewed, dict) else ""
+            reviewed_target = (
+                _resolve_action_entity_name(reviewed.get("new_target", "") or reviewed.get("target", ""))
+                if isinstance(reviewed, dict)
+                else ""
+            )
+            if _is_self_anchor_name(fallback_source) and reviewed_source and not _is_self_anchor_name(reviewed_source):
+                errors.append(
+                    f"第{index + 1}条违反规则：当前会话尚未确认“我/当事人”的姓名，不能把 source `{fallback_source}` 直接改写为 `{reviewed_source}`。"
+                )
+            if _is_self_anchor_name(fallback_target) and reviewed_target and not _is_self_anchor_name(reviewed_target):
+                errors.append(
+                    f"第{index + 1}条违反规则：当前会话尚未确认“我/当事人”的姓名，不能把 target `{fallback_target}` 直接改写为 `{reviewed_target}`。"
+                )
+    return list(dict.fromkeys(errors))
+
+
+def _actions_contain_self_anchor(actions: list[dict[str, Any]] | None) -> bool:
+    for action in list(actions or []):
+        if not isinstance(action, dict):
+            continue
+        source = _resolve_action_entity_name(action.get("source", ""))
+        target = _resolve_action_entity_name(action.get("new_target", "") or action.get("target", ""))
+        if _is_self_anchor_name(source) or _is_self_anchor_name(target):
+            return True
+    return False
+
+
+def _build_cross_conversation_self_clarification_result(
+    *,
+    normalized_actions: list[dict[str, str]],
+    validation_errors: list[str],
+    self_anchor_candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    candidates = [item for item in list(self_anchor_candidates or []) if isinstance(item, dict) and item.get("label")]
+    first_candidate = candidates[0] if candidates else {}
+    first_label = str(first_candidate.get("label") or "").strip()
+    first_source_ids = [int(item) for item in list(first_candidate.get("source_conversation_ids") or []) if int(item or 0) > 0]
+    source_text = f"，来源会话 ID：{', '.join(str(item) for item in first_source_ids)}" if first_source_ids else ""
+    candidate_text = f"（例如：{first_label}{source_text}）" if first_label else ""
+    return {
+        "source": "graph_write_guard",
+        "provider": "rules",
+        "model": "graph-write-cross-conversation-context-contract-v1",
+        "decision": "clarify",
+        "confidence": "high",
+        "reason": "cross_conversation_self_anchor_requires_user_confirmation",
+        "needs_clarification": True,
+        "clarification_questions": [
+            f"这条补充里的“我/当事人”是否承接同一案卷上一轮已确认的当事人{candidate_text}？如果是，请回复“是，承接上一轮”；如果不是，请直接说明这里的“我”是谁。"
+        ],
+        "validation_errors": validation_errors,
+        "raw_reviewed_actions": [],
+        "allowed_actions": [],
+        "blocked_actions": normalized_actions,
+        "clarification_mode": "cross_conversation_self_anchor",
+        "target_mention": "我/当事人",
+        "reference_type": "self",
+        "cross_conversation_candidates": candidates,
+        "source_conversation_ids": first_source_ids,
+        "suggested_entity_name": first_label,
+        "pre_resolved_anchors": {
+            "self_anchor_target": "",
+            "org_anchor_target": "",
+        },
+    }
+
+
+async def evaluate_graph_write_guard_async(
+    *,
+    user_input: str,
+    actions: list[dict[str, str]],
+    existing_node_records: list[dict[str, Any]] | None = None,
+    conversation_context: dict[str, Any] | None = None,
+    model_caller: Any | None = None,
+) -> dict[str, Any]:
+    context = conversation_context if isinstance(conversation_context, dict) else {}
+    self_anchor_target = _extract_self_anchor_target_from_text(user_input) or _extract_self_anchor_target_from_context(
+        {**context, "existing_node_records": list(existing_node_records or [])}
+    )
+    cross_conversation_self_candidates = _extract_cross_conversation_self_anchor_candidates(context)
+    org_anchor_target = _extract_org_anchor_target_from_text(user_input) or _extract_org_anchor_target_from_context(
+        {**context, "existing_node_records": list(existing_node_records or [])}
+    )
+    normalized_actions = _normalize_actions(
+        {"actions": actions},
+        self_anchor_target=self_anchor_target,
+        org_anchor_target=org_anchor_target,
+    )
+    if not normalized_actions:
+        return {
+            "source": "graph_write_guard",
+            "decision": "allow",
+            "confidence": "high",
+            "reason": "no_actions",
+            "needs_clarification": False,
+            "clarification_questions": [],
+            "allowed_actions": [],
+            "blocked_actions": [],
+        }
+    payload = {
+        "user_input": str(user_input or "").strip(),
+        "existing_node_records": list(existing_node_records or []),
+        "conversation_context": conversation_context if isinstance(conversation_context, dict) else {},
+        "proposed_actions": normalized_actions,
+        "self_anchor_target": self_anchor_target,
+        "org_anchor_target": org_anchor_target,
+    }
+    caller = model_caller
+    try:
+        last_result: dict[str, Any] | None = None
+        feedback: list[str] = []
+        for attempt in range(1, 4):
+            attempt_payload = dict(payload)
+            if feedback:
+                attempt_payload["previous_validation_errors"] = feedback
+                attempt_payload["instruction"] = "上一轮输出未通过确定性规则校验。请根据 previous_validation_errors 修正 reviewed_actions，只输出合法 JSON。"
+            if caller is not None:
+                raw = await caller(attempt_payload)
+            else:
+                raw = await _call_graph_model(
+                    [
+                        SystemMessage(content=GRAPH_WRITE_GUARD_PROMPT),
+                        HumanMessage(content=json.dumps(attempt_payload, ensure_ascii=False, indent=2)),
+                    ],
+                    max_tokens=2400,
+                )
+            provider = str(raw.get("provider") or "unknown").strip() if isinstance(raw, dict) else "unknown"
+            model = str(raw.get("model") or "unknown").strip() if isinstance(raw, dict) else "unknown"
+            content = raw.get("content") if isinstance(raw, dict) else raw
+            result = _parse_graph_write_guard_response(
+                str(content or ""),
+                normalized_actions,
+                self_anchor_target=self_anchor_target,
+                org_anchor_target=org_anchor_target,
+            )
+            result["provider"] = provider
+            result["model"] = model
+            result["reflection_attempts"] = attempt
+            result["pre_resolved_anchors"] = {
+                "self_anchor_target": self_anchor_target,
+                "org_anchor_target": org_anchor_target,
+            }
+            last_result = result
+            validation_errors = list(result.get("validation_errors") or [])
+            if validation_errors and not self_anchor_target and _actions_contain_self_anchor(actions):
+                if any("当前会话尚未确认" in error for error in validation_errors):
+                    clarification = _build_cross_conversation_self_clarification_result(
+                        normalized_actions=normalized_actions,
+                        validation_errors=validation_errors,
+                        self_anchor_candidates=cross_conversation_self_candidates,
+                    )
+                    clarification["provider"] = provider
+                    clarification["model"] = model
+                    clarification["reflection_attempts"] = attempt
+                    clarification["pre_resolved_anchors"] = {
+                        "self_anchor_target": "",
+                        "org_anchor_target": org_anchor_target,
+                    }
+                    return clarification
+            if not validation_errors or result.get("decision") in {"clarify", "block"}:
+                return result
+            feedback = validation_errors
+            logger.warning(
+                "Graph write guard validation failed on attempt %s/3: %s",
+                attempt,
+                "; ".join(validation_errors),
+            )
+        if last_result is not None:
+            validation_errors = list(last_result.get("validation_errors") or [])
+            if validation_errors and not self_anchor_target and _actions_contain_self_anchor(actions):
+                if any("当前会话尚未确认" in error for error in validation_errors):
+                    clarification = _build_cross_conversation_self_clarification_result(
+                        normalized_actions=normalized_actions,
+                        validation_errors=validation_errors,
+                        self_anchor_candidates=cross_conversation_self_candidates,
+                    )
+                    clarification["reflection_attempts"] = 3
+                    clarification["pre_resolved_anchors"] = {
+                        "self_anchor_target": "",
+                        "org_anchor_target": org_anchor_target,
+                    }
+                    return clarification
+            last_result["reason"] = f"{last_result.get('reason')}; deterministic_rules_applied_after_reflection_exhausted"
+            last_result["confidence"] = "low"
+            last_result["pre_resolved_anchors"] = {
+                "self_anchor_target": self_anchor_target,
+                "org_anchor_target": org_anchor_target,
+            }
+            last_result["allowed_actions"] = _normalize_actions(
+                {"actions": last_result.get("raw_reviewed_actions") or normalized_actions},
+                self_anchor_target=self_anchor_target,
+                org_anchor_target=org_anchor_target,
+            )
+            return last_result
+    except Exception as exc:
+        logger.warning("Graph write guard failed; using normalized actions fallback: %s", exc)
+        return {
+            "source": "graph_write_guard",
+            "provider": "fallback",
+            "model": "graph-write-guard-fallback",
+            "decision": "allow",
+            "confidence": "low",
+            "reason": "guard_unavailable_normalized_fallback",
+            "needs_clarification": False,
+            "clarification_questions": [],
+            "allowed_actions": normalized_actions,
+            "blocked_actions": [],
+            "pre_resolved_anchors": {
+                "self_anchor_target": self_anchor_target,
+                "org_anchor_target": org_anchor_target,
+            },
+        }
 
 
 def _parse_graph_gc_response(
@@ -569,6 +1285,8 @@ def _normalize_triples(raw_payload: Any) -> list[dict[str, str]]:
         target = _canonicalize_entity(item.get("target", ""))
         if not source or not relation or not target:
             continue
+        if _is_degenerate_graph_fact(source, relation, target):
+            continue
 
         key = (source, relation, target)
         if key in seen:
@@ -612,12 +1330,15 @@ def _resolve_action_entity_name(
     name: Any,
     existing_nodes: set[str] | None = None,
     self_anchor_target: str = "",
+    org_anchor_target: str = "",
 ) -> str:
     cleaned = " ".join(str(name or "").strip().split())
     if not cleaned:
         return ""
     if self_anchor_target and _is_self_anchor_name(cleaned):
         return self_anchor_target
+    if org_anchor_target and _canonicalize_entity(cleaned) in ORG_ANCHOR_NAMES:
+        return org_anchor_target
     return _resolve_existing_node_name(cleaned, existing_nodes)
 
 
@@ -625,6 +1346,7 @@ def _normalize_actions(
     raw_payload: Any,
     existing_nodes: set[str] | None = None,
     self_anchor_target: str = "",
+    org_anchor_target: str = "",
 ) -> list[dict[str, str]]:
     if isinstance(raw_payload, dict):
         candidates = raw_payload.get("actions", [])
@@ -643,25 +1365,35 @@ def _normalize_actions(
         if action not in ALLOWED_ACTIONS:
             continue
 
-        source = _resolve_action_entity_name(item.get("source", ""), existing_nodes, self_anchor_target)
+        source = _resolve_action_entity_name(
+            item.get("source", ""),
+            existing_nodes,
+            self_anchor_target,
+            org_anchor_target,
+        )
         relation = _normalize_relation(item.get("relation", ""))
         target = _resolve_action_entity_name(
             item.get("new_target", "") or item.get("target", ""),
             existing_nodes,
             self_anchor_target,
+            org_anchor_target,
         )
         old_target = _resolve_action_entity_name(
             item.get("old_target", "") or item.get("target", ""),
             existing_nodes,
             self_anchor_target,
+            org_anchor_target,
         )
         target_name = _resolve_action_entity_name(
             item.get("target_name", "") or item.get("target", "") or item.get("old_target", ""),
             existing_nodes,
             self_anchor_target,
+            org_anchor_target,
         )
 
         if action == "ADD" and (not source or not relation or not target):
+            continue
+        if action == "ADD" and _is_degenerate_graph_fact(source, relation, target):
             continue
         if action == "UPDATE" and (not source or not relation or not old_target or not target):
             continue
@@ -1041,13 +1773,14 @@ async def extract_case_triples(text: str) -> list[dict[str, str]]:
         return []
 
     try:
-        response = await _get_graph_llm().ainvoke(
+        result = await _call_graph_model(
             [
                 SystemMessage(content=GRAPH_EXTRACTION_PROMPT),
                 HumanMessage(content=f"输入文本：\n{clean_text}"),
-            ]
+            ],
+            max_tokens=2048,
         )
-        content = response.content if isinstance(response.content, str) else str(response.content)
+        content = result["content"]
         return _normalize_triples(_safe_json_load(content, []))
     except Exception as exc:
         logger.warning("Graph extraction failed: %s", exc)
@@ -1145,13 +1878,14 @@ async def extract_incremental_graph_actions(user_input: str) -> list[dict[str, s
             )
 
         try:
-            response = await _get_graph_llm().ainvoke(
+            result = await _call_graph_model(
                 [
                     SystemMessage(content="你必须只输出合法 JSON。"),
                     HumanMessage(content=prompt),
-                ]
+                ],
+                max_tokens=2048,
             )
-            content = response.content if isinstance(response.content, str) else str(response.content)
+            content = result["content"]
             actions = _parse_graph_action_response(content)
             add_actions = [action for action in actions if action.get("action") == "ADD"]
             if add_actions:
@@ -1198,13 +1932,14 @@ async def plan_graph_gc(case_summary: str, current_nodes: list[str], current_gra
             )
 
         try:
-            response = await _get_graph_llm().ainvoke(
+            result = await _call_graph_model(
                 [
                     SystemMessage(content="你必须只输出合法 JSON。"),
                     HumanMessage(content=prompt),
-                ]
+                ],
+                max_tokens=2048,
             )
-            content = response.content if isinstance(response.content, str) else str(response.content)
+            content = result["content"]
             return _parse_graph_gc_response(content, existing_nodes)
         except (ValidationError, json.JSONDecodeError) as exc:
             feedback = str(exc)
@@ -1276,6 +2011,7 @@ async def refresh_case_graph(
     case_summary: str = "",
     user_id: int = 0,
     prior_reference_guard: dict[str, Any] | None = None,
+    conversation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_user_input = " ".join((user_input or "").strip().split())
     add_actions = await extract_incremental_graph_actions(user_input)
@@ -1296,18 +2032,61 @@ async def refresh_case_graph(
         ]
 
     node_records = await get_case_graph_node_records(conversation_id)
+    write_guard_result = await evaluate_graph_write_guard_async(
+        user_input=normalized_user_input,
+        actions=add_actions,
+        existing_node_records=node_records,
+        conversation_context=conversation_context,
+    )
+    if write_guard_result.get("needs_clarification"):
+        clarification_questions = write_guard_result.get("clarification_questions", [])
+        question = (clarification_questions or ["请确认待写入的责任主体。"])[0]
+        pending_clarification = {
+            "type": "subject_reference_resolution",
+            "source": "graph_write_guard",
+            "target_mention": write_guard_result.get("target_mention") or "这个主体",
+            "reference_type": write_guard_result.get("reference_type") or "unknown",
+            "previous_question": question,
+            "scope_attempted": ["current_conversation_graph", "graph_write_guard"],
+            "expected_response": "entity_name_or_context",
+            "pending_graph_update_input_text": normalized_user_input,
+        }
+        for key in (
+            "clarification_mode",
+            "cross_conversation_candidates",
+            "source_conversation_ids",
+            "suggested_entity_name",
+        ):
+            if key in write_guard_result:
+                pending_clarification[key] = write_guard_result.get(key)
+        return {
+            "conversation_id": conversation_id,
+            "actions_applied": 0,
+            "actions": [],
+            "added_actions": [],
+            "added_count": 0,
+            "obsolete_nodes": [],
+            "obsolete_edges": [],
+            "deleted_count": 0,
+            "deleted_edge_count": 0,
+            "needs_clarification": True,
+            "clarification_questions": clarification_questions or [question],
+            "pending_clarification": pending_clarification,
+            "reference_guard": write_guard_result,
+            "graph_write_guard": write_guard_result,
+        }
+    add_actions = [
+        action
+        for action in write_guard_result.get("allowed_actions", [])
+        if isinstance(action, dict)
+    ]
     guard_result = await evaluate_graph_action_reference_guard_async(
         user_input=normalized_user_input,
         actions=add_actions,
         existing_node_records=node_records,
         prior_reference_guard=prior_reference_guard,
     )
-    add_actions = [
-        action
-        for action in guard_result.get("allowed_actions", [])
-        if isinstance(action, dict)
-    ]
-    if guard_result.get("needs_clarification") and not add_actions:
+    if guard_result.get("needs_clarification"):
         return {
             "conversation_id": conversation_id,
             "actions_applied": 0,
@@ -1322,7 +2101,13 @@ async def refresh_case_graph(
             "clarification_questions": guard_result.get("clarification_questions", []),
             "pending_clarification": guard_result.get("pending_clarification"),
             "reference_guard": guard_result,
+            "graph_write_guard": write_guard_result,
         }
+    add_actions = [
+        action
+        for action in guard_result.get("allowed_actions", [])
+        if isinstance(action, dict)
+    ]
 
     add_result = await execute_graph_actions(conversation_id, add_actions, user_id=user_id)
     current_nodes = await get_case_graph_node_names(conversation_id)
@@ -1347,6 +2132,7 @@ async def refresh_case_graph(
         "clarification_questions": guard_result.get("clarification_questions", []),
         "pending_clarification": guard_result.get("pending_clarification"),
         "reference_guard": guard_result,
+        "graph_write_guard": write_guard_result,
     }
 
 

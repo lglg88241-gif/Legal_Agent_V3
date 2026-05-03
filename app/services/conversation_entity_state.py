@@ -116,6 +116,45 @@ FACT_LABEL_HINTS = {
     "截图",
     "凭证",
     "证人证言",
+    "咨询主题",
+    "案由",
+    "纠纷",
+    "劳动纠纷",
+    "争议",
+    "争议类型",
+    "案件类型",
+}
+FACT_LABEL_HINTS = FACT_LABEL_HINTS | {
+    "\u6253\u5361",
+    "\u8003\u52e4",
+    "\u51fa\u52e4",
+    "\u7b7e\u5230",
+    "\u7b7e\u9000",
+    "\u8865\u7b7e",
+    "\u4e0a\u73ed",
+    "\u52b3\u52a8\u5173\u7cfb",
+    "\u52b3\u52a1\u5173\u7cfb",
+    "\u7528\u5de5\u5173\u7cfb",
+    "\u4e8b\u5b9e\u52b3\u52a8\u5173\u7cfb",
+    "\u878d\u8d44\u5230\u8d26",
+    "\u5230\u8d26",
+    "\u5173\u7cfb",
+    "\u534f\u8bae",
+    "\u627f\u8bfa",
+    "\u53d1\u653e",
+    "\u62d6\u6b20",
+    "\u8f9e\u9000",
+    "\u89e3\u9664",
+    "\u79bb\u804c",
+    "\u5165\u804c",
+    "\u7b7e\u7ea6",
+    "\u7f34\u7eb3",
+    "\u6761\u4ef6",
+    "\u539f\u56e0",
+    "\u4e8b\u5b9e",
+    "\u60c5\u51b5",
+    "\u95ee\u9898",
+    "\u91d1\u989d",
 }
 RESPONSIBLE_ENTITY_TYPES = {
     "person",
@@ -333,7 +372,21 @@ def _looks_like_fact(label: str, node_type: str, node_types: list[str] | None = 
         return True
     if any(_is_case_graph_non_subject_category(value) for value in (node_types or [node_type])):
         return True
+    if _looks_like_duration_or_time_quantity(label):
+        return True
     return any(hint in label for hint in FACT_LABEL_HINTS)
+
+
+def _looks_like_duration_or_time_quantity(label: str) -> bool:
+    normalized = _normalize_text(label)
+    if not normalized:
+        return False
+    if any(char.isdigit() for char in normalized) and any(unit in normalized for unit in ("年", "月", "日", "天", "周", "星期", "个月")):
+        return True
+    return bool(
+        re.fullmatch(r"(?:好几|好些|多个|数个|几个|若干|很多|许多|多|数|半|一|两|三|四|五|六|七|八|九|十)[年月日天周星期个]*", normalized)
+        or re.fullmatch(r".*(?:几个月|数月|多月|好几个月|好些个月|若干个月|很久|长期|一段时间|一阵子|一段日子).*", normalized)
+    )
 
 
 def _looks_like_org(label: str) -> bool:
@@ -369,7 +422,11 @@ def _looks_like_person_name(label: str) -> bool:
     normalized = _normalize_text(label)
     if not normalized or _looks_like_org(normalized) or _looks_like_role_or_manager(normalized):
         return False
-    return len(normalized) in {2, 3, 4} and all("\u4e00" <= char <= "\u9fff" for char in normalized)
+    if any(hint in normalized for hint in FACT_LABEL_HINTS):
+        return False
+    if len(normalized) in {2, 3} and all("\u4e00" <= char <= "\u9fff" for char in normalized):
+        return True
+    return len(normalized) <= 8 and any(char.isalpha() for char in normalized) and any("\u4e00" <= char <= "\u9fff" for char in normalized)
 
 
 def _is_specific_person_label(label: str) -> bool:
