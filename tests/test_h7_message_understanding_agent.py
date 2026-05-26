@@ -143,6 +143,51 @@ def test_understand_message_with_agent_consumes_fact_update_llm_json(
     assert result["fact_update"]["events"][0]["summary"] == "王经理口头通知当事人不用来了"
 
 
+def test_understand_message_overrides_greeting_misread_as_case_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call_message_understanding_llm(*, messages, provider_hint=None):
+        return {
+            "provider": "openai",
+            "model": "gpt-5.1",
+            "content": json.dumps(
+                {
+                    "intent": "fact_update",
+                    "route_hint": "CASE_UPDATE",
+                    "needs_legal_rag": False,
+                    "needs_dossier_graph_context": False,
+                    "needs_structured_persistence": True,
+                    "needs_graph_update": True,
+                    "fact_update": {"enabled": True, "fact_text": "\u4f60\u597d"},
+                    "confidence": "high",
+                    "reason": "Misread greeting as a factual update.",
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+    monkeypatch.setattr(
+        message_understanding_agent,
+        "_call_message_understanding_llm",
+        fake_call_message_understanding_llm,
+    )
+
+    result = _run(
+        message_understanding_agent.understand_message_with_agent(
+            message="\u4f60\u597d",
+            conversation_mode="LEGAL_QA",
+            dossier_id=88,
+        )
+    )
+
+    assert result["intent"] == "unknown"
+    assert result["route_hint"] == "GREETING"
+    assert result["needs_structured_persistence"] is False
+    assert result["needs_graph_update"] is False
+    assert result["fact_update"] is None
+    assert "override_greeting_chitchat" in result["trace"]["warnings"]
+
+
 def test_understand_message_with_agent_consumes_confirm_previous_fact_llm_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

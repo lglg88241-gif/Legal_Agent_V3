@@ -148,6 +148,85 @@ def test_ask_agent_task_records_message_understanding_shadow_result_for_non_subj
     assert result["execution_trace"]["message_understanding"]["intent"] == "legal_question"
 
 
+def test_ask_agent_task_greeting_does_not_enter_case_update_or_retrieval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    celery_module = _load_celery_module()
+    persisted: dict[str, object] = {}
+
+    async def fake_run_task_async(conversation_id: int, user_id: int, current_question: str | None = None):
+        return {
+            "chat_history": "",
+            "latest_user_input": current_question,
+            "recent_messages": [],
+            "case_summary": "",
+            "graph_memory": "",
+            "saved_case_state": None,
+            "persistence_consent": "tracked",
+            "conversation_mode": "LEGAL_QA",
+            "dossier_id": 12,
+            "dossier_context": {"id": 12, "title": "case"},
+            "dossier_graph_summary": "",
+            "dossier_graph_context": None,
+        }
+
+    class FakeLegalAgent:
+        async def ask(self, *args, **kwargs):
+            raise AssertionError("greeting must not call legal_agent.ask")
+
+    async def fake_understand_message_with_agent(**kwargs):
+        assert kwargs["message"] == "\u4f60\u597d"
+        assert kwargs["conversation_mode"] == "LEGAL_QA"
+        return {
+            "source": "message_understanding_agent",
+            "intent": "unknown",
+            "route_hint": "GREETING",
+            "needs_legal_rag": False,
+            "needs_dossier_graph_context": False,
+            "needs_structured_persistence": False,
+            "needs_graph_update": False,
+            "subject_reference": None,
+            "fact_update": None,
+            "previous_fact_confirmation": None,
+            "advice_question": None,
+            "legal_question": None,
+            "confidence": "high",
+            "reason": "Deterministic greeting/chitchat override.",
+            "provider": "openai",
+            "model": "gpt-5.1",
+            "fallback_reason": None,
+            "trace": {"steps": ["normalize_result"], "warnings": ["override_greeting_chitchat"]},
+        }
+
+    async def fake_persist_dialog_turn_async(**kwargs):
+        persisted.update(kwargs)
+        return {"user_message_id": 401, "assistant_message_id": 402}
+
+    monkeypatch.setattr(celery_module, "_run_task_async", fake_run_task_async)
+    monkeypatch.setattr(celery_module, "legal_agent", FakeLegalAgent())
+    monkeypatch.setattr(celery_module, "understand_message_with_agent", fake_understand_message_with_agent)
+    monkeypatch.setattr(celery_module, "_persist_dialog_turn_async", fake_persist_dialog_turn_async)
+
+    result = celery_module.ask_agent_task.run(
+        5,
+        9,
+        "session-9",
+        "\u4f60\u597d",
+        True,
+        True,
+    )
+
+    assert result["status"] == "success"
+    assert result["route_intent"] == "GREETING"
+    assert result["message_understanding"]["route_hint"] == "GREETING"
+    assert persisted == {}
+    action_tools = [item.get("tool") for item in result["agent_actions"]]
+    assert action_tools == ["tool_router", "greeting"]
+    assert "fact_updater" not in action_tools
+    assert "retrieval_tools" not in action_tools
+    assert "reflector" not in action_tools
+
+
 def test_ask_agent_task_keeps_main_flow_when_message_understanding_shadow_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

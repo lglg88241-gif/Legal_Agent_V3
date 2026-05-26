@@ -117,13 +117,13 @@ def build_agentic_plan(
     conversation_mode: str | None,
     request_context: AgenticRequestContext | None = None,
 ) -> dict[str, Any]:
-    del conversation_mode
     del persistence_consent
 
     mu = message_understanding if isinstance(message_understanding, dict) else {}
     legacy_plan = execution_plan if isinstance(execution_plan, dict) else {}
     intent = _normalize_text(mu.get("intent")).lower() or "unknown"
     route = _normalize_text(legacy_plan.get("primary_route") or mu.get("route_hint")).upper() or "UNKNOWN"
+    normalized_mode = _normalize_text(conversation_mode).upper()
     normalized_question = _normalize_text(question)
     needs_legal_rag = bool(mu.get("needs_legal_rag"))
     needs_graph_context = bool(mu.get("needs_dossier_graph_context")) or intent in {
@@ -141,6 +141,45 @@ def build_agentic_plan(
         needs_graph_context=needs_graph_context,
         needs_structured_persistence=needs_structured_persistence,
     )
+
+    if route == "GREETING":
+        plan.update(
+            response_mode="greeting",
+            response_style="greeting",
+            specialist="greeting_agent",
+            plan_summary="Route deterministic greeting/chitchat without case updates, retrieval, or graph writes.",
+            context_requirements=["message_text"],
+            tool_sequence=[],
+            tool_calls=[],
+            writes_requested=[],
+            needs_legal_rag=False,
+            needs_graph_context=False,
+            needs_structured_persistence=False,
+            final_response_strategy="greeting",
+            missing_requirements=[],
+            fallback_allowed=True,
+        )
+        return plan
+
+    if normalized_mode == "LEGAL_QA" and route == "CASE_UPDATE":
+        plan.update(
+            route="GENERAL_CONSULT",
+            response_mode="legacy_fallback",
+            response_style="legacy_fallback",
+            specialist="legacy_fallback",
+            plan_summary="LEGAL_QA mode blocks CASE_UPDATE planning; fall back to read-only handling.",
+            context_requirements=["message_text"],
+            tool_sequence=[],
+            tool_calls=[],
+            writes_requested=[],
+            needs_legal_rag=False,
+            needs_graph_context=False,
+            needs_structured_persistence=False,
+            final_response_strategy="read_only_mode_isolation",
+            missing_requirements=[],
+            fallback_allowed=True,
+        )
+        return plan
 
     if intent == "clarification_response" and route == "CASE_UPDATE":
         resolved_inputs = (

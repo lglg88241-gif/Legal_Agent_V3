@@ -31,6 +31,7 @@ _SUPPORTED_INTENTS = {
 _SUPPORTED_ROUTE_HINTS = {
     "DOSSIER_MEMORY",
     "CASE_UPDATE",
+    "GREETING",
     "LEGAL_QA",
     "GENERAL_CONSULT",
     "DOCUMENT_ASSIST",
@@ -161,6 +162,28 @@ def _normalize_text(value: Any, *, limit: int | None = None) -> str:
     if limit is not None and len(text) > limit:
         return text[: limit - 3].rstrip() + "..."
     return text
+
+
+_GREETING_MESSAGES = {
+    "\u4f60\u597d",
+    "\u60a8\u597d",
+    "\u5728\u5417",
+    "\u5728\u4e0d\u5728",
+    "\u6709\u4eba\u5417",
+    "\u65e9\u4e0a\u597d",
+    "\u4e2d\u5348\u597d",
+    "\u4e0b\u5348\u597d",
+    "\u665a\u4e0a\u597d",
+    "hello",
+    "hi",
+    "hey",
+}
+_GREETING_STRIP_PATTERN = re.compile(r"[\s\.,!?;:~\uFF0C\u3002\uFF01\uFF1F\uFF1B\uFF1A\u3001]+")
+
+
+def _looks_like_greeting_message(message: str) -> bool:
+    compact = _GREETING_STRIP_PATTERN.sub("", str(message or "").strip().lower())
+    return compact in _GREETING_MESSAGES
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -496,6 +519,7 @@ def _normalize_llm_result(
 
     out_of_scope_reason = detect_out_of_scope_reason(message)
     explicit_law_question = _looks_like_explicit_law_question(message)
+    greeting_message = _looks_like_greeting_message(message)
 
     intent = _normalize_text(parsed.get("intent")).lower() or "unknown"
     if intent not in _SUPPORTED_INTENTS:
@@ -515,6 +539,24 @@ def _normalize_llm_result(
             "needs_graph_update": False,
             "legal_question": None,
             "reason": f"Deterministic out-of-scope guard: {out_of_scope_reason}.",
+        }
+    elif greeting_message:
+        trace["warnings"].append("override_greeting_chitchat")
+        intent = "unknown"
+        parsed = {
+            **parsed,
+            "intent": "unknown",
+            "route_hint": "GREETING",
+            "needs_legal_rag": False,
+            "needs_dossier_graph_context": False,
+            "needs_structured_persistence": False,
+            "needs_graph_update": False,
+            "subject_reference": None,
+            "fact_update": None,
+            "previous_fact_confirmation": None,
+            "advice_question": None,
+            "legal_question": None,
+            "reason": "Deterministic greeting/chitchat override.",
         }
     elif explicit_law_question and intent != "legal_question":
         trace["warnings"].append("override_explicit_law_article_question")
@@ -664,7 +706,19 @@ def _build_fallback_result(
     result["trace"] = trace
 
     out_of_scope_reason = detect_out_of_scope_reason(message)
-    if out_of_scope_reason:
+    if _looks_like_greeting_message(message):
+        result.update(
+            intent="unknown",
+            route_hint="GREETING",
+            needs_legal_rag=False,
+            needs_dossier_graph_context=False,
+            needs_structured_persistence=False,
+            needs_graph_update=False,
+            confidence="high",
+            reason="Fallback detected deterministic greeting/chitchat.",
+        )
+        trace["warnings"].append("override_greeting_chitchat")
+    elif out_of_scope_reason:
         result.update(
             intent="unknown",
             route_hint="OUT_OF_SCOPE",

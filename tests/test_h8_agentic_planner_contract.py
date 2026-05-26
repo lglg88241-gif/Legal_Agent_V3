@@ -99,6 +99,84 @@ def test_fact_update_plan_requests_structured_persistence() -> None:
     assert plan["final_response_strategy"] == "acknowledgement"
 
 
+def test_legal_qa_mode_blocks_case_update_plan_from_misclassified_greeting() -> None:
+    request_context = build_agentic_request_context(
+        request_id="req-greeting",
+        user_id=7,
+        conversation_id=11,
+        dossier_id=21,
+        message_text="\u4f60\u597d",
+        recent_messages=[],
+        conversation_mode="LEGAL_QA",
+        persistence_consent="tracked",
+    )
+    plan = build_agentic_plan(
+        question=request_context.message_text,
+        message_understanding={
+            "intent": "fact_update",
+            "route_hint": "CASE_UPDATE",
+            "needs_legal_rag": False,
+            "needs_dossier_graph_context": False,
+            "needs_structured_persistence": True,
+            "needs_graph_update": True,
+        },
+        execution_plan={
+            "primary_route": "CASE_UPDATE",
+            "response_mode": "tracked_case_refresh",
+        },
+        conversation_id=11,
+        dossier_id=21,
+        persistence_consent="tracked",
+        conversation_mode="LEGAL_QA",
+        request_context=request_context,
+    )
+
+    assert plan["route"] == "GENERAL_CONSULT"
+    assert plan["specialist"] == "legacy_fallback"
+    assert plan["writes_requested"] == []
+    assert plan["needs_structured_persistence"] is False
+    assert plan["final_response_strategy"] == "read_only_mode_isolation"
+
+
+def test_greeting_plan_is_read_only() -> None:
+    request_context = build_agentic_request_context(
+        request_id="req-greeting-direct",
+        user_id=7,
+        conversation_id=11,
+        dossier_id=21,
+        message_text="\u4f60\u597d",
+        recent_messages=[],
+        conversation_mode="LEGAL_QA",
+        persistence_consent="tracked",
+    )
+    plan = build_agentic_plan(
+        question=request_context.message_text,
+        message_understanding={
+            "intent": "unknown",
+            "route_hint": "GREETING",
+            "needs_legal_rag": False,
+            "needs_dossier_graph_context": False,
+            "needs_structured_persistence": False,
+            "needs_graph_update": False,
+        },
+        execution_plan={
+            "primary_route": "GREETING",
+            "response_mode": "greeting",
+        },
+        conversation_id=11,
+        dossier_id=21,
+        persistence_consent="tracked",
+        conversation_mode="LEGAL_QA",
+        request_context=request_context,
+    )
+
+    assert plan["route"] == "GREETING"
+    assert plan["specialist"] == "greeting_agent"
+    assert plan["writes_requested"] == []
+    assert plan["tool_calls"] == []
+    assert plan["needs_structured_persistence"] is False
+
+
 def test_confirm_previous_fact_plan_uses_previous_fact_text() -> None:
     request_context = build_agentic_request_context(
         request_id="req-confirm",

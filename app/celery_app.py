@@ -52,6 +52,7 @@ from app.services.legal_agent import legal_agent
 from app.services.message_orchestrator import build_execution_plan_from_message_understanding
 from app.services.message_understanding_agent import understand_message_with_agent
 from app.services.dossier_state_snapshot import build_single_conversation_dossier_state_snapshot
+from app.agent.nodes._llm import GREETING_RESPONSE
 
 logger = logging.getLogger(__name__)
 
@@ -1853,6 +1854,10 @@ def ask_agent_task(
             agentic_specialist == "out_of_scope_agent"
             and agentic_route == "OUT_OF_SCOPE"
         )
+        greeting_plan_active = (
+            agentic_specialist == "greeting_agent"
+            and agentic_route == "GREETING"
+        )
         confirm_previous_fact_active = (
             case_update_plan_active
             and agentic_intent == "confirm_previous_fact"
@@ -2075,7 +2080,21 @@ def ask_agent_task(
                     user_id,
                 )
 
-            if case_update_transient_analysis_active:
+            if greeting_plan_active:
+                execution_trace.mark_legacy_fallback(used=False, reason=None)
+                answer = {
+                    "response": GREETING_RESPONSE,
+                    "sources": [],
+                    "route_intent": "GREETING",
+                    "case_summary": context.get("case_summary") or "",
+                    "is_final": True,
+                    "confidence_score": 1.0,
+                    "missing_info": [],
+                }
+                final_basis_summary = "Greeting handled directly without retrieval, case persistence, or graph updates."
+                final_basis_evidence = ["specialist=greeting_agent"]
+                final_basis_source = "greeting_agent"
+            elif case_update_transient_analysis_active:
                 execution_trace.mark_legacy_fallback(used=False, reason=None)
                 with execution_trace.step_context(
                     name="legal_agent_answer",
@@ -2581,7 +2600,7 @@ def ask_agent_task(
                 {"tool": "legal_advisor", "result_summary": "Final legal response generated"},
             ]
         if (
-            route_intent not in {"DOSSIER_MEMORY"}
+            route_intent not in {"DOSSIER_MEMORY", "GREETING"}
             and not case_update_plan_active
             and not legal_answer_plan_active
             and not out_of_scope_plan_active
