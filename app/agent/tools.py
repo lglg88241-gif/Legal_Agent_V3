@@ -17,7 +17,7 @@ from neo4j import GraphDatabase
 from app.core.bm25_retriever import BM25Retriever
 from app.core.config import settings
 from app.core import llm_factory as _llm_factory
-from app.core.llm_factory import create_cloud_llm
+from app.core.llm_factory import create_cloud_fallback_llm
 from app.core.llm_provider import LLMProvider, get_llm_router
 from app.core.reranker import BGEReranker
 from app.database.chroma_utils import resolve_persist_dir
@@ -705,9 +705,11 @@ def _get_query_expansion_fallback_llm() -> Any:
     if _query_expansion_fallback_llm is None:
         with _query_expansion_fallback_llm_lock:
             if _query_expansion_fallback_llm is None:
-                _query_expansion_fallback_llm = create_cloud_llm(
+                _query_expansion_fallback_llm = create_cloud_fallback_llm(
+                    primary_model="gpt-5.1",
                     temperature=0.3,
                     max_tokens=512,
+                    validator=_llm_factory.is_valid_expansion,
                 )
     return _query_expansion_fallback_llm
 

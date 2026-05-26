@@ -165,14 +165,35 @@ async def call_openai(
     temperature: float = 0.3,
 ) -> str:
     llm_router = self._get_llm_router()
-    logger.info(
-        "LLM dispatch | provider=openai model=%s base_url=%s",
-        model,
-        llm_router.openai_base_url,
-    )
-    client = AsyncOpenAI(
+    return await self._call_openai_compatible(
+        provider_name="openai",
+        model=model,
+        messages=messages,
         api_key=llm_router.openai_api_key,
         base_url=llm_router.openai_base_url,
+        temperature=temperature,
+    )
+
+
+async def call_openai_compatible(
+    self,
+    *,
+    provider_name: str,
+    model: str,
+    messages: list[dict[str, str]],
+    api_key: str,
+    base_url: str,
+    temperature: float = 0.3,
+) -> str:
+    logger.info(
+        "LLM dispatch | provider=%s model=%s base_url=%s",
+        provider_name,
+        model,
+        base_url,
+    )
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=base_url,
         timeout=60.0,
     )
     try:
@@ -188,6 +209,108 @@ async def call_openai(
         await client.close()
 
 
+def _cloud_model_targets_for_model(self, primary_model: str) -> list[dict[str, str]]:
+    llm_router = self._get_llm_router()
+    high_quality = primary_model == "gpt-5.4"
+    targets: list[dict[str, str]] = []
+    openai_api_key = str(getattr(llm_router, "openai_api_key", "") or "")
+    openai_base_url = str(getattr(llm_router, "openai_base_url", "") or "")
+    alt_gpt_api_key = str(getattr(llm_router, "alt_gpt_api_key", "") or "")
+    alt_gpt_base_url = str(getattr(llm_router, "alt_gpt_base_url", "") or "")
+    deepseek_api_key = str(getattr(llm_router, "deepseek_api_key", "") or "")
+    deepseek_base_url = str(getattr(llm_router, "deepseek_base_url", "") or "")
+
+    if alt_gpt_api_key and alt_gpt_base_url:
+        targets.append(
+            {
+                "provider": "alt-gpt",
+                "model": (
+                    str(getattr(llm_router, "alt_gpt_5_5_model", "") or "gpt-5.5")
+                    if high_quality
+                    else str(getattr(llm_router, "alt_gpt_5_2_model", "") or "gpt-5.2")
+                ),
+                "api_key": alt_gpt_api_key,
+                "base_url": alt_gpt_base_url,
+            }
+        )
+
+    if openai_api_key and openai_base_url:
+        targets.append(
+            {
+                "provider": "openai",
+                "model": primary_model,
+                "api_key": openai_api_key,
+                "base_url": openai_base_url,
+            }
+        )
+
+    if deepseek_api_key and deepseek_base_url:
+        targets.append(
+            {
+                "provider": "deepseek",
+                "model": (
+                    str(getattr(llm_router, "deepseek_v4_pro_model", "") or "deepseek-v4-pro")
+                    if high_quality
+                    else str(getattr(llm_router, "deepseek_v4_flash_model", "") or "deepseek-v4-flash")
+                ),
+                "api_key": deepseek_api_key,
+                "base_url": deepseek_base_url,
+            }
+        )
+
+    return targets
+
+
+def _cloud_fallback_targets_for_model(self, primary_model: str) -> list[dict[str, str]]:
+    return [
+        target
+        for target in self._cloud_model_targets_for_model(primary_model)
+        if target.get("provider") != "openai"
+    ]
+
+
+async def call_cloud_model_chain(
+    self,
+    *,
+    primary_model: str,
+    messages: list[dict[str, str]],
+    llm=None,
+) -> str:
+    for target in self._cloud_model_targets_for_model(primary_model):
+        try:
+            return await self._call_openai_compatible(
+                provider_name=target["provider"],
+                model=target["model"],
+                messages=messages,
+                api_key=target["api_key"],
+                base_url=target["base_url"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Fallback provider failed | provider=%s model=%s error=%s",
+                target["provider"],
+                target["model"],
+                exc,
+            )
+
+    logger.warning("Cloud model chain exhausted before ZHIPU, fallback to ZHIPU")
+    return await self._call_zhipu(messages, llm=llm)
+
+
+async def call_cloud_fallback_chain(
+    self,
+    *,
+    primary_model: str,
+    messages: list[dict[str, str]],
+    llm=None,
+) -> str:
+    return await self._call_cloud_model_chain(
+        primary_model=primary_model,
+        messages=messages,
+        llm=llm,
+    )
+
+
 async def chat_model(
     self,
     llm,
@@ -195,30 +318,30 @@ async def chat_model(
     provider: LLMProvider = LLMProvider.ZHIPU,
 ) -> str:
     """Send messages to the configured provider and return the text response."""
-    if provider in {LLMProvider.GPT_5_4, LLMProvider.GPT_5_1} and not self._get_llm_router().openai_api_key:
-        logger.warning("OPENAI_API_KEY not set, fallback to ZHIPU")
-        return await self._call_zhipu(messages, llm=llm)
-
     if provider == LLMProvider.GPT_5_4:
-        try:
-            return await self._call_openai("gpt-5.4", messages)
-        except Exception as exc:
-            logger.warning("OpenAI API failed (%s), fallback to ZHIPU: %s", "gpt-5.4", exc)
-            return await self._call_zhipu(messages, llm=llm)
+        return await self._call_cloud_model_chain(
+            primary_model="gpt-5.4",
+            messages=messages,
+            llm=llm,
+        )
 
     if provider == LLMProvider.GPT_5_1:
-        try:
-            return await self._call_openai("gpt-5.1", messages)
-        except Exception as exc:
-            logger.warning("OpenAI API failed (%s), fallback to ZHIPU: %s", "gpt-5.1", exc)
-            return await self._call_zhipu(messages, llm=llm)
+        return await self._call_cloud_model_chain(
+            primary_model="gpt-5.1",
+            messages=messages,
+            llm=llm,
+        )
 
     if provider == LLMProvider.LOCAL_VLLM:
         try:
             return await self._call_local_vllm(messages)
         except Exception as exc:
-            logger.warning("Local vLLM failed, fallback to ZHIPU: %s", exc)
-            return await self._call_zhipu(messages, llm=llm)
+            logger.warning("Local vLLM failed, use cloud fallback chain before ZHIPU: %s", exc)
+            return await self._call_cloud_model_chain(
+                primary_model="gpt-5.1",
+                messages=messages,
+                llm=llm,
+            )
 
     return await self._call_zhipu(messages, llm=llm)
 

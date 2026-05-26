@@ -108,3 +108,116 @@ class TestChatModelWithFallback:
         agent._chat_model = mock_chat
         result = asyncio.run(agent._chat_model_with_fallback(primary, fallback, []))
         assert result == "FALLBACK_RESULT"
+
+    def test_gpt_scene_uses_alt_gpt_before_original_openai(self) -> None:
+        from app.core.llm_provider import LLMProvider
+        from app.services.legal_agent import LegalGraphAgent
+
+        class FakeRouter:
+            openai_api_key = "sk-openai"
+            openai_base_url = "https://api.openai.test/v1"
+            alt_gpt_api_key = "sk-alt"
+            alt_gpt_base_url = "https://alt-gpt.test/v1"
+            alt_gpt_5_2_model = "gpt-5.2"
+            alt_gpt_5_5_model = "gpt-5.5"
+            deepseek_api_key = "sk-deepseek"
+            deepseek_base_url = "https://deepseek.test/v1"
+            deepseek_v4_flash_model = "deepseek-v4-flash"
+            deepseek_v4_pro_model = "deepseek-v4-pro"
+
+        agent = LegalGraphAgent.__new__(LegalGraphAgent)
+        calls: list[tuple[str, str]] = []
+
+        async def fake_call_openai_compatible(**kwargs):
+            calls.append((kwargs["provider_name"], kwargs["model"]))
+            return "ALT_OK"
+
+        async def fake_call_zhipu(messages, llm=None):
+            raise AssertionError("Zhipu should not be called before alt GPT")
+
+        agent._get_llm_router = lambda: FakeRouter()
+        agent._call_openai_compatible = fake_call_openai_compatible
+        agent._call_zhipu = fake_call_zhipu
+
+        result = asyncio.run(agent._chat_model(None, [], provider=LLMProvider.GPT_5_4))
+
+        assert result == "ALT_OK"
+        assert calls == [("alt-gpt", "gpt-5.5")]
+
+    def test_cloud_chain_uses_original_openai_after_alt_gpt_failure(self) -> None:
+        from app.core.llm_provider import LLMProvider
+        from app.services.legal_agent import LegalGraphAgent
+
+        class FakeRouter:
+            openai_api_key = "sk-openai"
+            openai_base_url = "https://api.openai.test/v1"
+            alt_gpt_api_key = "sk-alt"
+            alt_gpt_base_url = "https://alt-gpt.test/v1"
+            alt_gpt_5_2_model = "gpt-5.2"
+            alt_gpt_5_5_model = "gpt-5.5"
+            deepseek_api_key = "sk-deepseek"
+            deepseek_base_url = "https://deepseek.test/v1"
+            deepseek_v4_flash_model = "deepseek-v4-flash"
+            deepseek_v4_pro_model = "deepseek-v4-pro"
+
+        agent = LegalGraphAgent.__new__(LegalGraphAgent)
+        calls: list[tuple[str, str]] = []
+
+        async def fake_call_openai_compatible(**kwargs):
+            calls.append((kwargs["provider_name"], kwargs["model"]))
+            if kwargs["provider_name"] == "alt-gpt":
+                raise ConnectionError("alt down")
+            return "OPENAI_OK"
+
+        async def fake_call_zhipu(messages, llm=None):
+            raise AssertionError("Zhipu should not be called before original OpenAI")
+
+        agent._get_llm_router = lambda: FakeRouter()
+        agent._call_openai_compatible = fake_call_openai_compatible
+        agent._call_zhipu = fake_call_zhipu
+
+        result = asyncio.run(agent._chat_model(None, [], provider=LLMProvider.GPT_5_1))
+
+        assert result == "OPENAI_OK"
+        assert calls == [("alt-gpt", "gpt-5.2"), ("openai", "gpt-5.1")]
+
+    def test_cloud_chain_uses_deepseek_after_alt_and_openai_failure(self) -> None:
+        from app.core.llm_provider import LLMProvider
+        from app.services.legal_agent import LegalGraphAgent
+
+        class FakeRouter:
+            openai_api_key = "sk-openai"
+            openai_base_url = "https://api.openai.test/v1"
+            alt_gpt_api_key = "sk-alt"
+            alt_gpt_base_url = "https://alt-gpt.test/v1"
+            alt_gpt_5_2_model = "gpt-5.2"
+            alt_gpt_5_5_model = "gpt-5.5"
+            deepseek_api_key = "sk-deepseek"
+            deepseek_base_url = "https://deepseek.test/v1"
+            deepseek_v4_flash_model = "deepseek-v4-flash"
+            deepseek_v4_pro_model = "deepseek-v4-pro"
+
+        agent = LegalGraphAgent.__new__(LegalGraphAgent)
+        calls: list[tuple[str, str]] = []
+
+        async def fake_call_openai_compatible(**kwargs):
+            calls.append((kwargs["provider_name"], kwargs["model"]))
+            if kwargs["provider_name"] in {"alt-gpt", "openai"}:
+                raise ConnectionError(f"{kwargs['provider_name']} down")
+            return "DEEPSEEK_OK"
+
+        async def fake_call_zhipu(messages, llm=None):
+            raise AssertionError("Zhipu should not be called before DeepSeek")
+
+        agent._get_llm_router = lambda: FakeRouter()
+        agent._call_openai_compatible = fake_call_openai_compatible
+        agent._call_zhipu = fake_call_zhipu
+
+        result = asyncio.run(agent._chat_model(None, [], provider=LLMProvider.GPT_5_1))
+
+        assert result == "DEEPSEEK_OK"
+        assert calls == [
+            ("alt-gpt", "gpt-5.2"),
+            ("openai", "gpt-5.1"),
+            ("deepseek", "deepseek-v4-flash"),
+        ]

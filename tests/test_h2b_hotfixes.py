@@ -266,8 +266,8 @@ def test_sync_check_primary_llm_config_does_not_require_local_vllm(
             mapping = {
                 "advisor": llm_provider_module.LLMProvider.GPT_5_4,
                 "fact_updater": llm_provider_module.LLMProvider.GPT_5_1,
-                "router": llm_provider_module.LLMProvider.ZHIPU,
-                "query_expansion": llm_provider_module.LLMProvider.ZHIPU,
+                "router": llm_provider_module.LLMProvider.GPT_5_1,
+                "query_expansion": llm_provider_module.LLMProvider.GPT_5_1,
             }
             return mapping[scene]
 

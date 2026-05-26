@@ -696,31 +696,85 @@ async def _call_reference_guard_model(payload: dict[str, Any]) -> dict[str, str]
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False, indent=2)},
     ]
     router = get_llm_router()
-    if router.openai_api_key:
+
+    async def call_openai_compatible(
+        *,
+        provider: str,
+        model: str,
+        api_key: str,
+        base_url: str,
+    ) -> dict[str, str]:
         client = AsyncOpenAI(
-            api_key=router.openai_api_key,
-            base_url=router.openai_base_url,
+            api_key=api_key,
+            base_url=base_url,
             timeout=60.0,
         )
         try:
             response = await client.chat.completions.create(
-                model=MODEL_NAME,
+                model=model,
                 messages=messages,
                 temperature=0.0,
                 max_tokens=1600,
             )
             content = response.choices[0].message.content if response.choices else ""
             return {
-                "provider": "openai",
-                "model": MODEL_NAME,
+                "provider": provider,
+                "model": model,
                 "content": content if isinstance(content, str) else str(content or ""),
             }
-        except Exception as exc:
-            logger.warning("OpenAI reference guard failed, fallback to Zhipu %s: %s", FALLBACK_MODEL_NAME, exc)
         finally:
             await client.close()
-    else:
-        logger.warning("OPENAI_API_KEY not set, fallback to Zhipu for reference guard")
+
+    provider_targets: list[dict[str, str]] = []
+    openai_api_key = str(getattr(router, "openai_api_key", "") or "")
+    openai_base_url = str(getattr(router, "openai_base_url", "") or "")
+    alt_gpt_api_key = str(getattr(router, "alt_gpt_api_key", "") or "")
+    alt_gpt_base_url = str(getattr(router, "alt_gpt_base_url", "") or "")
+    deepseek_api_key = str(getattr(router, "deepseek_api_key", "") or "")
+    deepseek_base_url = str(getattr(router, "deepseek_base_url", "") or "")
+    if alt_gpt_api_key and alt_gpt_base_url:
+        provider_targets.append(
+            {
+                "provider": "alt-gpt",
+                "model": str(getattr(router, "alt_gpt_5_2_model", "") or "gpt-5.2"),
+                "api_key": alt_gpt_api_key,
+                "base_url": alt_gpt_base_url,
+            }
+        )
+    if openai_api_key and openai_base_url:
+        provider_targets.append(
+            {
+                "provider": "openai",
+                "model": MODEL_NAME,
+                "api_key": openai_api_key,
+                "base_url": openai_base_url,
+            }
+        )
+    if deepseek_api_key and deepseek_base_url:
+        provider_targets.append(
+            {
+                "provider": "deepseek",
+                "model": str(getattr(router, "deepseek_v4_flash_model", "") or "deepseek-v4-flash"),
+                "api_key": deepseek_api_key,
+                "base_url": deepseek_base_url,
+            }
+        )
+
+    for target in provider_targets:
+        try:
+            return await call_openai_compatible(
+                provider=target["provider"],
+                model=target["model"],
+                api_key=target["api_key"],
+                base_url=target["base_url"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Reference guard provider failed | provider=%s model=%s error=%s",
+                target["provider"],
+                target["model"],
+                exc,
+            )
 
     llm = create_cloud_llm(model=FALLBACK_MODEL_NAME, temperature=0.0, max_tokens=1600)
     response = await llm.ainvoke(messages)

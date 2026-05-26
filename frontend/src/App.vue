@@ -4206,11 +4206,19 @@ function startGraphRefreshPolling(conversationId, previousSignature = '', query 
   }, 5000)
 
   graphRefreshStopTimer.value = setTimeout(() => {
-    stopGraphRefreshPolling({
-      status: 'warning',
-      summary: '图谱后台任务耗时较长，仍可能继续写入；请稍后切换会话或刷新侧栏查看',
-    })
-  }, 90000)
+    void (async () => {
+      const handledClarification = await promptGraphClarificationIfNeeded(
+        conversationId,
+        clarificationOptions
+      )
+      if (handledClarification) return
+      await fetchConversationGraph(conversationId, query, { preserveData: true, silent: true })
+      stopGraphRefreshPolling({
+        status: 'warning',
+        summary: '图谱后台任务耗时较长，仍可能继续写入；请稍后切换会话或刷新侧栏查看',
+      })
+    })()
+  }, 180000)
 }
 
 function updatePendingMessage(tempId, patch = {}) {

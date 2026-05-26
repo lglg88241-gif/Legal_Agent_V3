@@ -85,7 +85,10 @@ def sync_warmup_celery() -> None:
 
 def _provider_has_config(provider: LLMProvider, llm_router) -> bool:
     if provider in {LLMProvider.GPT_5_4, LLMProvider.GPT_5_1}:
-        return bool(llm_router.openai_api_key)
+        if llm_router.openai_api_key:
+            return True
+        fallback_check = getattr(llm_router, "has_openai_fallback_config", None)
+        return bool(fallback_check()) if callable(fallback_check) else False
     if provider == LLMProvider.ZHIPU:
         return bool(llm_router.zhipu_api_key)
     if provider == LLMProvider.LOCAL_VLLM:

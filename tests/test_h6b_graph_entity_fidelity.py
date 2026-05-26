@@ -777,7 +777,7 @@ def test_graph_write_guard_requires_confirmation_before_using_dossier_self_ancho
         )
     )
 
-    assert calls[0]["self_anchor_target"] == ""
+    assert calls == []
     assert result["needs_clarification"] is True
     assert result["decision"] == "clarify"
     assert result["allowed_actions"] == []
@@ -788,6 +788,179 @@ def test_graph_write_guard_requires_confirmation_before_using_dossier_self_ancho
     assert result["clarification_mode"] == "cross_conversation_self_anchor"
     assert result["suggested_entity_name"] == "张三"
     assert result["source_conversation_ids"] == [927]
+
+
+def test_graph_write_guard_requires_confirmation_when_user_self_reference_not_in_actions() -> None:
+    graph_extractor = load_graph_extractor_module()
+    calls: list[dict] = []
+
+    async def fake_model(payload):
+        calls.append(payload)
+        return {
+            "provider": "fake",
+            "model": "semantic-write-guard-test",
+            "content": json.dumps(
+                {
+                    "decision": "allow",
+                    "confidence": "high",
+                    "reason": "model would otherwise allow clear company/person actions",
+                    "reviewed_actions": payload["proposed_actions"],
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+    result = asyncio.run(
+        graph_extractor.evaluate_graph_write_guard_async(
+            user_input=(
+                "\u84dd\u6d77\u79d1\u6280\u7684\u8001\u677f\u53eb\u674e\u56db\uff0c"
+                "\u4ed6\u4e00\u76f4\u5728\u5fae\u4fe1\u4e0a\u8ddf\u6211\u8bf4"
+                "\u7b49\u878d\u8d44\u5230\u8d26\u5c31\u628a\u5de5\u8d44\u53d1\u7ed9\u6211\u3002"
+            ),
+            actions=[
+                {
+                    "action": "ADD",
+                    "source": "\u84dd\u6d77\u79d1\u6280",
+                    "source_category": "\u4e3b\u4f53",
+                    "relation": "\u8d1f\u8d23\u4eba",
+                    "target": "\u674e\u56db",
+                    "target_category": "\u4e3b\u4f53",
+                    "old_target": "",
+                },
+                {
+                    "action": "ADD",
+                    "source": "\u674e\u56db",
+                    "source_category": "\u4e3b\u4f53",
+                    "relation": "\u627f\u8bfa",
+                    "target": "\u878d\u8d44\u5230\u8d26\u540e\u53d1\u5de5\u8d44",
+                    "target_category": "\u4e8b\u4ef6",
+                    "old_target": "",
+                },
+            ],
+            existing_node_records=[],
+            conversation_context={
+                "dossier_context": {
+                    "dossier_id": 88,
+                    "confirmed_participants": [
+                        {
+                            "label": "\u5f20\u4e09",
+                            "role": "\u52b3\u52a8\u8005",
+                            "party_side": "claimant",
+                            "entity_type": "person",
+                            "confirmed_by_user": True,
+                        }
+                    ],
+                    "participant_mentions": [
+                        {
+                            "participant_label": "\u5f20\u4e09",
+                            "conversation_id": 927,
+                            "raw_label": "\u5f20\u4e09",
+                        }
+                    ],
+                },
+            },
+            model_caller=fake_model,
+        )
+    )
+
+    assert calls == []
+    assert result["needs_clarification"] is True
+    assert result["decision"] == "clarify"
+    assert result["allowed_actions"] == []
+    assert result["blocked_actions"][0]["source"] == "\u84dd\u6d77\u79d1\u6280"
+    assert result["clarification_mode"] == "cross_conversation_self_anchor"
+    assert result["suggested_entity_name"] == "\u5f20\u4e09"
+    assert result["source_conversation_ids"] == [927]
+
+
+def test_graph_write_guard_requires_confirmation_for_unanchored_third_person_reference() -> None:
+    graph_extractor = load_graph_extractor_module()
+    calls: list[dict] = []
+
+    async def fake_model(payload):
+        calls.append(payload)
+        return {
+            "provider": "fake",
+            "model": "semantic-write-guard-test",
+            "content": json.dumps({"decision": "allow", "reviewed_actions": payload["proposed_actions"]}),
+        }
+
+    result = asyncio.run(
+        graph_extractor.evaluate_graph_write_guard_async(
+            user_input="\u4ed6\u8ba9\u6211\u7b7e\u786e\u8ba4\u4e66\u3002",
+            actions=[
+                {
+                    "action": "ADD",
+                    "source": "\u786e\u8ba4\u4e66",
+                    "source_category": "\u5ba2\u4f53",
+                    "relation": "\u6d89\u53ca",
+                    "target": "\u7b7e\u7f72",
+                    "target_category": "\u4e8b\u4ef6",
+                    "old_target": "",
+                }
+            ],
+            existing_node_records=[
+                {"name": "\u738b\u7ecf\u7406", "category": "\u4e3b\u4f53"},
+                {"name": "\u674e\u56db", "category": "\u4e3b\u4f53"},
+            ],
+            conversation_context={},
+            model_caller=fake_model,
+        )
+    )
+
+    assert calls == []
+    assert result["needs_clarification"] is True
+    assert result["clarification_mode"] == "cross_conversation_subject_reference"
+    assert result["target_mention"] == "\u4ed6"
+    assert "\u738b\u7ecf\u7406" in result["clarification_questions"][0]
+    assert "\u674e\u56db" in result["clarification_questions"][0]
+
+
+def test_graph_write_guard_does_not_clarify_third_person_with_same_sentence_anchor() -> None:
+    graph_extractor = load_graph_extractor_module()
+    calls: list[dict] = []
+
+    async def fake_model(payload):
+        calls.append(payload)
+        return {
+            "provider": "fake",
+            "model": "semantic-write-guard-test",
+            "content": json.dumps(
+                {
+                    "decision": "allow",
+                    "confidence": "high",
+                    "reason": "same sentence anchor",
+                    "reviewed_actions": payload["proposed_actions"],
+                },
+                ensure_ascii=False,
+            ),
+        }
+
+    result = asyncio.run(
+        graph_extractor.evaluate_graph_write_guard_async(
+            user_input="\u84dd\u6d77\u79d1\u6280\u7684\u8001\u677f\u53eb\u674e\u56db\uff0c\u4ed6\u8ba9\u6211\u7b7e\u786e\u8ba4\u4e66\u3002",
+            actions=[
+                {
+                    "action": "ADD",
+                    "source": "\u674e\u56db",
+                    "source_category": "\u4e3b\u4f53",
+                    "relation": "\u8981\u6c42\u7b7e\u7f72",
+                    "target": "\u786e\u8ba4\u4e66",
+                    "target_category": "\u5ba2\u4f53",
+                    "old_target": "",
+                }
+            ],
+            existing_node_records=[
+                {"name": "\u738b\u7ecf\u7406", "category": "\u4e3b\u4f53"},
+                {"name": "\u674e\u56db", "category": "\u4e3b\u4f53"},
+            ],
+            conversation_context={},
+            model_caller=fake_model,
+        )
+    )
+
+    assert calls
+    assert result["needs_clarification"] is False
 
 
 def test_graph_write_guard_uses_recent_messages_to_resolve_company_anchor() -> None:

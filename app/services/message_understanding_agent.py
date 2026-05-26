@@ -835,12 +835,13 @@ def _build_prompt_messages(
 def _resolve_provider_name(provider_hint: str | None) -> str | None:
     router = get_llm_router()
     hint = _normalize_text(provider_hint).lower()
+    has_cloud_chain = bool(
+        getattr(router, "has_openai_fallback_config", lambda: False)()
+    )
 
     if hint == "openai":
-        if router.openai_api_key:
+        if router.openai_api_key or has_cloud_chain:
             return "openai"
-        if router.zhipu_api_key:
-            return "zhipu"
         return None
 
     if hint == "zhipu":
@@ -850,35 +851,50 @@ def _resolve_provider_name(provider_hint: str | None) -> str | None:
             return "openai"
         return None
 
-    if router.openai_api_key:
+    if router.openai_api_key or has_cloud_chain:
         return "openai"
-    if router.zhipu_api_key:
-        return "zhipu"
     return None
 
 
-async def _call_openai_json_model(messages: list[dict[str, str]]) -> dict[str, str]:
-    router = get_llm_router()
+async def _call_openai_compatible_json_model(
+    *,
+    messages: list[dict[str, str]],
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+) -> dict[str, str]:
     client = AsyncOpenAI(
-        api_key=router.openai_api_key,
-        base_url=router.openai_base_url,
+        api_key=api_key,
+        base_url=base_url,
         timeout=60.0,
     )
     try:
         response = await client.chat.completions.create(
-            model=_OPENAI_MODEL,
+            model=model,
             messages=messages,
             temperature=0.1,
             max_tokens=1400,
         )
         content = response.choices[0].message.content if response.choices else ""
         return {
-            "provider": "openai",
-            "model": _OPENAI_MODEL,
+            "provider": provider,
+            "model": model,
             "content": content if isinstance(content, str) else str(content or ""),
         }
     finally:
         await client.close()
+
+
+async def _call_openai_json_model(messages: list[dict[str, str]]) -> dict[str, str]:
+    router = get_llm_router()
+    return await _call_openai_compatible_json_model(
+        messages=messages,
+        provider="openai",
+        model=_OPENAI_MODEL,
+        api_key=router.openai_api_key,
+        base_url=router.openai_base_url,
+    )
 
 
 async def _call_zhipu_json_model(messages: list[dict[str, str]]) -> dict[str, str]:
@@ -892,6 +908,53 @@ async def _call_zhipu_json_model(messages: list[dict[str, str]]) -> dict[str, st
     }
 
 
+def _provider_targets() -> list[dict[str, str]]:
+    router = get_llm_router()
+    targets: list[dict[str, str]] = []
+    openai_api_key = str(getattr(router, "openai_api_key", "") or "")
+    openai_base_url = str(getattr(router, "openai_base_url", "") or "")
+    alt_gpt_api_key = str(getattr(router, "alt_gpt_api_key", "") or "")
+    alt_gpt_base_url = str(getattr(router, "alt_gpt_base_url", "") or "")
+    deepseek_api_key = str(getattr(router, "deepseek_api_key", "") or "")
+    deepseek_base_url = str(getattr(router, "deepseek_base_url", "") or "")
+    if alt_gpt_api_key and alt_gpt_base_url:
+        targets.append(
+            {
+                "provider": "alt-gpt",
+                "model": str(getattr(router, "alt_gpt_5_2_model", "") or "gpt-5.2"),
+                "api_key": alt_gpt_api_key,
+                "base_url": alt_gpt_base_url,
+            }
+        )
+    if openai_api_key and openai_base_url:
+        targets.append(
+            {
+                "provider": "openai",
+                "model": _OPENAI_MODEL,
+                "api_key": openai_api_key,
+                "base_url": openai_base_url,
+            }
+        )
+    if deepseek_api_key and deepseek_base_url:
+        targets.append(
+            {
+                "provider": "deepseek",
+                "model": str(getattr(router, "deepseek_v4_flash_model", "") or "deepseek-v4-flash"),
+                "api_key": deepseek_api_key,
+                "base_url": deepseek_base_url,
+            }
+        )
+    return targets
+
+
+def _fallback_provider_targets() -> list[dict[str, str]]:
+    return [
+        target
+        for target in _provider_targets()
+        if target.get("provider") != "openai"
+    ]
+
+
 async def _call_message_understanding_llm(
     *,
     messages: list[dict[str, str]],
@@ -899,8 +962,44 @@ async def _call_message_understanding_llm(
 ) -> dict[str, str]:
     provider = _resolve_provider_name(provider_hint)
     if provider == "openai":
-        return await _call_openai_json_model(messages)
+        for target in _provider_targets():
+            try:
+                return await _call_openai_compatible_json_model(
+                    messages=messages,
+                    provider=target["provider"],
+                    model=target["model"],
+                    api_key=target["api_key"],
+                    base_url=target["base_url"],
+                )
+            except Exception as fallback_exc:
+                logger.warning(
+                    "Message understanding provider failed | provider=%s model=%s error=%s",
+                    target["provider"],
+                    target["model"],
+                    fallback_exc,
+                )
+        if get_llm_router().zhipu_api_key:
+            return await _call_zhipu_json_model(messages)
+        raise RuntimeError("No LLM provider configured for message understanding.")
     if provider == "zhipu":
+        return await _call_zhipu_json_model(messages)
+    for target in _provider_targets():
+        try:
+            return await _call_openai_compatible_json_model(
+                messages=messages,
+                provider=target["provider"],
+                model=target["model"],
+                api_key=target["api_key"],
+                base_url=target["base_url"],
+            )
+        except Exception as fallback_exc:
+            logger.warning(
+                "Message understanding fallback provider failed | provider=%s model=%s error=%s",
+                target["provider"],
+                target["model"],
+                fallback_exc,
+            )
+    if get_llm_router().zhipu_api_key:
         return await _call_zhipu_json_model(messages)
     raise RuntimeError("No LLM provider configured for message understanding.")
 

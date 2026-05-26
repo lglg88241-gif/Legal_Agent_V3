@@ -430,28 +430,47 @@ def _get_graph_llm() -> ChatZhipuAI:
     return _graph_llm
 
 
-async def _call_openai_graph_model(messages: list[dict[str, str]], *, max_tokens: int = 2048) -> dict[str, str]:
-    router = get_llm_router()
+async def _call_openai_compatible_graph_model(
+    messages: list[dict[str, str]],
+    *,
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    max_tokens: int = 2048,
+) -> dict[str, str]:
     client = AsyncOpenAI(
-        api_key=router.openai_api_key,
-        base_url=router.openai_base_url,
+        api_key=api_key,
+        base_url=base_url,
         timeout=60.0,
     )
     try:
         response = await client.chat.completions.create(
-            model=GRAPH_OPENAI_MODEL,
+            model=model,
             messages=messages,
             temperature=0.1,
             max_tokens=max_tokens,
         )
         content = response.choices[0].message.content if response.choices else ""
         return {
-            "provider": "openai",
-            "model": GRAPH_OPENAI_MODEL,
+            "provider": provider,
+            "model": model,
             "content": content if isinstance(content, str) else str(content or ""),
         }
     finally:
         await client.close()
+
+
+async def _call_openai_graph_model(messages: list[dict[str, str]], *, max_tokens: int = 2048) -> dict[str, str]:
+    router = get_llm_router()
+    return await _call_openai_compatible_graph_model(
+        messages,
+        provider="openai",
+        model=GRAPH_OPENAI_MODEL,
+        api_key=router.openai_api_key,
+        base_url=router.openai_base_url,
+        max_tokens=max_tokens,
+    )
 
 
 async def _call_zhipu_graph_model(messages: list[Any], *, max_tokens: int = 2048) -> dict[str, str]:
@@ -489,20 +508,74 @@ def _messages_for_openai(messages: list[Any]) -> list[dict[str, str]]:
     return normalized
 
 
-async def _call_graph_model(messages: list[Any], *, max_tokens: int = 2048) -> dict[str, str]:
+def _graph_provider_targets() -> list[dict[str, str]]:
     router = get_llm_router()
-    if router.openai_api_key:
+    targets: list[dict[str, str]] = []
+    openai_api_key = str(getattr(router, "openai_api_key", "") or "")
+    openai_base_url = str(getattr(router, "openai_base_url", "") or "")
+    alt_gpt_api_key = str(getattr(router, "alt_gpt_api_key", "") or "")
+    alt_gpt_base_url = str(getattr(router, "alt_gpt_base_url", "") or "")
+    deepseek_api_key = str(getattr(router, "deepseek_api_key", "") or "")
+    deepseek_base_url = str(getattr(router, "deepseek_base_url", "") or "")
+    if alt_gpt_api_key and alt_gpt_base_url:
+        targets.append(
+            {
+                "provider": "alt-gpt",
+                "model": str(getattr(router, "alt_gpt_5_2_model", "") or "gpt-5.2"),
+                "api_key": alt_gpt_api_key,
+                "base_url": alt_gpt_base_url,
+            }
+        )
+    if openai_api_key and openai_base_url:
+        targets.append(
+            {
+                "provider": "openai",
+                "model": GRAPH_OPENAI_MODEL,
+                "api_key": openai_api_key,
+                "base_url": openai_base_url,
+            }
+        )
+    if deepseek_api_key and deepseek_base_url:
+        targets.append(
+            {
+                "provider": "deepseek",
+                "model": str(getattr(router, "deepseek_v4_flash_model", "") or "deepseek-v4-flash"),
+                "api_key": deepseek_api_key,
+                "base_url": deepseek_base_url,
+            }
+        )
+    return targets
+
+
+def _graph_fallback_targets() -> list[dict[str, str]]:
+    return [
+        target
+        for target in _graph_provider_targets()
+        if target.get("provider") != "openai"
+    ]
+
+
+async def _call_graph_model(messages: list[Any], *, max_tokens: int = 2048) -> dict[str, str]:
+    openai_messages = _messages_for_openai(messages)
+    for target in _graph_provider_targets():
         try:
-            result = await _call_openai_graph_model(
-                _messages_for_openai(messages),
+            result = await _call_openai_compatible_graph_model(
+                openai_messages,
+                provider=target["provider"],
+                model=target["model"],
+                api_key=target["api_key"],
+                base_url=target["base_url"],
                 max_tokens=max_tokens,
             )
             logger.info("Graph LLM dispatch | provider=%s model=%s", result["provider"], result["model"])
             return result
         except Exception as exc:
-            logger.warning("OpenAI graph model failed, fallback to Zhipu %s: %s", GRAPH_ZHIPU_FALLBACK_MODEL, exc)
-    else:
-        logger.warning("OPENAI_API_KEY not set, fallback to Zhipu for graph updater")
+            logger.warning(
+                "Graph provider failed | provider=%s model=%s error=%s",
+                target["provider"],
+                target["model"],
+                exc,
+            )
 
     result = await _call_zhipu_graph_model(messages, max_tokens=max_tokens)
     logger.info("Graph LLM dispatch | provider=%s model=%s", result["provider"], result["model"])
@@ -1035,6 +1108,190 @@ def _actions_contain_self_anchor(actions: list[dict[str, Any]] | None) -> bool:
     return False
 
 
+def _user_input_contains_self_anchor_fact(text: str) -> bool:
+    normalized = " ".join(str(text or "").strip().split())
+    if not normalized:
+        return False
+    cues = (
+        "\u7ed9\u6211",
+        "\u53d1\u7ed9\u6211",
+        "\u5411\u6211",
+        "\u6b20\u6211",
+        "\u62d6\u6b20\u6211",
+        "\u6211\u7684\u5de5\u8d44",
+        "\u6211\u5de5\u8d44",
+        "\u8ddf\u6211",
+        "\u8ba9\u6211",
+        "\u6211\u6ca1\u6709",
+        "\u6211\u6ca1",
+        "\u6211\u672a",
+    )
+    if any(cue in normalized for cue in cues):
+        return True
+    return "\u6211" in normalized and any(
+        hint in normalized
+        for hint in (
+            "\u5de5\u8d44",
+            "\u52b3\u52a8\u5408\u540c",
+            "\u793e\u4fdd",
+            "\u8d54\u507f",
+            "\u8865\u507f",
+            "\u8f9e\u9000",
+            "\u89e3\u9664",
+            "\u6253\u5361",
+            "\u8003\u52e4",
+        )
+    )
+
+
+def _third_person_reference_mention(text: str) -> str:
+    normalized = " ".join(str(text or "").strip().split())
+    if not normalized:
+        return ""
+    for cue in (
+        "\u8fd9\u4e2a\u4eba",
+        "\u90a3\u4e2a\u4eba",
+        "\u5bf9\u65b9",
+        "\u4ed6",
+        "\u5979",
+        "TA",
+        "ta",
+    ):
+        if cue in normalized:
+            return cue
+    return ""
+
+
+def _user_input_has_local_third_person_anchor(text: str, mention: str) -> bool:
+    normalized = " ".join(str(text or "").strip().split())
+    if not normalized or mention not in normalized:
+        return False
+    mention_index = normalized.find(mention)
+    before = normalized[:mention_index]
+    anchor_patterns = (
+        r"(?:\u53eb|\u540d\u53eb|\u540d\u4e3a|\u8001\u677f\u53eb|\u7ecf\u7406\u53eb)([\u4e00-\u9fff]{2,6})",
+        r"([\u4e00-\u9fff]{2,6})(?:\u8bf4|\u8868\u793a|\u627f\u8bfa|\u8981\u6c42|\u901a\u77e5)",
+    )
+    for pattern in anchor_patterns:
+        for match in re.finditer(pattern, before):
+            candidate = " ".join(str(match.group(1) or "").strip().split())
+            if _looks_like_specific_person_name(candidate):
+                return True
+    return False
+
+
+def _user_input_contains_unanchored_third_person_reference(text: str) -> tuple[bool, str]:
+    mention = _third_person_reference_mention(text)
+    if not mention:
+        return False, ""
+    if mention in {"\u4ed6", "\u5979", "TA", "ta"} and _user_input_has_local_third_person_anchor(text, mention):
+        return False, ""
+    return True, mention
+
+
+def _cross_conversation_subject_candidates(
+    context: dict[str, Any] | None,
+    existing_node_records: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for record in list(existing_node_records or []):
+        if not isinstance(record, dict):
+            continue
+        label = str(record.get("name") or record.get("label") or "").strip()
+        if not label:
+            continue
+        if _looks_like_specific_person_name(label) or _looks_like_specific_org_name(label):
+            candidates.append({"label": label, "source": "current_conversation_graph"})
+
+    source_context = context if isinstance(context, dict) else {}
+    dossier_context = source_context.get("dossier_context")
+    if isinstance(dossier_context, dict):
+        for item in list(dossier_context.get("confirmed_participants") or []):
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("canonical_label") or "").strip()
+            if not label:
+                continue
+            if not (_looks_like_specific_person_name(label) or _looks_like_specific_org_name(label)):
+                continue
+            source_conversation_ids = []
+            for mention in list(dossier_context.get("participant_mentions") or []):
+                if not isinstance(mention, dict):
+                    continue
+                mention_label = str(
+                    mention.get("participant_label")
+                    or mention.get("graph_node_label")
+                    or mention.get("raw_label")
+                    or ""
+                ).strip()
+                if mention_label != label:
+                    continue
+                try:
+                    mention_conversation_id = int(mention.get("conversation_id") or 0)
+                except (TypeError, ValueError):
+                    mention_conversation_id = 0
+                if mention_conversation_id > 0:
+                    source_conversation_ids.append(mention_conversation_id)
+            candidates.append(
+                {
+                    "label": label,
+                    "source": "dossier_context",
+                    "source_conversation_ids": sorted(set(source_conversation_ids)),
+                }
+            )
+
+    unique: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        label = str(candidate.get("label") or "").strip()
+        if not label:
+            continue
+        existing = unique.get(label)
+        if existing:
+            existing_ids = set(existing.get("source_conversation_ids") or [])
+            existing["source_conversation_ids"] = sorted(existing_ids | set(candidate.get("source_conversation_ids") or []))
+            continue
+        unique[label] = candidate
+    return [unique[key] for key in sorted(unique)]
+
+
+def _build_cross_conversation_subject_clarification_result(
+    *,
+    normalized_actions: list[dict[str, str]],
+    mention: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    labels = [str(item.get("label") or "").strip() for item in candidates if item.get("label")]
+    candidate_text = "\u3001".join(labels[:5])
+    candidate_clause = f"\u5f53\u524d\u5019\u9009\u6709\uff1a{candidate_text}\u3002" if candidate_text else ""
+    question = (
+        f"\u8fd9\u6761\u8865\u5145\u91cc\uff0c\u8fd9\u91cc\u7684\u201c{mention}\u201d\u5177\u4f53\u6307\u54ea\u4e2a\u4e3b\u4f53\uff1f"
+        f"{candidate_clause}"
+        "\u8bf7\u76f4\u63a5\u56de\u590d\u4e3b\u4f53\u540d\u79f0\u6216\u8bf4\u660e\u5b83\u4e0d\u5c5e\u4e8e\u5df2\u6709\u4e3b\u4f53\u3002"
+    )
+    return {
+        "source": "graph_write_guard",
+        "provider": "rules",
+        "model": "graph-write-cross-conversation-subject-reference-v1",
+        "decision": "clarify",
+        "confidence": "high",
+        "reason": "cross_conversation_subject_reference_requires_user_confirmation",
+        "needs_clarification": True,
+        "clarification_questions": [question],
+        "validation_errors": ["user_input_subject_reference_requires_current_conversation_confirmation"],
+        "raw_reviewed_actions": [],
+        "allowed_actions": [],
+        "blocked_actions": normalized_actions,
+        "clarification_mode": "cross_conversation_subject_reference",
+        "target_mention": mention,
+        "reference_type": "person" if mention in {"\u4ed6", "\u5979", "TA", "ta", "\u8fd9\u4e2a\u4eba", "\u90a3\u4e2a\u4eba"} else "unknown",
+        "cross_conversation_candidates": candidates,
+        "pre_resolved_anchors": {
+            "self_anchor_target": "",
+            "org_anchor_target": "",
+        },
+    }
+
+
 def _build_cross_conversation_self_clarification_result(
     *,
     normalized_actions: list[dict[str, str]],
@@ -1096,6 +1353,24 @@ async def evaluate_graph_write_guard_async(
         self_anchor_target=self_anchor_target,
         org_anchor_target=org_anchor_target,
     )
+    if (
+        not self_anchor_target
+        and cross_conversation_self_candidates
+        and _user_input_contains_self_anchor_fact(user_input)
+    ):
+        return _build_cross_conversation_self_clarification_result(
+            normalized_actions=normalized_actions,
+            validation_errors=["user_input_self_anchor_requires_current_conversation_confirmation"],
+            self_anchor_candidates=cross_conversation_self_candidates,
+        )
+    has_third_person_reference, third_person_mention = _user_input_contains_unanchored_third_person_reference(user_input)
+    subject_reference_candidates = _cross_conversation_subject_candidates(context, list(existing_node_records or []))
+    if has_third_person_reference and subject_reference_candidates:
+        return _build_cross_conversation_subject_clarification_result(
+            normalized_actions=normalized_actions,
+            mention=third_person_mention,
+            candidates=subject_reference_candidates,
+        )
     if not normalized_actions:
         return {
             "source": "graph_write_guard",
