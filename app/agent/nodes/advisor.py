@@ -32,6 +32,7 @@ from app.agent.guards import (
     sanitize_unverified_claims,
 )
 from app.core.llm_provider import LLMProvider
+from app.services.dossier_graph_tool import classify_dossier_graph_query
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ _PAYLOAD_FACT_KEYWORDS = (
 )
 _RAG_PREVIEW_LIMIT = 350
 _MAX_OTHER_REFERENCE_ITEMS = 5
+_DOSSIER_QUESTION_DEFAULT = "default"
+_DOSSIER_QUESTION_MEMORY = "dossier_memory"
+_DOSSIER_QUESTION_ADVICE = "dossier_advice"
 
 
 def _normalize_number_token(raw: str) -> str:
@@ -98,6 +102,68 @@ def _clean_rag_snippet(snippet: str, *prefixes: str) -> str:
         if cleaned_prefix and result.startswith(cleaned_prefix):
             result = result[len(cleaned_prefix):].lstrip("：:，,;；。 \n")
     return result.strip()
+
+
+def _normalize_dossier_question_mode(value: str | None) -> str:
+    normalized = str(value or "").strip()
+    if normalized in {
+        _DOSSIER_QUESTION_DEFAULT,
+        _DOSSIER_QUESTION_MEMORY,
+        _DOSSIER_QUESTION_ADVICE,
+    }:
+        return normalized
+    return _DOSSIER_QUESTION_DEFAULT
+
+
+def _strip_tagged_block(text: str, tag_name: str) -> str:
+    return re.sub(
+        rf"\n*<{re.escape(tag_name)}>\s*.*?\s*</{re.escape(tag_name)}>\n*",
+        "\n",
+        text,
+        flags=re.DOTALL,
+    )
+
+
+def _classify_dossier_question_mode(
+    *,
+    question: str,
+    dossier_context: dict[str, Any] | None,
+    dossier_graph_context: dict[str, Any] | None,
+) -> str:
+    if not isinstance(dossier_context, dict) and not isinstance(dossier_graph_context, dict):
+        return _DOSSIER_QUESTION_DEFAULT
+
+    query_kind = classify_dossier_graph_query(question)
+    if query_kind == "memory":
+        return _DOSSIER_QUESTION_MEMORY
+    if query_kind == "advice":
+        return _DOSSIER_QUESTION_ADVICE
+    return _DOSSIER_QUESTION_DEFAULT
+
+
+def _build_advisor_user_instruction(question: str, question_mode: str) -> str:
+    normalized_mode = _normalize_dossier_question_mode(question_mode)
+    if normalized_mode == _DOSSIER_QUESTION_MEMORY:
+        return (
+            f"用户的问题：{question}\n"
+            "当前问题属于案卷记忆 / 主体指代查询。请优先依据 system 中的案卷上下文、案卷图谱摘要和案卷图谱查询结果作答。"
+            "如果用户在问“当事人 / 我 / 本人 / 这个公司 / 这个人指的是谁”，先直接回答主体是谁，"
+            "再用一句话说明依据来自案卷中已确认的主体映射、participant overlay 或原始标签映射。"
+            "如果案卷里还有其他未确认的相似主体，只能说明“尚未确认，不能自动视为同一主体”，不要擅自合并。"
+            "除非用户明确追问法律依据或下一步怎么办，否则不要主动展开法条、案例、仲裁建议或维权步骤。"
+            "整段回答控制在 3 到 6 句话内。"
+        )
+    if normalized_mode == _DOSSIER_QUESTION_ADVICE:
+        return (
+            f"用户的问题：{question}\n"
+            "请结合 system 中的案卷上下文、案卷图谱背景和相关法律检索结果，先直接回答用户的具体任务问题，"
+            "再补充真正相关的法律依据与下一步建议。"
+        )
+    return (
+        f"用户的问题：{question}\n"
+        "请基于 system 中的【已确认事实】【相关法条原文】【参考案例】给出回答。"
+        "必须引用法条编号，必须有下一步建议。"
+    )
 
 
 def _split_rag_by_type(tool_results: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -209,6 +275,390 @@ def _format_other_rag_context(other_entries: list[dict[str, Any]]) -> str:
         source = str(entry.get("source") or "").strip() or f"其他材料{index}"
         lines.append(f"{index}. [{source}] {entry.get('content') or ''}")
     return "\n".join(lines)
+
+
+def _format_dossier_context_block(dossier_context: dict[str, Any] | None) -> str:
+    if not isinstance(dossier_context, dict):
+        return ""
+
+    title = str(dossier_context.get("title") or "").strip() or "未命名案卷"
+    case_type = str(dossier_context.get("case_type") or "").strip() or "未分类"
+    summary = str(dossier_context.get("summary") or "").strip() or "暂无案卷摘要"
+    status = str(dossier_context.get("status") or "").strip() or "active"
+    conversation_count = int(dossier_context.get("conversation_count") or 0)
+    active_conversation_id = dossier_context.get("active_conversation_id")
+    conversations = dossier_context.get("conversations")
+
+    conversation_lines: list[str] = []
+    if isinstance(conversations, list):
+        for index, item in enumerate(conversations[:5], start=1):
+            if not isinstance(item, dict):
+                continue
+            conversation_id = item.get("id")
+            title_text = str(item.get("title") or "").strip() or f"会话 #{conversation_id or index}"
+            mode = str(item.get("conversation_mode") or "UNKNOWN").strip()
+            consent = str(item.get("persistence_consent") or "unknown").strip()
+            summary_text = str(item.get("case_summary") or "").strip()
+            case_type_text = str(item.get("case_type") or "").strip()
+            markers: list[str] = [f"mode={mode}", f"consent={consent}"]
+            if case_type_text:
+                markers.append(f"case_type={case_type_text}")
+            if conversation_id == active_conversation_id:
+                markers.append("current_conversation=true")
+            line = f"{index}. {title_text} ({', '.join(markers)})"
+            if summary_text:
+                line += f" | 摘要：{summary_text[:120]}"
+            conversation_lines.append(line)
+
+    if not conversation_lines:
+        conversation_lines.append("无已绑定会话摘要")
+
+    return (
+        "<dossier_context>\n"
+        "[案卷上下文]\n"
+        f"标题：{title}\n"
+        f"类型：{case_type}\n"
+        f"摘要：{summary}\n"
+        f"状态：{status}\n"
+        f"绑定会话数量：{conversation_count}\n"
+        "已绑定会话：\n"
+        f"{chr(10).join(conversation_lines)}\n"
+        "使用规则：案卷上下文只能作为背景记忆和事实线索，不能替代检索到的法条原文、案例或其他RAG依据。"
+        "如果案卷上下文与本轮用户输入冲突，优先指出冲突并向用户澄清，不要直接沿用旧案情。\n"
+        "</dossier_context>"
+    )
+
+def _format_dossier_context_block(dossier_context: dict[str, Any] | None) -> str:
+    if not isinstance(dossier_context, dict):
+        return ""
+
+    title = str(dossier_context.get("title") or "").strip() or "未命名案卷"
+    case_type = str(dossier_context.get("case_type") or "").strip() or "未分类"
+    summary = str(dossier_context.get("summary") or "").strip() or "暂无案卷摘要"
+    status = str(dossier_context.get("status") or "").strip() or "active"
+    conversation_count = int(dossier_context.get("conversation_count") or 0)
+    active_conversation_id = dossier_context.get("active_conversation_id")
+    conversations = dossier_context.get("conversations")
+    participant_aliases = dossier_context.get("participant_aliases")
+
+    conversation_lines: list[str] = []
+    if isinstance(conversations, list):
+        for index, item in enumerate(conversations[:5], start=1):
+            if not isinstance(item, dict):
+                continue
+            conversation_id = item.get("id")
+            title_text = str(item.get("title") or "").strip() or f"会话 #{conversation_id or index}"
+            mode = str(item.get("conversation_mode") or "UNKNOWN").strip()
+            consent = str(item.get("persistence_consent") or "unknown").strip()
+            summary_text = str(item.get("case_summary") or "").strip()
+            case_type_text = str(item.get("case_type") or "").strip()
+            markers: list[str] = [f"mode={mode}", f"consent={consent}"]
+            if case_type_text:
+                markers.append(f"case_type={case_type_text}")
+            if conversation_id == active_conversation_id:
+                markers.append("current_conversation=true")
+            line = f"{index}. {title_text} ({', '.join(markers)})"
+            if summary_text:
+                line += f" | 摘要：{summary_text[:120]}"
+            conversation_lines.append(line)
+
+    if not conversation_lines:
+        conversation_lines.append("无已绑定会话摘要")
+
+    alias_lines: list[str] = []
+    if isinstance(participant_aliases, dict):
+        for key in ("primary_party", "opposing_party"):
+            item = participant_aliases.get(key)
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            role = str(item.get("role") or "").strip()
+            party_side = str(item.get("party_side") or "").strip()
+            confirmed = bool(item.get("confirmed_by_user"))
+            if not label and not role:
+                continue
+            alias_lines.append(
+                f"- {key}: label={label or '未填写'}; role={role or '未填写'}; "
+                f"party_side={party_side or key}; confirmed_by_user={str(confirmed).lower()}"
+            )
+
+    if not alias_lines:
+        alias_lines.append("- participant_aliases: none")
+
+    return (
+        "<dossier_context>\n"
+        "[案卷上下文]\n"
+        f"标题：{title}\n"
+        f"类型：{case_type}\n"
+        f"摘要：{summary}\n"
+        f"状态：{status}\n"
+        f"绑定会话数量：{conversation_count}\n"
+        "participant_aliases:\n"
+        f"{chr(10).join(alias_lines)}\n"
+        "已绑定会话：\n"
+        f"{chr(10).join(conversation_lines)}\n"
+        "使用规则：案卷上下文只能作为背景记忆和事实线索，不能替代检索到的法律原文、案例或其他 RAG 依据。\n"
+        "participant_aliases 只是用户确认的案卷别名，不等同真实姓名；不得编造其真实身份、背景信息或补充用户未提供的新事实。\n"
+        "participant_aliases 仅在当前案卷内生效，不得跨案卷自动合并同名主体；不同案卷中的“我”“公司”“对方”默认不是同一实体。\n"
+        "如果案卷上下文与本轮用户输入冲突，优先指出冲突并向用户澄清，不要直接沿用旧案情。\n"
+        "</dossier_context>"
+    )
+
+
+def _format_dossier_graph_summary_block(dossier_graph_summary: str | None) -> str:
+    if not isinstance(dossier_graph_summary, str):
+        return ""
+    return dossier_graph_summary.strip()
+
+
+def _format_dossier_graph_context_block(dossier_graph_context: dict[str, Any] | None) -> str:
+    if not isinstance(dossier_graph_context, dict):
+        return ""
+
+    if str(dossier_graph_context.get("source") or "").strip() != "graph_context":
+        return ""
+
+    scope = dossier_graph_context.get("scope") if isinstance(dossier_graph_context.get("scope"), dict) else {}
+    stats = dossier_graph_context.get("stats") if isinstance(dossier_graph_context.get("stats"), dict) else {}
+    participants = (
+        dossier_graph_context.get("participants")
+        if isinstance(dossier_graph_context.get("participants"), list)
+        else []
+    )
+    mentions = (
+        dossier_graph_context.get("participant_mentions")
+        if isinstance(dossier_graph_context.get("participant_mentions"), list)
+        else []
+    )
+    matched_nodes = (
+        dossier_graph_context.get("matched_nodes")
+        if isinstance(dossier_graph_context.get("matched_nodes"), list)
+        else []
+    )
+    matched_edges = (
+        dossier_graph_context.get("matched_edges")
+        if isinstance(dossier_graph_context.get("matched_edges"), list)
+        else []
+    )
+    warnings = (
+        dossier_graph_context.get("warnings")
+        if isinstance(dossier_graph_context.get("warnings"), list)
+        else []
+    )
+    notes = (
+        dossier_graph_context.get("notes")
+        if isinstance(dossier_graph_context.get("notes"), list)
+        else []
+    )
+    truncated = bool(dossier_graph_context.get("truncated", False))
+    query_type = str(dossier_graph_context.get("query_type") or "").strip() or "summary"
+    query = str(dossier_graph_context.get("query") or "").strip()
+    legal_basis = bool(dossier_graph_context.get("legal_basis", False))
+
+    participant_lines: list[str] = []
+    for item in participants[:5]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        role = str(item.get("role") or "").strip()
+        side = str(item.get("party_side") or "").strip() or "unknown"
+        entity_type = str(item.get("entity_type") or "").strip() or "unknown"
+        if not label and not role:
+            continue
+        participant_lines.append(
+            f"- label={label or '未填写'}; role={role or '未填写'}; party_side={side}; entity_type={entity_type}"
+        )
+    if not participant_lines:
+        participant_lines.append("- none")
+
+    mention_lines: list[str] = []
+    for item in mentions[:6]:
+        if not isinstance(item, dict):
+            continue
+        raw_label = str(item.get("raw_label") or "").strip()
+        participant_label = str(item.get("participant_label") or "").strip()
+        source = str(item.get("source") or "").strip() or "graph"
+        if not raw_label and not participant_label:
+            continue
+        mention_lines.append(
+            f"- raw_label={raw_label or '未填写'}; participant_label={participant_label or '未确认'}; source={source}"
+        )
+    if not mention_lines:
+        mention_lines.append("- none")
+
+    node_lines: list[str] = []
+    for item in matched_nodes[:8]:
+        if not isinstance(item, dict):
+            continue
+        display_label = str(item.get("display_label") or item.get("label") or "").strip()
+        raw_label = str(item.get("raw_label") or "").strip()
+        node_type = str(item.get("type") or "").strip() or "unknown"
+        conversation_id = item.get("conversation_id")
+        if not display_label and not raw_label:
+            continue
+        suffix = f"; conversation_id={conversation_id}" if conversation_id is not None else ""
+        raw_suffix = f"; raw_label={raw_label}" if raw_label and raw_label != display_label else ""
+        node_lines.append(
+            f"- label={display_label or raw_label}; type={node_type}{suffix}{raw_suffix}"
+        )
+    if not node_lines:
+        node_lines.append("- none")
+
+    edge_lines: list[str] = []
+    for item in matched_edges[:8]:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or item.get("type") or "").strip() or "CASE_RELATION"
+        source = str(item.get("source") or "").strip() or "unknown"
+        target = str(item.get("target") or "").strip() or "unknown"
+        edge_lines.append(f"- source={source}; relation={label}; target={target}")
+    if not edge_lines:
+        edge_lines.append("- none")
+
+    warning_lines = [f"- {str(item).strip()}" for item in warnings if str(item).strip()]
+    if not warning_lines:
+        warning_lines.append("- none")
+
+    note_lines = [f"- {str(item).strip()}" for item in notes if str(item).strip()]
+    note_lines.extend(
+        [
+            "- 以上 graph_context 仅作案情背景，不是法律依据，不能作为法条或案例来源引用。",
+            "- 回答引用这部分信息时，应表述为：根据你当前案卷中已记录/已确认的信息……",
+            "- 如 graph_context 与本轮用户输入冲突，应先澄清，不得直接沿用历史图谱结论。",
+            "- 未经用户确认的主体不能直接视为同一主体；同名主体也不得跨案卷自动合并。",
+        ]
+    )
+    if truncated:
+        note_lines.append("- 本次 graph_context 已按条数限制截断，只展示部分案情图谱结果。")
+
+    return (
+        "<dossier_graph_context>\n"
+        "案卷图谱查询结果（仅作案情背景，不是法律依据）\n"
+        f"query_type={query_type}\n"
+        f"query={query or 'none'}\n"
+        f"legal_basis={str(legal_basis).lower()}\n"
+        f"scope.user_id={scope.get('user_id')}\n"
+        f"scope.dossier_id={scope.get('dossier_id')}\n"
+        f"scope.conversation_id={scope.get('conversation_id')}\n"
+        f"stats: conversation_count={int(stats.get('conversation_count') or 0)}, "
+        f"node_count={int(stats.get('node_count') or 0)}, edge_count={int(stats.get('edge_count') or 0)}\n"
+        "confirmed_participants:\n"
+        f"{chr(10).join(participant_lines)}\n"
+        "participant_mentions:\n"
+        f"{chr(10).join(mention_lines)}\n"
+        "matched_nodes:\n"
+        f"{chr(10).join(node_lines)}\n"
+        "matched_edges:\n"
+        f"{chr(10).join(edge_lines)}\n"
+        "warnings:\n"
+        f"{chr(10).join(warning_lines)}\n"
+        "notes:\n"
+        f"{chr(10).join(note_lines)}\n"
+        "</dossier_graph_context>"
+    )
+
+
+def _format_dossier_context_block_v2(dossier_context: dict[str, Any] | None) -> str:
+    if not isinstance(dossier_context, dict):
+        return ""
+
+    title = str(dossier_context.get("title") or "").strip() or "未命名案卷"
+    case_type = str(dossier_context.get("case_type") or "").strip() or "未分类"
+    summary = str(dossier_context.get("summary") or "").strip() or "暂无案卷摘要"
+    status = str(dossier_context.get("status") or "").strip() or "active"
+    conversation_count = int(dossier_context.get("conversation_count") or 0)
+    active_conversation_id = dossier_context.get("active_conversation_id")
+    conversations = dossier_context.get("conversations")
+    participant_aliases = dossier_context.get("participant_aliases")
+    confirmed_participants = dossier_context.get("confirmed_participants")
+
+    conversation_lines: list[str] = []
+    if isinstance(conversations, list):
+        for index, item in enumerate(conversations[:5], start=1):
+            if not isinstance(item, dict):
+                continue
+            conversation_id = item.get("id")
+            title_text = str(item.get("title") or "").strip() or f"会话 #{conversation_id or index}"
+            mode = str(item.get("conversation_mode") or "UNKNOWN").strip()
+            consent = str(item.get("persistence_consent") or "unknown").strip()
+            summary_text = str(item.get("case_summary") or "").strip()
+            case_type_text = str(item.get("case_type") or "").strip()
+            markers: list[str] = [f"mode={mode}", f"consent={consent}"]
+            if case_type_text:
+                markers.append(f"case_type={case_type_text}")
+            if conversation_id == active_conversation_id:
+                markers.append("current_conversation=true")
+            line = f"{index}. {title_text} ({', '.join(markers)})"
+            if summary_text:
+                line += f" | 摘要：{summary_text[:120]}"
+            conversation_lines.append(line)
+
+    if not conversation_lines:
+        conversation_lines.append("无已绑定会话摘要")
+
+    participant_lines: list[str] = []
+    if isinstance(confirmed_participants, list):
+        for item in confirmed_participants:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            role = str(item.get("role") or "").strip()
+            party_side = str(item.get("party_side") or "").strip() or "unknown"
+            entity_type = str(item.get("entity_type") or "").strip() or "unknown"
+            if not label and not role:
+                continue
+            participant_lines.append(
+                f"- label={label or '未填写'}; role={role or '未填写'}; "
+                f"party_side={party_side}; entity_type={entity_type}; confirmed_by_user=true"
+            )
+
+    alias_lines: list[str] = []
+    if isinstance(participant_aliases, dict):
+        for key in ("primary_party", "opposing_party"):
+            item = participant_aliases.get(key)
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            role = str(item.get("role") or "").strip()
+            party_side = str(item.get("party_side") or "").strip()
+            confirmed = bool(item.get("confirmed_by_user"))
+            if not label and not role:
+                continue
+            alias_lines.append(
+                f"- {key}: label={label or '未填写'}; role={role or '未填写'}; "
+                f"party_side={party_side or key}; confirmed_by_user={str(confirmed).lower()}"
+            )
+
+    if not participant_lines:
+        participant_lines.append("- confirmed_participants: none")
+    if not alias_lines:
+        alias_lines.append("- participant_aliases: none")
+
+    return (
+        "<dossier_context>\n"
+        "[案卷上下文]\n"
+        f"标题：{title}\n"
+        f"类型：{case_type}\n"
+        f"摘要：{summary}\n"
+        f"状态：{status}\n"
+        f"绑定会话数量：{conversation_count}\n"
+        "confirmed_participants:\n"
+        f"{chr(10).join(participant_lines)}\n"
+        "participant_aliases:\n"
+        f"{chr(10).join(alias_lines)}\n"
+        "已绑定会话：\n"
+        f"{chr(10).join(conversation_lines)}\n"
+        "使用规则：案卷上下文只能作为背景记忆和事实线索，不能替代检索到的法律原文、案例或其他 RAG 依据。\n"
+        "confirmed participant labels 和 participant_aliases 都只是当前案卷内用户确认的称呼，不等同真实姓名；不得编造其真实身份、背景信息或补充用户未提供的新事实。\n"
+        "confirmed participant labels 和 participant_aliases 仅在当前案卷内生效。\n"
+        "未经用户确认的主体只能视为未确认 mention，不得直接视为同一主体。\n"
+        "不得跨案卷自动合并同名主体；不同案卷中的“我”“公司”“对方”默认不是同一实体。\n"
+        "如果案卷上下文与本轮用户输入冲突，优先指出冲突并向用户澄清，不要直接沿用旧案情。\n"
+        "</dossier_context>"
+    )
+
+
+_format_dossier_context_block = _format_dossier_context_block_v2
 
 
 def _build_guard_rag_context(
@@ -433,6 +883,10 @@ def build_advisor_system_prompt(
     laws_block: str = "",
     cases_block: str = "",
     payload_facts: str = "",
+    dossier_context: str = "",
+    dossier_graph_summary: str = "",
+    dossier_graph_context: str = "",
+    question_mode: str = _DOSSIER_QUESTION_DEFAULT,
 ) -> str:
     """
     Build the full advisor system prompt.
@@ -483,13 +937,75 @@ def build_advisor_system_prompt(
     amount_verification_block = _build_amount_verification_block(question, payload)
     statute_verification_block = _build_statute_verification_block(question, rag_context)
 
+    normalized_question_mode = _normalize_dossier_question_mode(question_mode)
     payload_facts = payload_facts or _extract_payload_facts(payload)
     laws_block = laws_block or "无"
     cases_block = cases_block or "无"
     rag_context = rag_context or "无"
+    memory_only_mode = normalized_question_mode == _DOSSIER_QUESTION_MEMORY
+
+    if memory_only_mode:
+        laws_block = "当前问题属于案卷记忆 / 主体指代查询，本轮不强制使用法律检索结果。"
+        cases_block = "当前问题属于案卷记忆 / 主体指代查询，本轮不强制使用案例材料。"
+        rag_context = "当前问题属于案卷记忆 / 主体指代查询；如用户未追问法律依据，请忽略法律检索材料。"
+
+    dossier_block = dossier_context.strip()
+    dossier_graph_block = dossier_graph_summary.strip()
+    dossier_graph_context_block = dossier_graph_context.strip()
+    retrieval_relevance_guard = """
+
+<retrieval_relevance_guard>
+如果检索材料与当前问题或当前案型明显无关，例如劳动争议问题却检索到刑法、环境犯罪或其他不相干案例，不得为了“补充依据”而硬塞进回答。
+与当前问题无关的法条、案例和其他 RAG 材料应直接忽略。
+</retrieval_relevance_guard>"""
+    if memory_only_mode:
+        rag_binding_block = """
+
+<rag_binding>
+当前问题属于案卷记忆 / 主体指代 / 历史事实回顾。
+你应优先依据 <dossier_context>、<dossier_graph_summary>、<dossier_graph_context> 回答，直接说明案卷中已记录或已确认的信息。
+如果问题是在问“当事人 / 我 / 本人 / 这个公司 / 这个人指的是谁”，先直接说明主体是谁，再说明依据来自已确认主体映射或原始标签映射。
+除非用户明确追问法律依据，否则不要主动展开法条解释、案例引用或其他法律检索内容。
+</rag_binding>"""
+        output_contract_block = """
+
+<output_contract>
+1. 只返回 JSON，格式：{"answer": "...", "sources": [...]}
+2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
+3. answer：当前问题若属于案卷记忆查询，应先直接回答“案卷里记录了什么 / 主体是谁 / 关键事实有哪些 / 证据有哪些”，必要时用条目列出。
+4. 如果问题是主体指代问题，先回答主体名称，再用一句话说明依据来自案卷已确认主体或原始标签映射。
+5. 如果案卷里还有未确认的相似主体，只能说明“尚未确认，不能自动视为同一主体”，不要擅自合并。
+6. 除非用户明确追问法律依据或下一步怎么办，否则不要主动引用法条编号、案例名称，也不要展开法律 RAG 内容或维权建议。
+7. answer：控制在 3 到 6 句话内，保持聚焦，不要展开大段法律分析。
+8. 如果案卷信息不足，直接说明“当前案卷已记录的信息有限”，不要编造或补齐未确认事实。
+9. sources：只能填写检索材料中真实出现过的来源，不能编造；如果本轮回答未实际使用法律检索来源，可返回空数组。
+</output_contract>"""
+    else:
+        rag_binding_block = """
+
+<rag_binding>
+你必须优先依据【相关法条原文】和【参考案例】作答；<rag_context> 只作为补充背景材料。
+若【相关法条原文】中出现了具体法律名称和条文编号，应自然引用到回答中。
+若【参考案例】中存在与当前问题直接相关的案例名称和裁判要点，应在用户询问类案时加以说明。
+</rag_binding>"""
+        output_contract_block = """
+
+<output_contract>
+1. 只返回 JSON，格式：{"answer": "...", "sources": [...]}
+2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
+3. answer：必须明确引用法条编号，但仅限【相关法条原文】或 <rag_context> 中已出现的编号。
+4. answer：当【参考案例】中存在与当前问题直接相关的案例时，应在回答中引用至少 1 个案件名简称（如“郑某诉霍尼韦尔案”“某途教育公司诉王某华案”），并用一句话总结裁判要点；如果检索到的案例与当前问题不相关，应明确忽略，不要为了满足格式硬塞进回答。
+5. answer：结尾给出 1 到 2 个明确的下一步行动建议。
+6. 如果用户提出的是具体任务型问题，例如“准备哪些证据”“下一步怎么办”“仲裁请求怎么写”“风险是什么”，必须先直接回答该问题，给出明确清单、步骤或判断，不要只说“我可以帮你整理”。
+7. 只有当用户没有提出明确任务时，才可以使用“如果你愿意，我可以继续帮你整理成证据目录/仲裁申请书”这类补充性表达；该类表达不能替代直接回答。
+8. sources：只能填写检索材料中真实出现过的来源，不能编造。
+</output_contract>"""
 
     prompt = f"""
 你不是普通的文本精校员，而是一位资深的中国法律咨询律师。请基于下面给定的事实、法条原文和参考案例，给出一段专业、有共情、可落地的回答。
+{dossier_block}
+{dossier_graph_block}
+{dossier_graph_context_block}
 {correction_block}
 <number_lock>
 【数字锁定 — 最高优先级，任何其他规则均不得推翻此条】
@@ -522,12 +1038,16 @@ def build_advisor_system_prompt(
 2. 涉及金额时，必须沿用【已确认事实】中的计算结果，不得自行重算。
 3. 不得使用“算账与确权层”“高风险执行层”“下一步落地动作”这类内部分层标签。
 4. 如果【相关法条原文】为空或为“无”，直接说明“暂未检索到精确法条原文，以下基于通用规则给出方向性建议”，禁止伪造条款号。
+{retrieval_relevance_guard}
+{rag_binding_block}
 
-<rag_binding>
-你必须优先依据【相关法条原文】和【参考案例】作答；<rag_context> 只作为补充背景材料。
-若【相关法条原文】中出现了具体法律名称和条文编号，应自然引用到回答中。
-若【参考案例】中出现了案例名称和裁判要点，应在用户询问类案时加以说明。
-</rag_binding>
+<dossier_graph_context_guard>
+如果 system 中出现 dossier_graph_context，它只能作为当前案卷的结构化案情背景，不是法律依据。
+你只能用“根据你当前案卷中已记录/已确认的信息……”这类表述引用它。
+不得写“根据图谱可知法律规定”“根据图谱可以证明你一定胜诉”。
+如果 graph_context 与用户本轮输入冲突，必须先指出冲突并澄清，不得直接把历史图谱当作已证实事实。
+未经用户确认的主体和 relation 不得直接当作同一主体或已证实关系。
+</dossier_graph_context_guard>
 
 <grounded_context>
 【已确认事实】
@@ -553,14 +1073,7 @@ def build_advisor_system_prompt(
 历史案件参考只可作为背景提示，严禁当作当前案件事实参与计算、抽取月薪、工龄或案型。
 </grounded_context>
 
-<output_contract>
-1. 只返回 JSON，格式：{{"answer": "...", "sources": [...]}}
-2. answer：用律师对当事人讲话的口吻，不要出现任何“层”标签。
-3. answer：必须明确引用法条编号，但仅限【相关法条原文】或 <rag_context> 中已出现的编号。
-4. answer：当【参考案例】不为“无”时，必须在回答中引用至少 1 个案件名简称（如“郑某诉霍尼韦尔案”“某途教育公司诉王某华案”），并用一句话总结裁判要点。若你判断案例与用户问题不相关，仍需在回答末尾说明“参考案例 X 与本案情形不完全相同，仅供参考”。严禁完全忽略【参考案例】段。
-5. answer：结尾给出 1 到 2 个明确的下一步行动建议。
-6. sources：只能填写检索材料中真实出现过的来源，不能编造。
-</output_contract>
+{output_contract_block}
 
 <examples>
 【示例：正确回答】
@@ -576,6 +1089,9 @@ cases_block 第1条：“某途教育公司诉王某华劳动争议案 — 裁�
 正确输出片段：“参考某途教育公司诉王某华案，法院认为试用期约定超过法定上限的，用人单位需承担相应赔偿责任；这类案例对判断试用期解除是否合法有直接参考价值。”
 </examples>
 """.strip()
+
+    if not (dossier_block or dossier_graph_block or dossier_graph_context_block):
+        prompt = _strip_tagged_block(prompt, "dossier_graph_context_guard")
 
     return prompt
 
@@ -628,6 +1144,19 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
             + f"\n- 已知月薪：{int(_cs_for_payload.monthly_salary)} 元（来自会话上下文）"
         ).strip()
 
+    dossier_context_block = _format_dossier_context_block(state.get("dossier_context"))
+    dossier_graph_summary_block = _format_dossier_graph_summary_block(
+        state.get("dossier_graph_summary")
+    )
+    dossier_graph_context_block = _format_dossier_graph_context_block(
+        state.get("dossier_graph_context")
+    )
+    dossier_question_mode = _classify_dossier_question_mode(
+        question=state["question"],
+        dossier_context=state.get("dossier_context"),
+        dossier_graph_context=state.get("dossier_graph_context"),
+    )
+
     advisor_system_prompt = build_advisor_system_prompt(
         question=state["question"],
         case_summary=display_case_summary,
@@ -638,9 +1167,20 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
         laws_block=laws_block,
         cases_block=cases_block,
         payload_facts=payload_facts,
+        dossier_context=dossier_context_block,
+        dossier_graph_summary=dossier_graph_summary_block,
+        dossier_graph_context=dossier_graph_context_block,
+        question_mode=dossier_question_mode,
     )
 
     fallback = {"answer": layered_payload.answer, "sources": []}
+    llm_router = self._get_llm_router()
+    logger.info(
+        "Advisor generation | requested_provider=%s requested_model=%s base_url=%s",
+        LLMProvider.GPT_5_4.value,
+        "gpt-5.4",
+        getattr(llm_router, "openai_base_url", ""),
+    )
 
     content = await self._chat_model(
         self.expert_llm,
@@ -648,10 +1188,9 @@ async def generate_final_answer_v3(self, state: AgentState) -> dict[str, Any]:
             {"role": "system", "content": advisor_system_prompt},
             {
                 "role": "user",
-                "content": (
-                    f"用户的问题：{state['question']}\n"
-                    "请基于 system 中的【已确认事实】【相关法条原文】【参考案例】给出回答。"
-                    "必须引用法条编号，必须有下一步建议。"
+                "content": _build_advisor_user_instruction(
+                    state["question"],
+                    dossier_question_mode,
                 ),
             },
         ],

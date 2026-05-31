@@ -11,11 +11,16 @@ from app.celery_app import ask_agent_task
 from app.core.llm_provider import get_llm_router
 from app.core.security import AuthenticatedUser, get_current_user
 from app.database.mysql_db import get_db
-from app.services.case_boundary import detect_case_boundary
+from app.services.case_tracking_entry_agent import decide_case_tracking_entry
+from app.services.conversation_mode import (
+    normalize_conversation_mode,
+    normalize_persistence_consent,
+)
 from app.services.conversation_store import (
     ensure_storage_schema,
     get_conversation_for_user,
     list_recent_conversation_messages,
+    update_conversation_mode_state,
 )
 from app.services.graph_extractor import format_graph_memory
 
@@ -30,6 +35,7 @@ class DialogRequest(BaseModel):
     force_current_case: bool = False
     is_precise_mode: bool = False
     proactive_graph_mode: bool = True
+    mode_consent_enabled: bool = False
 
 
 class LocalModelToggleRequest(BaseModel):
@@ -64,24 +70,62 @@ async def process_dialog(
             if (item.content or "").strip()
         )
         current_graph_summary = (conversation.case_summary or "").strip() or await format_graph_memory(conversation.id)
+        boundary = "SAME_CASE"
 
-        if not request.force_current_case:
-            boundary = await detect_case_boundary(
-                current_graph_summary=current_graph_summary,
-                recent_history=recent_history,
-                user_input=clean_input,
+        current_mode = normalize_conversation_mode(getattr(conversation, "conversation_mode", None))
+        conversation_dossier_id = getattr(conversation, "dossier_id", None)
+        has_bound_dossier = isinstance(conversation_dossier_id, int) and conversation_dossier_id > 0
+        if request.mode_consent_enabled:
+            persistence_consent = normalize_persistence_consent(
+                getattr(conversation, "persistence_consent", None)
             )
-            if boundary == "NEW_CASE":
+            case_tracking_decision = await decide_case_tracking_entry(
+                message_text=clean_input,
+                conversation_mode=current_mode,
+                dossier_id=conversation_dossier_id,
+                recent_messages=recent_messages,
+                current_conversation_graph=current_graph_summary,
+                case_summary=conversation.case_summary,
+                persistence_consent=persistence_consent,
+            )
+            detected_mode = str(case_tracking_decision.get("detected_mode") or "UNKNOWN")
+            requires_consent = bool(case_tracking_decision.get("should_prompt"))
+            suggested_mode = "TRACKED_CASE" if requires_consent else None
+            reason = str(case_tracking_decision.get("prompt_reason") or "").strip()
+
+            if detected_mode == "LEGAL_QA" and current_mode == "UNKNOWN":
+                await update_conversation_mode_state(
+                    db,
+                    conversation,
+                    conversation_mode="LEGAL_QA",
+                    persistence_consent=persistence_consent,
+                    mode_reason=reason or "auto_detected_legal_qa",
+                )
+                await db.commit()
+                current_mode = "LEGAL_QA"
+
+            if requires_consent and not has_bound_dossier:
                 return {
                     "status": "needs_confirmation",
-                    "action": "suggest_new_case",
+                    "action": "mode_consent",
                     "user_id": current_user.user_id,
                     "conversation_id": conversation.id,
                     "session_id": conversation.session_id,
-                    "message": (
-                        "发现您似乎在咨询一个全新的法律问题。"
-                        "为了保证案情分析与图谱记忆的准确性，是否为您建立一份新的独立卷宗？"
-                    ),
+                    "case_boundary": boundary,
+                    "detected_mode": detected_mode,
+                    "conversation_mode": current_mode,
+                    "suggested_mode": suggested_mode,
+                    "requires_persistence_consent": True,
+                    "consent_prompt": "我注意到你正在描述一个具体案情。你可以仅在本轮分析，或将它纳入案卷持续跟踪。",
+                    "consent_actions": [
+                        {"label": "仅本轮分析", "value": "temporary_analysis"},
+                        {"label": "进入案卷持续跟踪", "value": "tracked_dossier"},
+                    ],
+                    "tracking_entry_kind": "dossier_selection_required",
+                    "requires_dossier_binding": True,
+                    "has_bound_dossier": False,
+                    "reason": reason,
+                    "case_tracking_decision": case_tracking_decision,
                 }
 
         task = ask_agent_task.apply_async(

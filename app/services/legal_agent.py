@@ -40,6 +40,11 @@ from app.agent.nodes._llm import (
     call_zhipu,
     call_local_vllm,
     call_openai,
+    call_openai_compatible,
+    call_cloud_model_chain,
+    call_cloud_fallback_chain,
+    _cloud_model_targets_for_model,
+    _cloud_fallback_targets_for_model,
     safe_json_load,
     extract_candidate_sources,
     normalize_sources,
@@ -121,6 +126,11 @@ class LegalGraphAgent:
     _call_zhipu = call_zhipu
     _call_local_vllm = call_local_vllm
     _call_openai = call_openai
+    _call_openai_compatible = call_openai_compatible
+    _call_cloud_model_chain = call_cloud_model_chain
+    _call_cloud_fallback_chain = call_cloud_fallback_chain
+    _cloud_model_targets_for_model = _cloud_model_targets_for_model
+    _cloud_fallback_targets_for_model = _cloud_fallback_targets_for_model
     _safe_json_load = safe_json_load
     _extract_candidate_sources = extract_candidate_sources
     _normalize_sources = normalize_sources
@@ -218,6 +228,9 @@ class LegalGraphAgent:
         proactive_graph_mode: bool = True,
         conversation_id: int | None = None,
         saved_case_state: dict | None = None,
+        dossier_context: dict[str, Any] | None = None,
+        dossier_graph_summary: str | None = None,
+        dossier_graph_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         initial_state: AgentState = {
             "user_id": user_id,
@@ -228,6 +241,9 @@ class LegalGraphAgent:
             "proactive_graph_mode": bool(proactive_graph_mode),
             "chat_history": chat_history,
             "case_summary": case_summary,
+            "dossier_context": dossier_context,
+            "dossier_graph_summary": (dossier_graph_summary or "").strip(),
+            "dossier_graph_context": dossier_graph_context,
             "graph_context": graph_memory,
             "graph_memory": graph_memory,
             "historical_reference": "",

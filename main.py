@@ -12,14 +12,17 @@ from redis import Redis
 
 from app.api.auth import router as auth_router
 from app.api.conversations import router as conversations_router
+from app.api.dossiers import router as dossiers_router
 from app.api.dialog import router as dialog_router
 from app.api.feedback import router as feedback_router
 from app.api.graph import router as graph_router
 from app.agent.tools import AGENT_TOOLS
 from app.core.config import settings
+from app.core.llm_provider import LLMProvider, get_llm_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+REQUIRED_LLM_SCENES = ("advisor", "fact_updater", "router", "query_expansion")
 
 
 def build_initial_system_status() -> dict:
@@ -80,27 +83,39 @@ def sync_warmup_celery() -> None:
         client.close()
 
 
+def _provider_has_config(provider: LLMProvider, llm_router) -> bool:
+    if provider in {LLMProvider.GPT_5_4, LLMProvider.GPT_5_1}:
+        if llm_router.openai_api_key:
+            return True
+        fallback_check = getattr(llm_router, "has_openai_fallback_config", None)
+        return bool(fallback_check()) if callable(fallback_check) else False
+    if provider == LLMProvider.ZHIPU:
+        return bool(llm_router.zhipu_api_key)
+    if provider == LLMProvider.LOCAL_VLLM:
+        return bool(llm_router.vllm_base_url)
+    return False
+
+
+def sync_check_primary_llm_config() -> None:
+    llm_router = get_llm_router()
+    missing_scenes: list[str] = []
+
+    for scene in REQUIRED_LLM_SCENES:
+        provider = llm_router.get_provider(scene)
+        if _provider_has_config(provider, llm_router):
+            continue
+        missing_scenes.append(f"{scene}:{provider.value}")
+
+    if missing_scenes:
+        raise RuntimeError(
+            "missing configured LLM providers for scenes: " + ", ".join(missing_scenes)
+        )
+
+
 async def warmup_local_llm() -> None:
     if settings.LLM_MODE.lower() != "real":
         return
-
-    client = AsyncOpenAI(api_key=settings.API_KEY, base_url=settings.BASE_URL)
-    try:
-        await client.chat.completions.create(
-            model=settings.LLM_MODEL_NAME,
-            messages=[
-                {"role": "system", "content": "Warm up the model."},
-                {"role": "user", "content": "ping"},
-            ],
-            temperature=0,
-            max_tokens=1,
-        )
-    finally:
-        close_fn = getattr(client, "close", None)
-        if callable(close_fn):
-            maybe_awaitable = close_fn()
-            if asyncio.iscoroutine(maybe_awaitable):
-                await maybe_awaitable
+    await asyncio.to_thread(sync_check_primary_llm_config)
 
 
 async def run_system_warmup(app: FastAPI) -> None:
@@ -130,7 +145,7 @@ async def run_system_warmup(app: FastAPI) -> None:
             await warmup_local_llm()
             system_status["components"]["llm"] = "connected"
         except Exception as exc:
-            logger.warning("Local LLM warm-up failed: %s", exc)
+            logger.warning("Primary LLM config check failed: %s", exc)
         finally:
             refresh_system_status_flags(system_status)
 
@@ -176,6 +191,7 @@ app.add_middleware(
 
 app.include_router(dialog_router)
 app.include_router(conversations_router)
+app.include_router(dossiers_router)
 app.include_router(feedback_router)
 app.include_router(graph_router)
 app.include_router(auth_router)

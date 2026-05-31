@@ -19,7 +19,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import requests
@@ -153,6 +153,60 @@ class ChatZhipuAI(ChatOpenAI):
         )
 
 
+class CloudProviderChainLLM:
+    """OpenAI-compatible cloud chain: alt GPT -> main GPT -> DeepSeek -> Zhipu."""
+
+    def __init__(
+        self,
+        targets: list[ChatOpenAI],
+        *,
+        validator: Callable[[str], bool] | None = None,
+    ) -> None:
+        if not targets:
+            raise RuntimeError("No cloud LLM provider configured.")
+        self.targets = targets
+        self.validator = validator
+        self.model_name = "cloud-provider-chain"
+        self.openai_api_base = "chain"
+
+    def _validate(self, response: _ChatResponse) -> bool:
+        if self.validator is None:
+            return True
+        return bool(response and self.validator(response.content))
+
+    def invoke(self, messages: list[Any]) -> _ChatResponse:
+        last_error: Exception | None = None
+        for target in self.targets:
+            try:
+                response = target.invoke(messages)
+                if self._validate(response):
+                    logger.info("Cloud provider chain path: %s", target.model_name)
+                    return response
+                logger.warning("Cloud provider chain returned invalid payload: %s", target.model_name)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Cloud provider chain target failed | model=%s error=%s", target.model_name, exc)
+        if last_error:
+            raise last_error
+        raise RuntimeError("Cloud provider chain exhausted.")
+
+    async def ainvoke(self, messages: list[Any]) -> _ChatResponse:
+        last_error: Exception | None = None
+        for target in self.targets:
+            try:
+                response = await target.ainvoke(messages)
+                if self._validate(response):
+                    logger.info("Cloud provider chain path: %s", target.model_name)
+                    return response
+                logger.warning("Cloud provider chain returned invalid payload: %s", target.model_name)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Cloud provider chain target failed | model=%s error=%s", target.model_name, exc)
+        if last_error:
+            raise last_error
+        raise RuntimeError("Cloud provider chain exhausted.")
+
+
 def _extract_expansion_array_payload(content: str) -> str:
     """Strip markdown fences and isolate the first JSON array payload."""
     cleaned = (content or "").strip()
@@ -223,7 +277,7 @@ class QueryExpansionLLM:
     def __init__(
         self,
         local_llm: ChatOpenAI | None,
-        cloud_llm: ChatZhipuAI,
+        cloud_llm: Any,
         *,
         local_timeout: float = 5.0,
     ) -> None:
@@ -301,6 +355,63 @@ def create_cloud_llm(
     )
 
 
+def create_cloud_fallback_llm(
+    primary_model: str = "gpt-5.1",
+    *,
+    temperature: float = 0.1,
+    max_tokens: int = 2048,
+    validator: Callable[[str], bool] | None = None,
+) -> CloudProviderChainLLM:
+    """Create the shared cloud model chain before falling back to Zhipu."""
+    high_quality = primary_model == "gpt-5.4"
+    targets: list[ChatOpenAI] = []
+
+    if settings.ALT_GPT_API_KEY and settings.ALT_GPT_BASE_URL:
+        targets.append(
+            ChatOpenAI(
+                model=settings.ALT_GPT_5_5_MODEL if high_quality else settings.ALT_GPT_5_2_MODEL,
+                api_key=settings.ALT_GPT_API_KEY,
+                base_url=settings.ALT_GPT_BASE_URL,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        )
+
+    if settings.OPENAI_API_KEY and settings.OPENAI_BASE_URL:
+        targets.append(
+            ChatOpenAI(
+                model=primary_model,
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_BASE_URL,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        )
+
+    if settings.DEEPSEEK_API_KEY and settings.DEEPSEEK_BASE_URL:
+        targets.append(
+            ChatOpenAI(
+                model=settings.DEEPSEEK_V4_PRO_MODEL if high_quality else settings.DEEPSEEK_V4_FLASH_MODEL,
+                api_key=settings.DEEPSEEK_API_KEY,
+                base_url=settings.DEEPSEEK_BASE_URL,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        )
+
+    if settings.ZHIPUAI_API_KEY:
+        targets.append(
+            ChatZhipuAI(
+                model="glm-4-flash",
+                api_key=settings.ZHIPUAI_API_KEY,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        )
+
+    return CloudProviderChainLLM(targets, validator=validator)
+
+
 def create_router_llm() -> ChatOpenAI | ChatZhipuAI:
     """Router LLM — prefer local vLLM, otherwise use cloud."""
     if settings.LOCAL_LLM_ENABLED:
@@ -335,7 +446,12 @@ def create_query_expansion_llm() -> QueryExpansionLLM:
                 exc,
             )
 
-    cloud_llm = create_cloud_llm(temperature=0.3, max_tokens=512)
+    cloud_llm = create_cloud_fallback_llm(
+        primary_model="gpt-5.1",
+        temperature=0.3,
+        max_tokens=512,
+        validator=is_valid_expansion,
+    )
     if local_llm is None:
         logger.info("Query expansion LLM -> cloud-only fallback")
     return QueryExpansionLLM(

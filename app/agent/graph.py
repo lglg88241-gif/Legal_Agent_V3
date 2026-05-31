@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from langgraph.graph import END, StateGraph
 from typing_extensions import TypedDict
 
+from app.services.case_followup import is_dossier_followup_question
+
 if TYPE_CHECKING:
     from app.services.legal_agent import LegalGraphAgent
 
@@ -20,6 +22,9 @@ class AgentState(TypedDict, total=False):
     proactive_graph_mode: bool
     chat_history: str
     case_summary: str
+    dossier_context: dict[str, Any] | None
+    dossier_graph_summary: str
+    dossier_graph_context: dict[str, Any] | None
     graph_context: str
     graph_memory: str
     historical_reference: str
@@ -49,6 +54,8 @@ def route_after_tool_router(state: AgentState) -> str:
     if route_intent == "OUT_OF_SCOPE":
         return "out_of_scope"
     if route_intent == "CASE_UPDATE":
+        if state.get("dossier_context") and is_dossier_followup_question(state.get("question")):
+            return "vector_researcher"
         return "fact_updater"
     return "vector_researcher"
 
@@ -56,6 +63,10 @@ def route_after_tool_router(state: AgentState) -> str:
 def route_after_vector_researcher(state: AgentState) -> str:
     route_intent = str(state.get("route_intent", "GENERAL_CONSULT")).upper()
     if route_intent == "GENERAL_CONSULT":
+        return "legal_advisor"
+    if route_intent == "CASE_UPDATE" and state.get("dossier_context") and is_dossier_followup_question(
+        state.get("question")
+    ):
         return "legal_advisor"
     return "reflector"
 

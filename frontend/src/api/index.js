@@ -73,14 +73,71 @@ export const submitFeedback = (data) => api.post('/feedback', data)
 
 export const createConversation = (payload = {}) => api.post('/conversations', payload)
 export const getConversations = () => api.get('/conversations')
+export const searchConversations = (keyword, caseType = '') =>
+  api.get('/conversations/search', {
+    params: {
+      keyword: keyword || undefined,
+      case_type: caseType || undefined,
+    },
+  })
 export const updateConversationTitle = (conversationId, title) =>
   api.put(`/conversations/${conversationId}`, { title })
 export const getConversationMessages = (conversationId) =>
   api.get(`/conversations/${conversationId}/messages`)
 export const deleteConversation = (conversationId) =>
   api.delete(`/conversations/${conversationId}`)
+export const getDossiers = () => api.get('/dossiers')
+export const getDossierDetail = (dossierId) => api.get(`/dossiers/${dossierId}`)
+export const getDossierIntelligence = (dossierId, params = {}) =>
+  api.get(`/dossiers/${dossierId}/intelligence`, { params })
+export const confirmDossierPartyNaming = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/intelligence/tasks/party-naming/confirm`, payload)
+export const confirmDossierSelfIdentity = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/intelligence/tasks/self-identity/confirm`, payload)
+export const decideDossierCrossConversationResolution = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/participants/cross-conversation/decide`, payload)
+export const manualMergeDossierCanonicalEntities = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/canonical-entities/manual-merge`, payload)
+export const getDossierParticipants = (dossierId) => api.get(`/dossiers/${dossierId}/participants`)
+export const createDossierParticipant = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/participants`, payload)
+export const updateDossierParticipant = (dossierId, participantId, payload) =>
+  api.patch(`/dossiers/${dossierId}/participants/${participantId}`, payload)
+export const resolveDossierParticipants = (dossierId, payload) =>
+  api.post(`/dossiers/${dossierId}/participants/resolve`, payload)
+export const getDossierParticipantCandidates = (dossierId) =>
+  api.get(`/dossiers/${dossierId}/participant-candidates`)
+export const getDossierGraph = (dossierId) => api.get(`/dossiers/${dossierId}/graph`)
+export const getDossierDisplayGraph = (dossierId) =>
+  api.get(`/dossiers/${dossierId}/display-graph`)
+export const getDossierCoordinationGraph = (dossierId) =>
+  api.get(`/dossiers/${dossierId}/coordination-graph`)
+export const getDossierCanonicalGraph = (dossierId) =>
+  api.get(`/dossiers/${dossierId}/canonical-graph`)
+export const createDossier = (payload) => api.post('/dossiers', payload)
+export const updateDossier = (dossierId, payload) =>
+  api.patch(`/dossiers/${dossierId}`, payload)
+export const updateDossierParticipants = (dossierId, payload) =>
+  api.patch(`/dossiers/${dossierId}/participants`, payload)
+export const generateDossierSummary = (dossierId) =>
+  api.post(`/dossiers/${dossierId}/generate-summary`)
+export const archiveDossier = (dossierId) => api.delete(`/dossiers/${dossierId}`)
+export const hardDeleteDossier = (dossierId) => {
+  if (dossierId == null || dossierId === '') {
+    throw new Error('invalid dossier id')
+  }
+  return api.delete(`/dossiers/hard/${dossierId}`)
+}
+export const attachConversationToDossier = (conversationId, dossierId) =>
+  api.post(`/conversations/${conversationId}/attach-dossier`, { dossier_id: dossierId })
+export const batchDeleteConversations = (conversationIds) =>
+  api.delete('/conversations/batch', {
+    data: { conversation_ids: conversationIds },
+  })
 export const clearConversationMessages = (conversationId) =>
   api.delete(`/conversations/${conversationId}/messages`)
+export const setConversationModeConsent = (conversationId, payload) =>
+  api.post(`/conversations/${conversationId}/mode-consent`, payload)
 export const getConversationSummary = (conversationId) =>
   api.post(`/conversations/${conversationId}/summary`)
 export const getLocalModelStatus = () => api.get('/api/settings/local-model/status')
@@ -94,6 +151,7 @@ export const sendMessage = async (userInput, conversationId, options = {}) => {
     force_current_case: Boolean(options.forceCurrentCase),
     is_precise_mode: Boolean(options.isPreciseMode),
     proactive_graph_mode: options.proactiveGraphMode !== false,
+    mode_consent_enabled: Boolean(options.modeConsentEnabled),
   })
   const taskId = initRes.data.task_id
 
