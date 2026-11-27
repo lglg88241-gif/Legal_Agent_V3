@@ -542,16 +542,17 @@ def build_claim_payload(cs: CaseState) -> PayloadResult:
 
     # --- Illegal dismissal / notice substitution ---
     if cs.illegal_dismissal_compensation > 0:
+        salary_text = str(cs.monthly_salary).removesuffix(".0")
         calculation_lines.append(
-            f"违法辞退赔偿金（2N）：月工资基数为 {cs.monthly_salary:.0f} 元，"
+            f"违法辞退赔偿金（2N）：月工资基数为 {salary_text} 元，"
             f"N=工作年限（不满半年按0.5，半年以上不满1年按1计），"
-            f"即月工资 {cs.monthly_salary:.0f} 元 × N值 {cs.n_value} × 2"
+            f"即月工资 {salary_text} 元 × N值 {cs.n_value} × 2"
             f" = 约 {cs.illegal_dismissal_compensation:.0f} 元。"
             "依据《劳动合同法》第八十七条，用人单位违法解除劳动合同的，应按经济补偿标准的二倍支付赔偿金。"
         )
         steps.append(CalculationStep(
             item="违法辞退赔偿金",
-            formula=f"月工资 {cs.monthly_salary:.0f} × N值 {cs.n_value} × 2",
+            formula=f"月工资 {salary_text} × N值 {cs.n_value} × 2",
             result=cs.illegal_dismissal_compensation,
             cap_rule="N按工作年限计算，满一年算一个月，六个月以上不满一年按一年算，不满六个月按半个月算",
             legal_basis="《劳动合同法》第八十七条",
