@@ -38,6 +38,15 @@ def test_violation_dismissal_4_3年() -> None:
     assert any("N值 4.5" in step.formula for step in result.trace.steps if step.item == "违法辞退赔偿金")
 
 
+def test_违法辞退公式保留月薪角分() -> None:
+    cs = CaseState(monthly_salary=15000.25, service_years=3.0, is_illegal_dismissal=True)
+    result = build_claim_payload(cs)
+    step = next(step for step in result.trace.steps if step.item == "违法辞退赔偿金")
+
+    assert "月工资 15000.25" in step.formula
+    assert step.result == 90001.5
+
+
 def test_violation_dismissal_无30天通知() -> None:
     cs = CaseState(
         monthly_salary=12000.0,
